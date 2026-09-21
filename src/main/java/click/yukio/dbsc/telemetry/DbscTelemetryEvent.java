@@ -5,10 +5,13 @@ import click.yukio.dbsc.core.ProtectionTier;
 /**
  * Base for the DBSC telemetry events (spec 08).
  *
- * @param sessionId the session the event concerns; may be {@code null} when the
- *                  session could not be resolved
- * @param tier      the session's tier at the time of the event
- * @param timestamp event time in epoch milliseconds
+ * <p>Every event carries the session it concerns, the session's tier at the time,
+ * and the event time. {@code sessionId} may be {@code null} when the session could
+ * not be resolved — a verification failure against an unknown session is still worth
+ * reporting.
+ *
+ * <p>Implementations are records, so the accessors below are their components and
+ * each record documents its own parameters.
  */
 public sealed interface DbscTelemetryEvent
         permits DbscTelemetryEvent.Registration, DbscTelemetryEvent.Refresh,

@@ -35,6 +35,15 @@ the session demoted to `none` the moment someone tries to refresh with it.
 **Test status: 112 tests passing**, including all 8 conformance vectors from
 `dbsc-toolkit/spec/vectors` replayed through the real engine.
 
+## Requirements
+
+The library is compiled and released at **Java 25** (`--release 25`), so its class
+files load on JDK 25 and later **only**. Adopters on 21 or 17 will see
+`UnsupportedClassVersionError` rather than a failed resolution — worth checking before
+you add the dependency.
+
+Spring Boot 3.5.x and Spring Security 6.5.x are the tested versions.
+
 ## Getting Started
 
 ### 1. Add the dependency
@@ -153,9 +162,6 @@ public class OidcSecurityConfig {
                         .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) -> {
                     var user = (OidcUser) auth.getPrincipal();
-                    // The id must be stable per browser session: the OIDC session
-                    // identifier, not the subject, which is shared across tabs and
-                    // devices. See the note below.
                     dbsc.bind(sessionIdFor(request), user.getSubject(),
                               86_400_000L, request, response);
                     response.sendRedirect("/");
@@ -163,11 +169,38 @@ public class OidcSecurityConfig {
                 .addFilterBefore(guardFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();
     }
+
+    /**
+     * The session id DBSC binds to. It must be stable for the browser session
+     * across requests, because every later proof is checked against the session
+     * record created here.
+     *
+     * <p>The OIDC subject is NOT suitable: it identifies the user, not the
+     * browser, so it is shared across tabs, devices and concurrent logins. Binding
+     * to it would make two browsers share one DBSC session and let either one
+     * satisfy the other's proofs.
+     *
+     * <p>Use whatever your application already treats as the session identifier.
+     * With an HttpSession, that is its id:
+     */
+    private static String sessionIdFor(HttpServletRequest request) {
+        return request.getSession().getId();
+    }
 }
 ```
 
 Because OIDC already redirects after login, `bind()` in the success handler is enough —
 there is no separate login route to decorate, unlike the password example below.
+
+`request.getSession().getId()` is the right answer whenever the app keeps an
+`HttpSession`. Note the ordering: `bind()` reads the session, so the session must already
+exist at that point. In a success handler it does, because authentication created it.
+
+If your app is **stateless** and has no `HttpSession`, do not invent one just for this —
+bind to whatever opaque id you already mint per client, as in the stateless example
+below. What matters is that the id is **per browser session** and **reused across every
+subsequent request from that session**, since the DBSC record is looked up by it on
+each refresh and each guarded request.
 
 #### Form login (password)
 
@@ -233,10 +266,10 @@ FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
 }
 ```
 
-### 4. Bind, guard, terminate
+### 3. Bind, guard, terminate
 
-See [Wiring it into your own app](#wiring-it-into-your-own-app) below for the three
-lifetime calls. The short version:
+Now the three lifetime calls. Details and the reasoning are in
+[Wiring it into your own app](#wiring-it-into-your-own-app); the short version:
 
 - **`dbsc.bind(sessionId, userId, ttlMillis, request, response)`** — at the end of your
   login handler. Binding is idempotent per session; the browser does the rest of the
@@ -282,11 +315,6 @@ The web tests run against `DbscTestHostApplication` in `src/test` — a miniatur
 host app that stands in for yours: a login route that calls `bind()`, a `whoami`
 route, a guarded `payment` route, and a logout route. Read it first when wiring
 the library up; it is the smallest complete integration.
-
-Note on the build: this repo was authored in an environment where `~/.m2` is not
-writable, so the local instructions used a project-local Maven repository via
-`-Dmaven.repo.local=.m2repo`. That directory is gitignored; **drop the flag** unless
-you have the same constraint.
 
 ## What is not in this repository
 
@@ -348,8 +376,8 @@ public void logout(HttpServletRequest request, HttpServletResponse response) {
 
 ### 3. Guard the routes that matter
 
-A guarded route requires a `bound` key plus a fresh `X-Dbsc-Bound-Proof`.
-Declare the paths; the guard filter is wired into the security chain for you:
+A guarded route requires a `bound` key plus a fresh `X-Dbsc-Bound-Proof`. Declare the
+paths:
 
 ```java
 @Bean
@@ -361,6 +389,11 @@ GuardedRoute transferRoute() {
 `withBody` binds the request body into the proof, so a captured proof cannot be
 replayed against a modified payload. Use `withoutBody` for routes with no
 meaningful body.
+
+Declaring the route gives the guard filter something to enforce; **the filter itself
+still has to be in the chain serving that path**, which is the `appChain` bean in step
+2. Both halves are required, and a `GuardedRoute` with no guard filter in the matching
+chain enforces nothing.
 
 **Nothing is guarded by default.** Adopting DBSC never silently changes the
 behaviour of existing endpoints; guarding is opt-in per path.
@@ -401,42 +434,32 @@ The reasons for filters rather than controllers:
 
 ### Using your own `SecurityFilterChain`
 
-That is the only way to use the library — see
-[Getting Started](#getting-started) for the full two-chain block. The essential lines:
+That is the only way to use the library — [Getting Started](#getting-started) is the
+full worked example, and the two chains there are the shape to copy. This section only
+adds the reasoning behind the filter placement.
 
-```java
-http
-    .authorizeHttpRequests(auth -> auth
-        // Protocol routes: reached by the browser unauthenticated.
-        .requestMatchers("/dbsc/**", "/dbsc-bound/**").permitAll()
-        .requestMatchers("/api/transfer").authenticated())
-    // Must run before authentication, so a DBSC 403 is never replaced by a 401.
-    .addFilterBefore(dbscFilter, UsernamePasswordAuthenticationFilter.class)
-    // Layers on top of authorization; a valid proof is never a substitute for it.
-    .addFilterBefore(dbscProofGuardFilter, UsernamePasswordAuthenticationFilter.class);
-```
+Two placement rules, and what breaks without them:
 
-Note the protocol paths need their own chain with **CSRF disabled**; this snippet only
-shows the filter placement within a chain that already serves them.
+- **`dbscFilter` goes in the chain that owns the protocol paths, before
+authentication.** Security would otherwise answer 401 there, and Chromium treats 401
+on the refresh route as fatal.
+- **`dbscProofGuardFilter` goes in your application chain, before authentication.**
+It layers on top of authorization: a valid proof is never a substitute for being
+authenticated.
 
-Keep both filters as **separate bean instances per chain.** `OncePerRequestFilter`
-records that it has run in a request attribute, so registering the *same*
-instance in two chains makes the second chain silently skip it.
+One instance per chain. `OncePerRequestFilter` records that it has run in a request
+attribute, so registering the *same* instance in two chains makes the second chain
+silently skip it.
 
-If you do not use Spring Security at all, register them as plain servlet filters
-instead — nothing in either filter is Security-specific:
+And the detail that is easy to miss: **the protocol paths must be served by a chain with
+CSRF disabled.** The browser's registration POST carries no CSRF token, so a chain that
+applies CSRF to `/dbsc/**` rejects it before `DbscFilter` ever runs.
 
-```java
-@Bean
-FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
-    var registration = new FilterRegistrationBean<>(filter);
-    registration.addUrlPatterns("/dbsc/*", "/dbsc-bound/*", "/.well-known/*");
-    registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
-    return registration;
-}
-```
+If you do not use Spring Security at all, see
+[No Spring Security at all](#no-spring-security-at-all) — the filters are not Security
+components and register as plain servlet filters.
 
-### 4. Replace the collaborators you have opinions about
+### Replace the collaborators you have opinions about
 
 `DbscAutoConfiguration` backs off with `@ConditionalOnMissingBean` on every
 bean, so defining your own replaces the default. The ones most worth replacing:
@@ -486,8 +509,7 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 ### Storage
 
 With a `DataSource` on the classpath, sessions, keys, challenges and replay
-entries all live in the database (`dbsc.storage: jdbc`). The schema is created on
-startup, so a fresh database needs no migration.
+entries all live in the database (`dbsc.storage: jdbc`).
 
 For tests and local dev, `dbsc.storage: memory` swaps in heap-backed adapters.
 **Not for production**: every restart breaks live sessions, because the browser
@@ -500,6 +522,45 @@ dbsc:
   cookie-scope: site
   cookie-domain: example.com
 ```
+
+#### Schema
+
+The tables are created on startup by `JdbcStorageAdapter.initialize()` and
+`JdbcProofReplayCache.initialize()`, which issue `CREATE TABLE IF NOT EXISTS` and are
+safe to run on every boot. A fresh database needs no setup.
+
+That default is convenient but it means the application's database user needs **DDL
+rights at runtime**. Many production setups do not grant that, and some run schema
+changes through a migration tool so that every change is reviewed and versioned. Both
+are reasonable; pick one:
+
+**Default — let the library create the schema.** No config. The runtime user needs
+`CREATE TABLE` / `CREATE INDEX`.
+
+**Managed — let your migration tool own it.** The same DDL is shipped as Flyway
+migrations under [`src/main/resources/db/migration/`](./src/main/resources/db/migration):
+
+| Migration | Contents |
+|---|---|
+| `V1__dbsc_storage.sql` | `dbsc_sessions`, `dbsc_bound_keys`, `dbsc_challenges` |
+| `V2__dbsc_proof_replay.sql` | `dbsc_proof_replay` |
+
+The DDL is **identical** to what `initialize()` issues, and both are idempotent, so
+there is no conflict either way: applying the migrations and then starting the app
+leaves the schema unchanged. That also means you can adopt migrations on an existing
+deployment without a baseline step.
+
+The SQL is deliberately portable — no vendor-specific types, no sequences — so the
+same files work on PostgreSQL, MySQL, MariaDB, H2 and SQL Server. Timestamps are
+`BIGINT` epoch milliseconds throughout, matching how the protocol carries them.
+
+`V2` is a separate migration because `dbsc_proof_replay` belongs to a different
+collaborator (`ProofReplayCache`) that an application may replace or omit. Keeping it
+out of `V1` means the sessions schema does not depend on a component you might not use.
+
+If you would rather not carry the migrations, the two `initialize()` methods are also
+safe to call yourself from a schema-management hook — the DDL statements are quoted at
+the top of `JdbcStorageAdapter` and `JdbcProofReplayCache`.
 
 ## Things worth knowing
 

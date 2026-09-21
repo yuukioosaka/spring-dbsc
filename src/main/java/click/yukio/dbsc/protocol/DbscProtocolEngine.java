@@ -100,7 +100,7 @@ public class DbscProtocolEngine {
      * Demotion-on-failure is what makes a replayed cookie from another device
      * lose the session — it is the security mechanism, not a side effect.
      *
-     * @throws DbscVerificationFailure with {@code SIGNATURE_INVALID}, carrying
+     * @throws DbscException with {@code SIGNATURE_INVALID}, carrying
      *         whether the bound key still existed (the {@code session_stolen}
      *         signal)
      */

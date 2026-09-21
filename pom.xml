@@ -13,7 +13,7 @@
 
   <groupId>click.yukio.dbsc</groupId>
   <artifactId>spring-dbsc</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>0.1.0</version>
   <name>spring-dbsc</name>
   <description>Embeddable Spring Boot implementation of Device Bound Session Credentials (DBSC Toolkit Protocol 1.0)</description>
   <url>https://github.com/yuukioosaka/spring-dbsc</url>
@@ -50,9 +50,20 @@
   -->
 
   <properties>
+    <!--
+      Built and compiled for Java 25, deliberately. Central accepts a bytecode level
+      of 8+, so this is a distribution choice rather than a requirement: these class
+      files load on JDK 25 and later only. Adopters on 21 or 17 will see
+      UnsupportedClassVersionError rather than a failed resolution, so it is worth
+      stating plainly in the README, which it is.
+    -->
     <java.version>25</java.version>
     <maven.compiler.release>25</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <maven-gpg-plugin.version>3.2.7</maven-gpg-plugin.version>
+    <central-publishing-maven-plugin.version>0.7.0</central-publishing-maven-plugin.version>
   </properties>
 
   <dependencies>
@@ -177,6 +188,112 @@
                      library's defaults, which are also named application.yaml. -->
                 <argument>--spring.profiles.active=demo</argument>
               </arguments>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <!--
+      Everything Maven Central requires, kept in a profile so the ordinary build
+      stays fast and needs no signing key.
+
+        mvn -s .m2settings/settings.xml -P release deploy
+
+      Central rejects a deployment that is missing any of: a sources JAR, a javadoc
+      JAR, a .asc signature for every file, or complete POM metadata (name,
+      description, url, license, developers, scm) — the last of which is declared at
+      the top level of this POM.
+    -->
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <!--
+            Required: consumers expect to be able to read the source of what they
+            depend on, and Central enforces it.
+          -->
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <goals>
+                  <goal>jar-no-fork</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                <goals>
+                  <goal>jar</goal>
+                </goals>
+              </execution>
+            </executions>
+            <configuration>
+              <!--
+                Not silent: a javadoc error fails the release. Central requires the
+                JAR to exist, and a JAR full of complaints is worse than no JAR.
+              -->
+              <doclint>all,-missing</doclint>
+              <quiet>true</quiet>
+            </configuration>
+          </plugin>
+
+          <!--
+            Every artifact must be GPG-signed. The key is selected by the usual
+            gpg.defaultKeyring/gpg.keyname settings, or MAVEN_GPG_PASSPHRASE in CI.
+          -->
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>${maven-gpg-plugin.version}</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>sign</goal>
+                </goals>
+              </execution>
+            </executions>
+            <configuration>
+              <!-- Pin the digest: the default SHA-1 signatures are deprecated. -->
+              <keyarg>--digest-algo</keyarg>
+              <keyarg-name>SHA512</keyarg-name>
+              <gpgArguments>
+                <arg>--pinentry-mode</arg>
+                <arg>loopback</arg>
+              </gpgArguments>
+            </configuration>
+          </plugin>
+
+          <!--
+            Uploads a bundle of the whole deployment to the Central Portal, which
+            validates it and then either publishes it or reports what is wrong. The
+            "central" server id matches .m2settings/settings.xml.
+          -->
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>${central-publishing-maven-plugin.version}</version>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <!--
+                Kept manual on purpose: a release is permanent and cannot be
+                deleted, so the last step should be a human decision. Set to true to
+                let the upload publish itself once validation passes.
+              -->
+              <autoPublish>false</autoPublish>
+              <waitUntil>validated</waitUntil>
             </configuration>
           </plugin>
         </plugins>

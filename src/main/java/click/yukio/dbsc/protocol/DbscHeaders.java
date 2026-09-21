@@ -3,9 +3,9 @@ package click.yukio.dbsc.protocol;
 /**
  * The DBSC header names, current and legacy (spec 02).
  *
- * <p>Inbound matching MUST be case-insensitive; Spring's {@code HttpHeaders} is
- * already case-insensitive, and {@link Http} centralizes the reads so no call
- * site has to remember the fallback to the legacy names.
+ * <p>Inbound matching MUST be case-insensitive. Spring's {@code HttpHeaders} is
+ * already case-insensitive, and this class centralises the reads so no call site
+ * has to remember the fallback to the legacy names.
  */
 public final class DbscHeaders {
 

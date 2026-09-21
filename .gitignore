@@ -5,6 +5,11 @@ target/
 # development sandbox this was authored in; CI uses the standard ~/.m2.
 .m2repo/
 
+# Local Maven settings holding the Central Portal token. Never commit this: it is a
+# publishing credential for the whole namespace. The canonical location is
+# ~/.m2/settings.xml; this path exists only because ~/.m2 is not writable here.
+.m2settings/
+
 # H2 files written by the demo at runtime
 data/
 *.mv.db
