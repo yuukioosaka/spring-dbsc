@@ -81,10 +81,10 @@ class ConformanceVectorTest {
         assertFalse(parsed.jwk().containsKey("d"));
         assertFalse(parsed.jwk().containsKey("key_ops"));
 
-        Map<String, Object> expectedBoundKey = TestVectors.object(vector, "expectedStoredBoundKey");
-        assertEquals(TestVectors.string(expectedBoundKey, "sessionId"),
+        Map<String, Object> expectedDeviceKey = TestVectors.object(vector, "expectedStoredDeviceKey");
+        assertEquals(TestVectors.string(expectedDeviceKey, "sessionId"),
                 TestVectors.string(vector, "sessionId"));
-        assertEquals("ES256", TestVectors.string(expectedBoundKey, "algorithm"));
+        assertEquals("ES256", TestVectors.string(expectedDeviceKey, "algorithm"));
 
         Map<String, Object> expectedSession = TestVectors.object(vector, "expectedSessionAfter");
         assertEquals("dbsc", TestVectors.string(expectedSession, "tier"),

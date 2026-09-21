@@ -37,7 +37,7 @@ public class TelemetryPublisher {
         if (event instanceof DbscTelemetryEvent.SessionStolen stolen) {
             log.warn(
                     "DBSC session_stolen: sessionId={} tier={} ip={} — a refresh signature failed "
-                            + "while a bound key still exists; a stolen cookie may have been replayed",
+                            + "while a device key still exists; a stolen cookie may have been replayed",
                     stolen.sessionId(), stolen.tier().wireValue(), stolen.ip());
         } else if (event instanceof DbscTelemetryEvent.VerificationFailure failure) {
             log.warn(

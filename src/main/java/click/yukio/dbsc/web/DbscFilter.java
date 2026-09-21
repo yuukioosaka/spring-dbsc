@@ -55,8 +55,8 @@ public class DbscFilter extends OncePerRequestFilter {
         this.dbsc = dbsc;
         this.properties = properties;
         this.routes = List.of(
-                new Route("POST", properties.getRegistrationPath(), this::nativeRegistration),
-                new Route("POST", properties.getRefreshPath(), this::nativeRefresh),
+                new Route("POST", properties.getRegistrationPath(), this::registration),
+                new Route("POST", properties.getRefreshPath(), this::refresh),
                 new Route("GET", "/.well-known/device-bound-sessions", this::wellKnownDocument));
     }
 
@@ -112,16 +112,16 @@ public class DbscFilter extends OncePerRequestFilter {
     }
 
     // ------------------------------------------------------------------
-    // Native protocol (spec 02)
+    // Protocol routes (spec 02)
     // ------------------------------------------------------------------
 
-    private void nativeRegistration(HttpServletRequest request, HttpServletResponse response)
+    private void registration(HttpServletRequest request, HttpServletResponse response)
             throws IOException {
         Map<String, Object> config = dbsc.handleRegistration(request, response);
         writeJson(response, HttpStatus.OK, config);
     }
 
-    private void nativeRefresh(HttpServletRequest request, HttpServletResponse response)
+    private void refresh(HttpServletRequest request, HttpServletResponse response)
             throws IOException {
         Map<String, Object> config = dbsc.handleRefresh(request, response);
         if (config == null) {

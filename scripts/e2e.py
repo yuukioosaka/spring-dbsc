@@ -350,7 +350,7 @@ def main():
     check("GET /app/whoami -> 200", status == 200, f"got {status}")
     who = json.loads(text) if status == 200 else {}
     check("tier is dbsc after native registration", who.get("tier") == "dbsc", str(who))
-    check("nativeKey true", who.get("nativeKey") is True, str(who))
+    check("deviceKey true", who.get("deviceKey") is True, str(who))
     check("httpSessionId == dbscSessionId (coupled)",
           who.get("httpSessionId") == who.get("dbscSessionId") and who.get("coupled") is True,
           str(who))
@@ -535,8 +535,8 @@ def main():
                 "Content-Type": "application/json",
                 "Sec-Secure-Session-Id": c_sid,
                 "Secure-Session-Response": refresh_jws(Key(), c_ch)})
-        check("refresh before registering a key -> KEY_NOT_FOUND_NATIVE",
-              "KEY_NOT_FOUND_NATIVE" in text, f"{status} {text[:160]}")
+        check("refresh before registering a key -> KEY_NOT_FOUND",
+              "KEY_NOT_FOUND" in text, f"{status} {text[:160]}")
 
     # ------------------------------------------------- C. already-registered
     print("\n-- C. a second registration of the same kind is refused --")
@@ -581,8 +581,8 @@ def main():
     # that registered correctly is dbsc, not some resurrected bound tier.
     status, _, text = request(e2, "GET", "/app/whoami")
     who2 = json.loads(text)
-    check("whoami reports nativeKey true and a tier of dbsc",
-          who2.get("nativeKey") is True and who2.get("tier") == "dbsc", str(who2))
+    check("whoami reports deviceKey true and a tier of dbsc",
+          who2.get("deviceKey") is True and who2.get("tier") == "dbsc", str(who2))
     check("the bound tier is never produced",
           who2.get("tier") not in ("bound", None), str(who2))
 

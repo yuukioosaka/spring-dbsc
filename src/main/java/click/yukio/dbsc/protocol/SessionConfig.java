@@ -78,16 +78,4 @@ public final class SessionConfig {
         config.put("continue", false);
         return config;
     }
-
-    /**
-     * Renders the bound protocol's registration/refresh response body (spec 03).
-     */
-    public static Map<String, Object> boundResponse(
-            String sessionId, String refreshUrl, String tier) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("session_identifier", sessionId);
-        body.put("refresh_url", refreshUrl);
-        body.put("tier", tier);
-        return body;
-    }
 }

@@ -9,10 +9,10 @@ check being silently relaxed.
 import re, sys
 
 # Not reachable from the wire, so the E2E suite cannot and should not observe them:
-#   KEY_NOT_FOUND_NATIVE is superseded on the HTTP path by SESSION_NOT_FOUND: a
+#   KEY_NOT_FOUND is superseded on the HTTP path by SESSION_NOT_FOUND: a
 #   session with no key is indistinguishable from a session that was never
 #   registered, and reporting the difference would leak which sessions exist.
-UNREACHABLE = {"KEY_NOT_FOUND_NATIVE"}
+UNREACHABLE = {"KEY_NOT_FOUND"}
 
 codes = []
 for line in open("src/main/java/click/yukio/dbsc/core/DbscErrorCode.java"):

@@ -12,13 +12,13 @@ import java.util.Objects;
  * @param algorithm {@code ES256} or {@code RS256}
  * @param createdAt registration time (ms)
  */
-public record BoundKey(
+public record DeviceKey(
         String sessionId,
         Map<String, Object> jwk,
         String algorithm,
         long createdAt) {
 
-    public BoundKey {
+    public DeviceKey {
         Objects.requireNonNull(sessionId, "sessionId");
         Objects.requireNonNull(jwk, "jwk");
         Objects.requireNonNull(algorithm, "algorithm");
@@ -26,11 +26,11 @@ public record BoundKey(
     }
 
     /**
-     * Redacts key material so a {@code BoundKey} can be logged safely.
+     * Redacts key material so a {@code DeviceKey} can be logged safely.
      */
     @Override
     public String toString() {
-        return "BoundKey[sessionId=" + sessionId
+        return "DeviceKey[sessionId=" + sessionId
                 + ", algorithm=" + algorithm
                 + ", jwk=<redacted>"
                 + ", createdAt=" + createdAt + "]";

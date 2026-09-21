@@ -49,7 +49,7 @@ cannot produce a refresh signature, and the browser cannot be made to produce on
 for them. Three properties of the implementation carry it.
 
 **A session's key is the session's key.** The key is stored once per `sessionId`
-(`BoundKey` has no other identity — re-registering replaces it), and registration
+(`DeviceKey` has no other identity — re-registering replaces it), and registration
 is refused outright with `SESSION_ALREADY_REGISTERED` when a key is already
 present. There is no second, weaker key type and no path by which a
 script-readable credential can stand in for a hardware one.
@@ -604,7 +604,7 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `cookie-domain` | — | e.g. `example.com`; required for `site` scope |
 | `registration-path` | `/dbsc/registration` | what the registration header advertises |
 | `refresh-path` | `/dbsc/refresh` | also the `refresh_url` in the JSON config |
-| `bound-cookie-ttl` | `10m` | lifetime of the binding cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
+| `binding-cookie-ttl` | `10m` | lifetime of the binding cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
 | `registration-cookie-ttl` | `24h` | lifetime of the pre-registration cookie carrying the session id |
 | `challenge-ttl` | `5m` | lifetime of a challenge JTI |
 | `refresh-grace` | `30s` | softens the freshness poll across a refresh |
@@ -653,7 +653,7 @@ The DDL is shipped for exactly that, at
 | Table | Contents |
 |---|---|
 | `dbsc_sessions` | one row per bound session (`id` PK, `user_id`, `tier`, timestamps) |
-| `dbsc_bound_keys` | the registered hardware key it holds — `session_id` PK, so **one key per session** |
+| `dbsc_device_keys` | the registered hardware key it holds — `session_id` PK, so **one key per session** |
 | `dbsc_challenges` | outstanding JTIs, with the `consumed` flag that makes consumption atomic |
 
 The file is a plain `CREATE TABLE IF NOT EXISTS` migration: drop it into your

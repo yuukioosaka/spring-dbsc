@@ -1,6 +1,6 @@
 package click.yukio.dbsc.storage;
 
-import click.yukio.dbsc.core.BoundKey;
+import click.yukio.dbsc.core.DeviceKey;
 import click.yukio.dbsc.core.Challenge;
 import click.yukio.dbsc.core.Json;
 import click.yukio.dbsc.core.Session;
@@ -20,8 +20,8 @@ import java.util.Optional;
  * Durable JDBC-backed storage (spec 06).
  *
  * <p>Persistence MUST be durable for any deployment that can restart: a store
- * that loses bound keys breaks live sessions, because the browser still holds a
- * binding cookie, refresh fails with {@code KEY_NOT_FOUND_NATIVE}, and the
+ * that loses device keys breaks live sessions, because the browser still holds a
+ * binding cookie, refresh fails with {@code KEY_NOT_FOUND}, and the
  * browser loops registration.
  *
  * <p>The atomicity requirement is met by
@@ -54,7 +54,7 @@ public class JdbcStorageAdapter implements StorageAdapter {
                     """);
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS dbsc_sessions_user_idx ON dbsc_sessions (user_id)");
             statement.executeUpdate("""
-                    CREATE TABLE IF NOT EXISTS dbsc_bound_keys (
+                    CREATE TABLE IF NOT EXISTS dbsc_device_keys (
                         session_id VARCHAR(255) PRIMARY KEY,
                         jwk_json   TEXT         NOT NULL,
                         algorithm  VARCHAR(16)  NOT NULL,
@@ -106,26 +106,26 @@ public class JdbcStorageAdapter implements StorageAdapter {
     @Override
     public void deleteSession(String id) {
         update("DELETE FROM dbsc_challenges WHERE session_id = ?", s -> s.setString(1, id));
-        update("DELETE FROM dbsc_bound_keys WHERE session_id = ?", s -> s.setString(1, id));
+        update("DELETE FROM dbsc_device_keys WHERE session_id = ?", s -> s.setString(1, id));
         update("DELETE FROM dbsc_sessions WHERE id = ?", s -> s.setString(1, id));
     }
 
     // ---- Bound keys ----
 
     @Override
-    public Optional<BoundKey> getBoundKey(String sessionId) {
+    public Optional<DeviceKey> getDeviceKey(String sessionId) {
         String sql = "SELECT session_id, jwk_json, algorithm, created_at "
-                + "FROM dbsc_bound_keys WHERE session_id = ?";
+                + "FROM dbsc_device_keys WHERE session_id = ?";
         return StorageSupport.optional(queryOne(
                 sql,
                 statement -> statement.setString(1, sessionId),
-                this::readBoundKey));
+                this::readDeviceKey));
     }
 
     @Override
-    public void setBoundKey(BoundKey key) {
+    public void setDeviceKey(DeviceKey key) {
         String sql = """
-                MERGE INTO dbsc_bound_keys
+                MERGE INTO dbsc_device_keys
                     (session_id, jwk_json, algorithm, created_at)
                 KEY (session_id)
                 VALUES (?, ?, ?, ?)
@@ -139,8 +139,8 @@ public class JdbcStorageAdapter implements StorageAdapter {
     }
 
     @Override
-    public void deleteBoundKey(String sessionId) {
-        update("DELETE FROM dbsc_bound_keys WHERE session_id = ?", statement ->
+    public void deleteDeviceKey(String sessionId) {
+        update("DELETE FROM dbsc_device_keys WHERE session_id = ?", statement ->
                 statement.setString(1, sessionId));
     }
 
@@ -207,11 +207,11 @@ public class JdbcStorageAdapter implements StorageAdapter {
                 rs.getLong("last_refresh_at"));
     }
 
-    private BoundKey readBoundKey(ResultSet rs) throws SQLException {
+    private DeviceKey readDeviceKey(ResultSet rs) throws SQLException {
         String sessionId = rs.getString("session_id");
         String jwkJson = rs.getString("jwk_json");
         Map<String, Object> jwk = jwkJson == null ? null : Json.tryParseObject(jwkJson);
-        return new BoundKey(
+        return new DeviceKey(
                 sessionId,
                 StorageSupport.requireJwk(jwk, sessionId),
                 rs.getString("algorithm"),

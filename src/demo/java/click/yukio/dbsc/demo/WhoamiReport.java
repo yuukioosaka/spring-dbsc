@@ -17,7 +17,7 @@ import java.util.Optional;
  * <ul>
  *   <li>{@code tier} — what the server enforces <em>right now</em>. This is the
  *       one that decides whether guarded routes open.</li>
- *   <li>{@code nativeKey} — whether the browser registered a hardware-backed key
+ *   <li>{@code deviceKey} — whether the browser registered a hardware-backed key
  *       (Chromium 145+ on a platform with a TPM/Secure Enclave).</li>
  *   <li>{@code skippedReason} — why the browser declined, e.g. an unsupported
  *       platform or a profile without the hardware key facility. It arrives in
@@ -35,7 +35,7 @@ record WhoamiReport(
         String dbscSessionId,
         String userId,
         String tier,
-        boolean nativeKey,
+        boolean deviceKey,
         String skippedReason) {
 
     /** Builds the report for a request; never returns {@code null}. */
@@ -55,7 +55,7 @@ record WhoamiReport(
                 session.id(),
                 session.userId(),
                 dbsc.tierFor(session.id()).wireValue(),
-                dbsc.hasNativeKey(session.id()),
+                dbsc.hasDeviceKey(session.id()),
                 skippedReason(request));
     }
 
@@ -66,7 +66,7 @@ record WhoamiReport(
         map.put("dbscSessionId", dbscSessionId);
         map.put("userId", userId);
         map.put("tier", tier);
-        map.put("nativeKey", nativeKey);
+        map.put("deviceKey", deviceKey);
         map.put("skippedReason", skippedReason);
         map.put("coupled", java.util.Objects.equals(httpSessionId, dbscSessionId));
         return map;

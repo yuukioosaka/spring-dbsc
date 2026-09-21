@@ -49,7 +49,7 @@ public class DbscProperties {
     /**
      * Grace window applied after the binding cookie expires.
      */
-    private Duration boundCookieTtl = Duration.ofMinutes(10);
+    private Duration bindingCookieTtl = Duration.ofMinutes(10);
 
     /** Lifetime of the pre-registration cookie that carries the session id. */
     private Duration registrationCookieTtl = Duration.ofHours(24);
@@ -173,11 +173,11 @@ public class DbscProperties {
     }
 
     public Duration getBoundCookieTtl() {
-        return boundCookieTtl;
+        return bindingCookieTtl;
     }
 
-    public void setBoundCookieTtl(Duration boundCookieTtl) {
-        this.boundCookieTtl = boundCookieTtl;
+    public void setBoundCookieTtl(Duration bindingCookieTtl) {
+        this.bindingCookieTtl = bindingCookieTtl;
     }
 
     public Duration getRegistrationCookieTtl() {
@@ -222,8 +222,8 @@ public class DbscProperties {
 
     // ---- Derived values, in milliseconds ----
 
-    public long boundCookieTtlMs() {
-        return boundCookieTtl.toMillis();
+    public long bindingCookieTtlMs() {
+        return bindingCookieTtl.toMillis();
     }
 
     public long registrationCookieTtlMs() {

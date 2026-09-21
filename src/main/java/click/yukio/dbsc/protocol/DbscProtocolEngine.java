@@ -1,7 +1,7 @@
 package click.yukio.dbsc.protocol;
 
 import click.yukio.dbsc.config.DbscProperties;
-import click.yukio.dbsc.core.BoundKey;
+import click.yukio.dbsc.core.DeviceKey;
 import click.yukio.dbsc.core.Challenge;
 import click.yukio.dbsc.core.DbscErrorCode;
 import click.yukio.dbsc.core.DbscException;
@@ -55,7 +55,7 @@ public class DbscProtocolEngine {
      * validate the challenge, reject a second registration, atomically consume the
      * challenge, store the key, then move the session to {@code tier: dbsc}.
      */
-    public BoundKey handleRegistration(String sessionId, String responseHeader, String expectedJti) {
+    public DeviceKey handleRegistration(String sessionId, String responseHeader, String expectedJti) {
         if (responseHeader == null || responseHeader.isBlank()) {
             throw DbscException.missingResponseHeader("Secure-Session-Response header is required");
         }
@@ -63,17 +63,17 @@ public class DbscProtocolEngine {
 
         challenges.validate(expectedJti, sessionId);
 
-        if (storage.getBoundKey(sessionId).isPresent()) {
+        if (storage.getDeviceKey(sessionId).isPresent()) {
             throw new DbscException(DbscErrorCode.SESSION_ALREADY_REGISTERED,
-                    "session already has a native bound key; cannot register again");
+                    "session already has a device key; cannot register again");
         }
 
         challenges.consume(expectedJti);
 
         long now = clock.millis();
-        BoundKey key = new BoundKey(sessionId, parsed.jwk(),
+        DeviceKey key = new DeviceKey(sessionId, parsed.jwk(),
                 parsed.algorithm().wireValue(), now);
-        storage.setBoundKey(key);
+        storage.setDeviceKey(key);
 
         storage.getSession(sessionId).ifPresent(session ->
                 setSessionTier(session, ProtectionTier.DBSC, now, "native-registration"));
@@ -96,7 +96,7 @@ public class DbscProtocolEngine {
      * lose the session — it is the security mechanism, not a side effect.
      *
      * @throws DbscException with {@code SIGNATURE_INVALID}, carrying
-     *         whether the bound key still existed (the {@code session_stolen}
+     *         whether the device key still existed (the {@code session_stolen}
      *         signal)
      */
     public RefreshOutcome handleRefresh(String sessionId, String responseHeader, String expectedJti) {
@@ -105,9 +105,9 @@ public class DbscProtocolEngine {
                     "Secure-Session-Response header is required for refresh");
         }
 
-        BoundKey key = storage.getBoundKey(sessionId)
-                .orElseThrow(() -> new DbscException(DbscErrorCode.KEY_NOT_FOUND_NATIVE,
-                        "no native bound key for session"));
+        DeviceKey key = storage.getDeviceKey(sessionId)
+                .orElseThrow(() -> new DbscException(DbscErrorCode.KEY_NOT_FOUND,
+                        "no device key for session"));
 
         Challenge challenge = challenges.validate(expectedJti, sessionId);
 
@@ -132,21 +132,21 @@ public class DbscProtocolEngine {
     }
 
     /**
-     * The shared failure path for native and bound refresh: burn the challenge so
-     * a captured proof cannot be retried, demote the session, and emit the
-     * security signal when the key was still present.
+     * The shared failure path for a refresh whose signature did not verify: burn the
+     * challenge so a captured response cannot be retried, demote the session, and
+     * emit the security signal when the key was still present.
      */
     private void demoteOnFailure(
-            String sessionId, String jti, BoundKey key, DbscException cause) {
+            String sessionId, String jti, DeviceKey key, DbscException cause) {
         challenges.consumeQuietly(jti);
         long now = clock.millis();
         storage.getSession(sessionId).ifPresent(session ->
                 setSessionTier(session, ProtectionTier.NONE, session.lastRefreshAt(),
                         "signature-invalid"));
 
-        boolean boundKeyStillPresent = key != null
-                && storage.getBoundKey(sessionId).isPresent();
-        if (boundKeyStillPresent) {
+        boolean deviceKeyStillPresent = key != null
+                && storage.getDeviceKey(sessionId).isPresent();
+        if (deviceKeyStillPresent) {
             telemetry.publish(new DbscTelemetryEvent.SessionStolen(
                     sessionId, ProtectionTier.NONE, now, null));
         }
@@ -176,12 +176,12 @@ public class DbscProtocolEngine {
         if (session.tier() == ProtectionTier.NONE) {
             return ProtectionTier.NONE;
         }
-        if (storage.getBoundKey(session.id()).isPresent()) {
+        if (storage.getDeviceKey(session.id()).isPresent()) {
             return ProtectionTier.DBSC;
         }
         long now = clock.millis();
         boolean withinGrace = session.lastRefreshAt() > 0
-                && now <= session.lastRefreshAt() + properties.boundCookieTtlMs() + properties.refreshGraceMs();
+                && now <= session.lastRefreshAt() + properties.bindingCookieTtlMs() + properties.refreshGraceMs();
         if (withinGrace && session.tier() != ProtectionTier.NONE) {
             return session.tier();
         }

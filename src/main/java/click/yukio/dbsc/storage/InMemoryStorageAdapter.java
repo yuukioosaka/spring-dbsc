@@ -1,6 +1,6 @@
 package click.yukio.dbsc.storage;
 
-import click.yukio.dbsc.core.BoundKey;
+import click.yukio.dbsc.core.DeviceKey;
 import click.yukio.dbsc.core.Challenge;
 import click.yukio.dbsc.core.Session;
 import click.yukio.dbsc.core.StorageAdapter;
@@ -13,8 +13,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * In-memory storage for development and tests.
  *
  * <p>An in-memory store is acceptable <strong>only</strong> for development:
- * losing bound keys across a restart breaks live sessions, because the browser
- * still holds a binding cookie, refresh fails with {@code KEY_NOT_FOUND_NATIVE},
+ * losing device keys across a restart breaks live sessions, because the browser
+ * still holds a binding cookie, refresh fails with {@code KEY_NOT_FOUND},
  * and the browser loops registration. Use {@link JdbcStorageAdapter} for any
  * deployment that can restart.
  *
@@ -25,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class InMemoryStorageAdapter implements StorageAdapter {
 
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
-    private final Map<KeyId, BoundKey> boundKeys = new ConcurrentHashMap<>();
+    private final Map<KeyId, DeviceKey> deviceKeys = new ConcurrentHashMap<>();
     private final Map<String, Challenge> challenges = new ConcurrentHashMap<>();
 
     @Override
@@ -41,23 +41,23 @@ public class InMemoryStorageAdapter implements StorageAdapter {
     @Override
     public void deleteSession(String id) {
         sessions.remove(id);
-        boundKeys.keySet().removeIf(key -> key.sessionId().equals(id));
+        deviceKeys.keySet().removeIf(key -> key.sessionId().equals(id));
         challenges.values().removeIf(challenge -> challenge.sessionId().equals(id));
     }
 
     @Override
-    public Optional<BoundKey> getBoundKey(String sessionId) {
-        return Optional.ofNullable(boundKeys.get(new KeyId(sessionId)));
+    public Optional<DeviceKey> getDeviceKey(String sessionId) {
+        return Optional.ofNullable(deviceKeys.get(new KeyId(sessionId)));
     }
 
     @Override
-    public void setBoundKey(BoundKey key) {
-        boundKeys.put(new KeyId(key.sessionId()), key);
+    public void setDeviceKey(DeviceKey key) {
+        deviceKeys.put(new KeyId(key.sessionId()), key);
     }
 
     @Override
-    public void deleteBoundKey(String sessionId) {
-        boundKeys.remove(new KeyId(sessionId));
+    public void deleteDeviceKey(String sessionId) {
+        deviceKeys.remove(new KeyId(sessionId));
     }
 
     @Override

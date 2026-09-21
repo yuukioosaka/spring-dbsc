@@ -27,7 +27,7 @@ public final class DbscHeaderCodec {
      * <p>Segments are joined with {@code ;} and <strong>no spaces</strong>, the
      * values are double-quoted, and there is deliberately <strong>no
      * {@code id} parameter</strong>: the W3C draft defines {@code id} only on
-     * {@code Secure-Session-Challenge}. The bound cookie name travels in the JSON
+     * {@code Secure-Session-Challenge}. The binding cookie name travels in the JSON
      * registration response instead.
      */
     public static String buildRegistrationHeader(String algorithm, String registrationPath, String challenge) {

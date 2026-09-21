@@ -159,7 +159,7 @@ public class DbscService {
 
         // The challenge cookie has served its purpose; clear it.
         response.addHeader("Set-Cookie", cookieScope.deleteCookieValue(cookieScope.challengeCookieName()));
-        setCookie(response, cookieScope.bindingCookieName(), sessionId, properties.boundCookieTtlMs());
+        setCookie(response, cookieScope.bindingCookieName(), sessionId, properties.bindingCookieTtlMs());
 
         return sessionConfig(request, sessionId);
     }
@@ -196,7 +196,7 @@ public class DbscService {
         engine.handleRefresh(sessionId, responseHeader, expectedJti);
 
         response.addHeader("Set-Cookie", cookieScope.deleteCookieValue(cookieScope.challengeCookieName()));
-        setCookie(response, cookieScope.bindingCookieName(), sessionId, properties.boundCookieTtlMs());
+        setCookie(response, cookieScope.bindingCookieName(), sessionId, properties.bindingCookieTtlMs());
 
         return sessionConfig(request, sessionId);
     }
@@ -440,8 +440,8 @@ public class DbscService {
         return properties;
     }
 
-    /** Whether the session holds a native (hardware) key. */
-    public boolean hasNativeKey(String sessionId) {
-        return storage.getBoundKey(sessionId).isPresent();
+    /** Whether the session holds a device key. */
+    public boolean hasDeviceKey(String sessionId) {
+        return storage.getDeviceKey(sessionId).isPresent();
     }
 }

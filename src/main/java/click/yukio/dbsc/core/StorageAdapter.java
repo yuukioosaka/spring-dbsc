@@ -9,7 +9,7 @@ import java.util.Optional;
  *
  * <p>Implementations must be durable for any deployment that can restart: an
  * in-memory store breaks live sessions across a restart (the browser still holds
- * a binding cookie, refresh fails with {@code KEY_NOT_FOUND_NATIVE}, and the
+ * a binding cookie, refresh fails with {@code KEY_NOT_FOUND}, and the
  * browser loops registration).
  */
 public interface StorageAdapter {
@@ -28,13 +28,13 @@ public interface StorageAdapter {
     /**
      * Read the session's registered key, if it has one.
      */
-    Optional<BoundKey> getBoundKey(String sessionId);
+    Optional<DeviceKey> getDeviceKey(String sessionId);
 
     /** Create or replace, keyed by {@code sessionId}. */
-    void setBoundKey(BoundKey key);
+    void setDeviceKey(DeviceKey key);
 
     /** Delete the session's key. */
-    void deleteBoundKey(String sessionId);
+    void deleteDeviceKey(String sessionId);
 
     // ---- Challenges ----
 

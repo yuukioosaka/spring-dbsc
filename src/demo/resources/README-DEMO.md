@@ -43,7 +43,7 @@ session tier becomes `dbsc`.
 
 ```json
 {"httpSessionId":"…","dbscSessionId":"…","userId":"demo",
- "tier":"none","nativeKey":false,"skippedReason":null,"coupled":true}
+ "tier":"none","deviceKey":false,"skippedReason":null,"coupled":true}
 ```
 
 `httpSessionId` and `dbscSessionId` are expected to be equal: that equality is the
@@ -59,7 +59,7 @@ written by any JavaScript in this demo:
 | Request | When | What to check |
 |---|---|---|
 | `POST /dbsc/registration` | about a second after the login response, once, automatically | it carries `Sec-Session-Response` (a JWS signed by the new hardware key) and the `__Host-dbsc-reg` / `__Host-dbsc-challenge` cookies; the response sets `__Host-dbsc-session` — the binding |
-| `POST /dbsc/refresh` | on the binding cookie's cadence (`bound-cookie-ttl`, 10 min by default) | the same header, plus `Sec-Session-Id` naming the existing session; a successful refresh pushes the cookie's expiry out |
+| `POST /dbsc/refresh` | on the binding cookie's cadence (`binding-cookie-ttl`, 10 min by default) | the same header, plus `Sec-Session-Id` naming the existing session; a successful refresh pushes the cookie's expiry out |
 
 `GET /.well-known/device-bound-sessions` is **not** in the network tab: Chromium
 sends that request itself from its own network stack, and it does not appear there.

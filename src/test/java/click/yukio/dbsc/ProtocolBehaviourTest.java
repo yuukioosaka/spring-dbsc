@@ -2,7 +2,7 @@ package click.yukio.dbsc;
 
 import click.yukio.dbsc.config.DbscProperties;
 import click.yukio.dbsc.core.Base64Url;
-import click.yukio.dbsc.core.BoundKey;
+import click.yukio.dbsc.core.DeviceKey;
 import click.yukio.dbsc.core.Challenge;
 import click.yukio.dbsc.core.DbscErrorCode;
 import click.yukio.dbsc.core.DbscException;
@@ -99,7 +99,7 @@ class ProtocolBehaviourTest {
         seedSession();
         seedChallenge(CHALLENGE);
 
-        BoundKey key = engine.handleRegistration(SESSION_ID, jws, CHALLENGE);
+        DeviceKey key = engine.handleRegistration(SESSION_ID, jws, CHALLENGE);
 
         assertEquals("ES256", key.algorithm());
         assertEquals(SESSION_ID, key.sessionId());
@@ -204,7 +204,7 @@ class ProtocolBehaviourTest {
     void refreshWithVectorJws() {
         Map<String, Object> vector = TestVectors.load("refresh");
         seedSession();
-        storeNativeKey(TestVectors.object(vector, "storedPublicKeyJwk"));
+        storeDeviceKey(TestVectors.object(vector, "storedPublicKeyJwk"));
         seedChallenge(CHALLENGE);
 
         var outcome = engine.handleRefresh(
@@ -221,7 +221,7 @@ class ProtocolBehaviourTest {
     void refreshFailureDemotesAndAlerts() {
         Map<String, Object> vector = TestVectors.load("refresh");
         seedSession();
-        storeNativeKey(TestVectors.object(vector, "storedPublicKeyJwk"));
+        storeDeviceKey(TestVectors.object(vector, "storedPublicKeyJwk"));
         seedChallenge(CHALLENGE);
         // Start from dbsc so the demotion is observable.
         storage.setSession(storage.getSession(SESSION_ID).orElseThrow()
@@ -251,7 +251,7 @@ class ProtocolBehaviourTest {
     }
 
     @Test
-    @DisplayName("refresh: no stored native key fails KEY_NOT_FOUND_NATIVE")
+    @DisplayName("refresh: no stored native key fails KEY_NOT_FOUND")
     void refreshWithoutStoredKey() {
         Map<String, Object> vector = TestVectors.load("refresh");
         seedSession();
@@ -260,7 +260,7 @@ class ProtocolBehaviourTest {
         DbscException failure = assertThrows(DbscException.class,
                 () -> engine.handleRefresh(SESSION_ID,
                         TestVectors.string(vector, "secureSessionResponse"), CHALLENGE));
-        assertEquals(DbscErrorCode.KEY_NOT_FOUND_NATIVE, failure.code());
+        assertEquals(DbscErrorCode.KEY_NOT_FOUND, failure.code());
     }
 
     @Test
@@ -268,7 +268,7 @@ class ProtocolBehaviourTest {
     void refreshExpiredChallenge() {
         Map<String, Object> vector = TestVectors.load("refresh");
         seedSession();
-        storeNativeKey(TestVectors.object(vector, "storedPublicKeyJwk"));
+        storeDeviceKey(TestVectors.object(vector, "storedPublicKeyJwk"));
         storage.setChallenge(new Challenge(CHALLENGE, SESSION_ID,
                 VECTOR_NOW_MS - 600_000, VECTOR_NOW_MS - 300_000, false));
 
@@ -336,7 +336,7 @@ class ProtocolBehaviourTest {
     @DisplayName("tier: the refresh grace window keeps a stale session readable")
     void refreshGraceWindow() {
         seedSession();
-        storeNativeKey(TestVectors.object(TestVectors.load("refresh"), "storedPublicKeyJwk"));
+        storeDeviceKey(TestVectors.object(TestVectors.load("refresh"), "storedPublicKeyJwk"));
 
         // A stored key alone does not make a session protected: the stored tier is
         // authoritative. The key decides the ceiling the session can reach, not
@@ -348,7 +348,7 @@ class ProtocolBehaviourTest {
         assertEquals(ProtectionTier.DBSC, engine.effectiveTier(promoted));
 
         // With the key gone and the grace elapsed, the session reads none.
-        storage.deleteBoundKey(SESSION_ID);
+        storage.deleteDeviceKey(SESSION_ID);
         Session stale = promoted.withTierAndLastRefreshAt(ProtectionTier.DBSC, VECTOR_NOW_MS - 3_600_000);
         storage.setSession(stale);
         assertEquals(ProtectionTier.NONE, engine.effectiveTier(stale));
@@ -356,7 +356,7 @@ class ProtocolBehaviourTest {
         // Inside the grace window, the previous tier is still reported.
         Session inGrace = promoted.withTierAndLastRefreshAt(
                 ProtectionTier.DBSC,
-                VECTOR_NOW_MS - properties.boundCookieTtlMs() - properties.refreshGraceMs() + 1000);
+                VECTOR_NOW_MS - properties.bindingCookieTtlMs() - properties.refreshGraceMs() + 1000);
         storage.setSession(inGrace);
         assertEquals(ProtectionTier.DBSC, engine.effectiveTier(inGrace));
     }
@@ -365,7 +365,7 @@ class ProtocolBehaviourTest {
     @DisplayName("tier: a demoted session reads none even though its key survives")
     void demotedSessionReadsNoneDespiteLiveKey() {
         seedSession();
-        storeNativeKey(TestVectors.object(TestVectors.load("refresh"), "storedPublicKeyJwk"));
+        storeDeviceKey(TestVectors.object(TestVectors.load("refresh"), "storedPublicKeyJwk"));
         storage.setSession(storage.getSession(SESSION_ID).orElseThrow()
                 .withTier(ProtectionTier.DBSC));
         assertEquals(ProtectionTier.DBSC,
@@ -380,7 +380,7 @@ class ProtocolBehaviourTest {
 
         assertEquals(ProtectionTier.NONE, engine.effectiveTier(demoted),
                 "a demoted session MUST NOT be reported as protected");
-        assertTrue(storage.getBoundKey(SESSION_ID).isPresent(),
+        assertTrue(storage.getDeviceKey(SESSION_ID).isPresent(),
                 "the key MUST survive the demotion so session_stolen stays detectable");
     }
 
@@ -402,12 +402,12 @@ class ProtocolBehaviourTest {
                 VECTOR_NOW_MS, VECTOR_NOW_MS + properties.challengeTtlMs(), false));
     }
 
-    private void storeNativeKey(Map<String, Object> jwk) {
-        storeNativeKey(SESSION_ID, jwk);
+    private void storeDeviceKey(Map<String, Object> jwk) {
+        storeDeviceKey(SESSION_ID, jwk);
     }
 
-    private void storeNativeKey(String sessionId, Map<String, Object> jwk) {
-        storage.setBoundKey(new BoundKey(sessionId, jwk, "ES256", VECTOR_NOW_MS));
+    private void storeDeviceKey(String sessionId, Map<String, Object> jwk) {
+        storage.setDeviceKey(new DeviceKey(sessionId, jwk, "ES256", VECTOR_NOW_MS));
     }
 
 

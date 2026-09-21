@@ -14,7 +14,7 @@ final class StorageSupport {
     }
 
     /**
-     * Converts a stored JWK map into the immutable form {@code BoundKey} expects,
+     * Converts a stored JWK map into the immutable form {@code DeviceKey} expects,
      * or throws when the row is corrupt.
      *
      * <p>A missing JWK here is a corrupt row, not a protocol outcome: the caller

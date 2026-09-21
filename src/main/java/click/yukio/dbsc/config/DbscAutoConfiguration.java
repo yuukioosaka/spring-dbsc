@@ -49,7 +49,7 @@ public class DbscAutoConfiguration {
      *
      * <p>Persistence is required for any deployment that can restart: an
      * in-memory store breaks live sessions, because the browser still holds a
-     * binding cookie, refresh fails with {@code KEY_NOT_FOUND_NATIVE}, and the
+     * binding cookie, refresh fails with {@code KEY_NOT_FOUND}, and the
      * browser loops registration.
      */
     @Bean

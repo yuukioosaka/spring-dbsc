@@ -10,8 +10,7 @@ import java.util.Map;
  * JWK validation and algorithm detection (spec 05).
  *
  * <p>A server MUST validate any inbound JWK before trusting it. Reject
- * ({@code INVALID_JWK}) any key that fails the rules below; note that the bound
- * protocol additionally rejects {@code RS256} even though native permits it.
+ * ({@code INVALID_JWK}) any key that fails the rules below.
  */
 public final class Jwk {
 

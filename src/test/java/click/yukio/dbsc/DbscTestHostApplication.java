@@ -145,7 +145,7 @@ public class DbscTestHostApplication {
             String sessionId = session.get().id();
             body.put("tier", dbsc.tierFor(sessionId).wireValue());
             body.put("sessionId", sessionId);
-            body.put("nativeKey", dbsc.hasNativeKey(sessionId));
+            body.put("deviceKey", dbsc.hasDeviceKey(sessionId));
             return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(Json.write(body));
         }
 

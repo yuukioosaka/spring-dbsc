@@ -204,7 +204,7 @@ class HttpFlowTest {
         assertEquals(login.sessionId(), config.get("session_identifier"));
         assertTrue(secondLeg.getResponse().getHeaders("Set-Cookie").stream()
                         .anyMatch(c -> c.startsWith(cookieScope.bindingCookieName() + "=")),
-                "a refresh response MUST set the bound cookie");
+                "a refresh response MUST set the binding cookie");
         assertEquals(ProtectionTier.DBSC, storage.getSession(login.sessionId()).orElseThrow().tier());
     }
 

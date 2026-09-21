@@ -48,7 +48,7 @@ spring:
   datasource:
     # File-backed, so registered keys survive a restart. An in-memory store would break
     # every live binding on each reload — the browser keeps its cookie, the
-    # server forgets the key, and refresh loops KEY_NOT_FOUND_NATIVE forever.
+    # server forgets the key, and refresh loops KEY_NOT_FOUND forever.
     url: jdbc:h2:file:./data/demo;DB_CLOSE_DELAY=-1
     driver-class-name: org.h2.Driver
     username: sa

@@ -31,8 +31,7 @@ public final class SignatureVerifier {
 
     /**
      * Verifies an ECDSA P-256 signature (raw {@code r||s} bytes, base64url) over
-     * the ASCII bytes of {@code message}. Used by the bound protocol and by
-     * per-request proofs.
+     * the ASCII bytes of {@code message}.
      *
      * @throws DbscException {@code INVALID_JWK} when the JWK will not import as
      *         ES256

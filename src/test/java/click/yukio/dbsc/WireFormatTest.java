@@ -27,7 +27,7 @@ class WireFormatTest {
     /**
      * The attributes string MUST match the real {@code Set-Cookie} byte-for-byte,
      * or Chromium drops the session — it re-reads the string to know how to
-     * re-issue the bound cookie on refresh.
+     * to re-issue the binding cookie on refresh.
      */
     @Nested
     class Cookies {

@@ -103,7 +103,7 @@ public final class CookieScope {
     /**
      * The attributes string echoed back in the registration response's
      * {@code credentials[].attributes} field, which Chromium re-reads to know how
-     * to re-issue the bound cookie on refresh.
+     * to re-issue the binding cookie on refresh.
      *
      * <p>This MUST match what the server actually sets in {@code Set-Cookie},
      * byte for byte, or Chromium drops the binding. Segments are joined by

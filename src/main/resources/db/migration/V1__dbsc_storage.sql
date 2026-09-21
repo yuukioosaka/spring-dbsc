@@ -1,4 +1,4 @@
--- DBSC storage schema (sessions, bound keys, challenges).
+-- DBSC storage schema (sessions, device keys, challenges).
 --
 -- This migration is BYTE-EQUIVALENT to what JdbcStorageAdapter.initialize()
 -- creates on startup. It exists so applications that run a migration tool can let
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS dbsc_sessions (
 
 CREATE INDEX IF NOT EXISTS dbsc_sessions_user_idx ON dbsc_sessions (user_id);
 
-CREATE TABLE IF NOT EXISTS dbsc_bound_keys (
+CREATE TABLE IF NOT EXISTS dbsc_device_keys (
     session_id VARCHAR(255) PRIMARY KEY,
     jwk_json   TEXT         NOT NULL,
     algorithm  VARCHAR(16)  NOT NULL,

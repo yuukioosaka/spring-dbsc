@@ -65,7 +65,7 @@ public sealed interface DbscTelemetryEvent
     }
 
     /**
-     * A refresh signature failed while a bound key still exists for the session.
+     * A refresh signature failed while a device key still exists for the session.
      * This is the strongest signal that a stolen cookie was replayed from a
      * device without the key. <strong>Alert on it.</strong>
      */
