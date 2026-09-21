@@ -31,6 +31,19 @@ public class DbscProperties {
     /** Use {@code __Host-} cookies and the {@code Secure} flag. Default true. */
     private boolean secure = true;
 
+    /**
+     * Believe {@code X-Forwarded-For} / {@code X-Forwarded-Proto} from the client.
+     * Default false, and it must stay false unless a reverse proxy is known to
+     * overwrite those headers.
+     *
+     * <p>These drive the client IP used for rate limiting. They are trivially
+     * forgeable by anyone who can reach the application directly, and a forged IP
+     * gets a fresh rate-limit budget, which defeats the limiter entirely. It is
+     * therefore separate from {@link #secure}: terminating TLS with {@code secure} on
+     * does not imply that a trusted proxy is stripping inbound forwarding headers.
+     */
+    private boolean trustForwardedHeaders = false;
+
     /** {@code host} (default) or {@code site}. */
     private CookieScope.Scope cookieScope = CookieScope.Scope.HOST;
 
@@ -154,6 +167,14 @@ public class DbscProperties {
 
     public void setSecure(boolean secure) {
         this.secure = secure;
+    }
+
+    public boolean isTrustForwardedHeaders() {
+        return trustForwardedHeaders;
+    }
+
+    public void setTrustForwardedHeaders(boolean trustForwardedHeaders) {
+        this.trustForwardedHeaders = trustForwardedHeaders;
     }
 
     public CookieScope.Scope getCookieScope() {

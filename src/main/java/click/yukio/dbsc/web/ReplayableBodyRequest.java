@@ -20,13 +20,16 @@ import java.nio.charset.StandardCharsets;
  * <p>This preserves the original bytes rather than re-serializing the parsed
  * form, which matters: the proof hash is over the exact wire bytes, so any
  * re-encoding would invalidate it.
+ *
+ * <p>Buffering goes through {@link RequestBodies#readBounded}, so a guarded route
+ * cannot be made to buffer an unbounded body before its proof is even checked.
  */
 public final class ReplayableBodyRequest extends HttpServletRequestWrapper {
 
     private final byte[] body;
 
     public ReplayableBodyRequest(HttpServletRequest request) throws java.io.IOException {
-        this(request, request.getInputStream().readAllBytes());
+        this(request, RequestBodies.readBounded(request));
     }
 
     public ReplayableBodyRequest(HttpServletRequest request, byte[] body) {

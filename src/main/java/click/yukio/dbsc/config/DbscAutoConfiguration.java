@@ -154,7 +154,7 @@ public class DbscAutoConfiguration {
                 rateLimiter,
                 replayCache,
                 clock,
-                properties.isSecure());
+                properties.isTrustForwardedHeaders());
     }
 
     /**

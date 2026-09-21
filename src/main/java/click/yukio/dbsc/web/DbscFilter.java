@@ -250,9 +250,12 @@ public class DbscFilter extends OncePerRequestFilter {
         writeJson(response, status, body);
     }
 
-    /** Reads the request body. The filter is a terminal handler, so this is safe. */
+    /**
+     * Reads the request body, bounded. The filter is a terminal handler, so this is
+     * safe — but the size cap is not optional: see {@link RequestBodies}.
+     */
     private String readBody(HttpServletRequest request) throws IOException {
-        return new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        return new String(RequestBodies.readBounded(request), StandardCharsets.UTF_8);
     }
 
     /**

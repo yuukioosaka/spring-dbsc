@@ -381,6 +381,63 @@ class HttpFlowTest {
                 "a missing body field is a client bug: 400, not a rejected proof");
     }
 
+    @Test
+    @DisplayName("bound routes: a cookie naming a session that does not exist is refused")
+    void boundRoutesRequireAnExistingSession() throws Exception {
+        // A cookie is attacker-supplied on an unauthenticated route, so a session id
+        // it names proves nothing. Without the storage lookup these routes would
+        // mint challenges and accept registrations for a session that never existed.
+        var forged = new jakarta.servlet.http.Cookie(cookieScope.bindingCookieName(), "sess_does_not_exist");
+
+        MvcResult challenge = mvc.perform(get("/dbsc-bound/challenge").cookie(forged)).andReturn();
+        assertEquals(403, challenge.getResponse().getStatus(),
+                "a sessionless challenge request is refused, as if no cookie were sent");
+        assertEquals("no session", Json.parseObject(
+                challenge.getResponse().getContentAsString()).get("error"));
+
+        MvcResult registration = mvc.perform(post("/dbsc-bound/registration")
+                        .contentType("application/json")
+                        .content(Json.write(Map.of(
+                                "publicKey", Map.of("kty", "EC", "crv", "P-256", "x", "AA", "y", "AA"),
+                                "signature", "AAAA",
+                                "challenge", "AAAA")))
+                        .cookie(forged))
+                .andReturn();
+        assertEquals(400, registration.getResponse().getStatus(),
+                "the session is absent, so the request is a client error before any proof is judged");
+
+        MvcResult refresh = mvc.perform(post("/dbsc-bound/refresh")
+                        .contentType("application/json")
+                        .content(Json.write(Map.of(
+                                "challenge", "AAAA", "signature", "AAAA", "timestamp", 1L)))
+                        .cookie(forged))
+                .andReturn();
+        assertEquals(400, refresh.getResponse().getStatus());
+    }
+
+    @Test
+    @DisplayName("bound registration: a body over the size cap is rejected, not buffered")
+    void oversizedBodyIsRejected() throws Exception {
+        LoginState login = loginWithState();
+
+        // The DBSC routes are unauthenticated, so the body is read before any
+        // session decision. An unbounded read there is a memory exhaustion
+        // primitive; the cap turns it into a protocol error.
+        String huge = "x".repeat(click.yukio.dbsc.web.RequestBodies.MAX_BODY_BYTES + 1024);
+        MvcResult result = mvc.perform(post("/dbsc-bound/registration")
+                        .contentType("application/json")
+                        .content(Json.write(Map.of(
+                                "publicKey", Map.of("kty", "EC"),
+                                "signature", huge,
+                                "challenge", "AAAA")))
+                        .cookie(login.registrationCookie()))
+                .andReturn();
+
+        assertEquals(403, result.getResponse().getStatus());
+        assertEquals("MALFORMED_JWS", Json.parseObject(
+                result.getResponse().getContentAsString()).get("error"));
+    }
+
     // ------------------------------------------------------------------
     // Per-request proof guard
     // ------------------------------------------------------------------

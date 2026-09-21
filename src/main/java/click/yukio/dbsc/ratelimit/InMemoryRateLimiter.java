@@ -18,6 +18,13 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class InMemoryRateLimiter implements RateLimiter {
 
+    /**
+     * Ceiling on distinct counters held at once. Keys can embed client-supplied
+     * values, so an attacker varying them would otherwise grow the map unbounded;
+     * see {@link #count(String)} for what happens at the limit.
+     */
+    private static final int MAX_TRACKED_KEYS = 10_000;
+
     private final int capacity;
     private final int failureCapacity;
     private final long windowMs;
@@ -107,11 +114,23 @@ public class InMemoryRateLimiter implements RateLimiter {
         return "failed:" + key;
     }
 
-    /** Increments a window counter, creating or rolling it as needed. */
+    /**
+     * In increments a window counter, creating or rolling it as needed.
+     *
+     * <p>The map is pruned before inserting, and the key is dropped rather than
+     * stored when the table is full. That bound matters because the key can contain
+     * a client-supplied value (an IP from a forwarding header, a session id from a
+     * cookie): without it, a client varying that value grows the map without limit.
+     * Dropping an entry only loses a counter, and a lost counter fails open by at
+     * most one window.
+     */
     private void count(String key) {
         long now = System.currentTimeMillis();
-        if (windows.size() > 10_000) {
+        if (windows.size() >= MAX_TRACKED_KEYS) {
             windows.entrySet().removeIf(entry -> entry.getValue().startedAt + windowMs < now);
+            if (windows.size() >= MAX_TRACKED_KEYS && !windows.containsKey(key)) {
+                return;
+            }
         }
         windows.compute(key, (k, existing) -> {
             if (existing == null || existing.startedAt + windowMs < now) {

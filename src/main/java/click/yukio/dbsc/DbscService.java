@@ -287,12 +287,17 @@ public class DbscService {
      * render alongside the 403 status.
      */
     public BoundChallengeResult boundChallenge(HttpServletRequest request, HttpServletResponse response) {
-        Optional<String> sessionId = resolveBinderSession(request);
-        if (sessionId.isEmpty()) {
+        // A cookie naming a session the server never issued is a 403, not a 400:
+        // this route reports "no session" in the body and does not distinguish the
+        // two cases to the caller beyond that.
+        String sessionId;
+        try {
+            sessionId = requireExistingSession(request, false);
+        } catch (DbscException e) {
             return new BoundChallengeResult(Map.of("error", "no session"), false);
         }
 
-        Challenge challenge = challenges.issue(sessionId.get());
+        Challenge challenge = challenges.issue(sessionId);
         setCookie(response, cookieScope.challengeCookieName(), challenge.jti(), properties.challengeTtlMs());
         return new BoundChallengeResult(Map.of("challenge", challenge.jti()), true);
     }
@@ -315,7 +320,7 @@ public class DbscService {
 
         // Missing cookie or field is 400 here (spec 03/08), unlike every other
         // DBSC failure: it is a client bug, not a rejected proof.
-        String sessionId = requireBinderSession(request, true);
+        String sessionId = requireExistingSession(request, true);
         if (publicKey == null || signature == null || signature.isEmpty()
                 || challengeJti == null || challengeJti.isEmpty()) {
             throw DbscException.badRequest(
@@ -335,7 +340,7 @@ public class DbscService {
         requireBoundEnabled();
         checkRefreshRateLimit(request);
 
-        String sessionId = requireBinderSession(request, true);
+        String sessionId = requireExistingSession(request, true);
         if (signature == null || signature.isEmpty() || challengeJti == null || challengeJti.isEmpty()
                 || timestamp == null) {
             throw DbscException.badRequest("bound refresh requires challenge, signature and timestamp");
@@ -373,6 +378,11 @@ public class DbscService {
     /**
      * Resolves the session identifier from the binding cookie, falling back to the
      * registration cookie for the bound protocol's pre-binding requests.
+     *
+     * <p>A cookie proves nothing: it is attacker-supplied on any unauthenticated
+     * request, so this only names a candidate session. Callers on the bound routes
+     * must follow it with {@link #requireExistingSession}, which is what the
+     * reference implementation does too.
      */
     public Optional<String> resolveBinderSession(HttpServletRequest request) {
         Optional<String> binding = readCookie(request, cookieScope.bindingCookieName());
@@ -380,6 +390,30 @@ public class DbscService {
             return binding;
         }
         return readCookie(request, cookieScope.registrationCookieName());
+    }
+
+    /**
+     * Rejects a binder that names no session, mirroring the reference's bound
+     * routes, which look the session up before doing anything with it.
+     *
+     * <p>Without this a cookie value the server never issued is enough to mint
+     * challenges for, and install a bound key on, a session that does not exist.
+     * The reference's {@code handleBoundStateRoute}/{@code handleBoundChallengeRoute}
+     * short-circuit on a missing session; this closes the same gap.
+     *
+     * @param clientError when true this is a 400, matching the bound registration
+     *                    and refresh routes, which treat a bad session as a client
+     *                    bug rather than a rejected proof
+     */
+    private String requireExistingSession(HttpServletRequest request, boolean clientError) {
+        String sessionId = requireBinderSession(request, clientError);
+        if (storage.getSession(sessionId).isEmpty()) {
+            throw clientError
+                    ? DbscException.badRequest("no such DBSC session")
+                    : new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
+                            "no such DBSC session");
+        }
+        return sessionId;
     }
 
     private String requireBinderSession(HttpServletRequest request) {
@@ -517,11 +551,26 @@ public class DbscService {
         }
     }
 
+    /**
+     * The client IP used as a rate-limit key.
+     *
+     * <p>Only consulted when {@code dbsc.trust-forwarded-headers} is on. Even then
+     * the <em>last</em> hop is taken, not the first: a proxy appends the address it
+     * saw, so the last entry is the one the nearest trusted hop observed, while the
+     * first is whatever the client claimed. Taking the first entry — the common
+     * mistake — hands every request an attacker-chosen identity.
+     */
     private String clientIp(HttpServletRequest request) {
         if (trustForwardedHeaders) {
             String forwarded = request.getHeader("X-Forwarded-For");
             if (forwarded != null && !forwarded.isBlank()) {
-                return forwarded.split(",")[0].trim();
+                String[] hops = forwarded.split(",");
+                for (int i = hops.length - 1; i >= 0; i--) {
+                    String hop = hops[i].trim();
+                    if (!hop.isEmpty()) {
+                        return hop;
+                    }
+                }
             }
         }
         String remote = request.getRemoteAddr();

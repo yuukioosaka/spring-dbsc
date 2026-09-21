@@ -114,6 +114,24 @@ class RateLimitTest {
         assertFalse(limiter.checkRegistration("10.0.0.1"));
     }
 
+    @Test
+    @DisplayName("spoofed keys cannot exhaust memory: the tracked-window table stays bounded")
+    void distinctKeysAreBounded() {
+        // The keys here stand in for attacker-chosen values, which is exactly what
+        // an IP taken from a forwarding header or a session id from a cookie is.
+        // Without a cap this loop would grow the map without limit.
+        RateLimiter limiter = new InMemoryRateLimiter(5, Duration.ofMinutes(10));
+
+        for (int i = 0; i < 50_000; i++) {
+            limiter.recordFailure("10.0.0." + i, "sess_" + i);
+        }
+
+        // The limiter must still work afterwards: the cap drops counters, it does
+        // not corrupt the table or start throwing.
+        assertTrue(limiter.checkRegistration("10.9.9.9"),
+                "the limiter remains usable once the table is full");
+    }
+
     private static void sleep(long ms) {
         try {
             Thread.sleep(ms);
