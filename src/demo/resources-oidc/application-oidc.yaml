@@ -1,11 +1,19 @@
 # OIDC variant of the demo (profile "oidc", on top of "demo").
 #
-#   ENTRA_CLIENT_SECRET=... mvn -Pdemo,oidc -Dmaven.repo.local=.m2repo spring-boot:run
+#   ENTRA_TENANT_ID=... ENTRA_CLIENT_ID=... ENTRA_CLIENT_SECRET=... \
+#     mvn -Pdemo,oidc -Dmaven.repo.local=.m2repo spring-boot:run
+#
+# All three come from a single app registration. Nothing here identifies a
+# particular directory, so the demo is not tied to one tenant: register an app in
+# your own (Entra ID, or any OIDC provider) and point these at it.
 #
 # Redirect URI to register on the app registration:
 #   https://localhost:8443/login/oauth2/code/entraid
 # That is Spring Security's callback path, not /oidc — /oidc is only the page the
 # browser lands on afterwards, and is where the DBSC binding actually happens.
+#
+# `entraid` is only a local registration name; it is what appears in that callback
+# URL. The provider itself is whatever the issuer resolves to.
 
 demo:
   oidc:
@@ -18,7 +26,7 @@ spring:
       client:
         registration:
           entraid:
-            client-id: f9c6da3d-468e-46e3-87f1-0ec65ce21981
+            client-id: ${ENTRA_CLIENT_ID}
             client-secret: ${ENTRA_CLIENT_SECRET}
             # Entra answers a client_secret_basic token request with a 401
             # invalid_token_response; the secret has to go in the body instead.
@@ -28,8 +36,11 @@ spring:
             redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
         provider:
           entraid:
-            # The /v2.0 form: the bare tenant URL advertises a different issuer.
-            issuer-uri: https://login.microsoftonline.com/90485b6d-0d39-4c2b-a2d1-ddf6d06d7978/v2.0
+            # The /v2.0 form: for Entra the bare tenant URL advertises a different
+            # issuer and discovery fails. Another provider takes its own issuer
+            # verbatim, e.g. https://accounts.example.com — set ENTRA_ISSUER_URI
+            # to override entirely.
+            issuer-uri: ${ENTRA_ISSUER_URI:https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0}
             user-name-attribute: sub
 
 logging:
