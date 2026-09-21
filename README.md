@@ -315,15 +315,6 @@ host app that stands in for yours: a login route that calls `bind()`, a `whoami`
 route, a guarded `payment` route, and a logout route. Read it first when wiring
 the library up; it is the smallest complete integration.
 
-## What is not in this repository
-
-- `dbsc-toolkit/` and `dbsc.html` — the protocol specification and reference
-  implementation this library was built against. They are separate artifacts and are
-  not redistributed here; the conformance vectors this build tests against are vendored
-  under `src/test/resources/vectors/`.
-- `dbsc-toolkit/spec/vectors` is the origin of those vendored vectors. If you have the
-  toolkit checked out, copy from there rather than editing the copies by hand.
-
 ## Wiring it into your own app
 
 ### 1. Get the auto-configuration on the classpath
