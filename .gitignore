@@ -38,3 +38,6 @@ __pycache__/
 *.iml
 .vscode/
 .DS_Store
+
+# scratch
+commit-msg.tmp

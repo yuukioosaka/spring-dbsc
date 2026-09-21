@@ -120,7 +120,7 @@ Spring Boot 3.x.x, 4.x.x are the tested versions.
 <dependency>
   <groupId>click.yukio.dbsc</groupId>
   <artifactId>spring-dbsc</artifactId>
-  <version>0.4.0</version>
+  <version>0.5.0</version>
 </dependency>
 ```
 
