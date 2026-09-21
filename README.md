@@ -465,7 +465,10 @@ explicitly:
 public class MyApplication { ... }
 ```
 
-The auto-config is guarded by `dbsc.enabled`, defaulting to `true`.
+The auto-configuration applies whenever the JAR is on the classpath. There is no
+enable/disable switch on the library itself — the way to turn DBSC off is to take
+the dependency out, since a half-installed filter chain that starts but does not
+work is a worse failure mode than an absent one.
 
 ### 2. Bind a session from your login route
 
@@ -619,7 +622,6 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 
 | Key | Default | Notes |
 |---|---|---|
-| `enabled` | `true` | `false` makes the whole feature a no-op |
 | `bound` | `true` | Whether the polyfill protocol (`/dbsc-bound/*`, spec 03) is served. It is **not** the W3C mechanism: its key is script-readable, so XSS makes it a signing oracle. `false` runs native only — see [Native vs. polyfill](#native-vs-polyfill-bound--read-this-before-choosing) |
 | `secure` | `true` | `__Host-` cookies + `Secure`. **Turn off only for localhost HTTP** |
 | `cookie-scope` | `host` | `site` enables multi-subdomain and requires `cookie-domain` |

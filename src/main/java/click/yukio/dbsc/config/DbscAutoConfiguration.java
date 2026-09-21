@@ -38,7 +38,6 @@ import java.time.Clock;
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(DbscProperties.class)
-@ConditionalOnProperty(prefix = "dbsc", name = "enabled", havingValue = "true", matchIfMissing = true)
 // Filters only. The library declares no SecurityFilterChain: which paths are DBSC
 // protocol routes and what runs before authentication are Security-policy decisions
 // that belong to the application. A library-supplied chain would either collide with

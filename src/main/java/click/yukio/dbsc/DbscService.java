@@ -102,9 +102,6 @@ public class DbscService {
      */
     public void bind(String sessionId, String userId, long ttlMs,
                      HttpServletRequest request, HttpServletResponse response) {
-        if (!properties.isEnabled()) {
-            return;
-        }
         long now = clock.millis();
         long effectiveTtlMs = ttlMs > 0 ? ttlMs : properties.sessionTtlMs();
         Session session = new Session(
@@ -156,7 +153,6 @@ public class DbscService {
      */
     public Map<String, Object> handleRegistration(
             HttpServletRequest request, HttpServletResponse response) {
-        requireEnabled();
         checkRegistrationRateLimit(request);
 
         String sessionId = requireBinderSession(request);
@@ -186,7 +182,6 @@ public class DbscService {
      * the JSON config and a fresh binding cookie.
      */
     public Map<String, Object> handleRefresh(HttpServletRequest request, HttpServletResponse response) {
-        requireEnabled();
         checkRefreshRateLimit(request);
 
         // The binding cookie is gone by the time a refresh runs, so the session
@@ -546,14 +541,7 @@ public class DbscService {
         response.addHeader("Set-Cookie", cookieScope.setCookieValue(name, value, maxAgeMs));
     }
 
-    private void requireEnabled() {
-        if (!properties.isEnabled()) {
-            throw new DbscException(DbscErrorCode.SESSION_NOT_FOUND, "DBSC is disabled");
-        }
-    }
-
     private void requireBoundEnabled() {
-        requireEnabled();
         if (!properties.isBound()) {
             throw new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
                     "the bound protocol is disabled");

@@ -50,7 +50,7 @@ The difference between those two rows is the whole feature.
 
 | Symptom | Cause |
 |---|---|
-| No `Secure-Session-Registration` in the login response | `dbsc.enabled=false`, or `bind()` was not called — check the success handler ran |
+| No `Secure-Session-Registration` in the login response | `bind()` was not called — check the success handler ran, and that the request was not cross-site (see the OIDC caveat) |
 | Header present but no registration POST | browser older than Chromium 145, or the page was loaded over HTTP so the `__Host-` cookies were dropped |
 | Registration POST returns `403` | challenge expired (5 min) or was already consumed; sign in again |
 | `/app/payment` always `403` | no `bound` key: the tier is `none` or `dbsc`. Per-request proofs need the **polyfill** key, not the native one — run `initBoundDbsc()` from section 3 of `/app` (below) |

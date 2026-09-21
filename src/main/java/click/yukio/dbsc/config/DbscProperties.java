@@ -15,12 +15,6 @@ import java.time.Duration;
 public class DbscProperties {
 
     /**
-     * Serve the native DBSC protocol. Disabling this makes the whole feature a
-     * no-op, which is useful for local development without HTTPS.
-     */
-    private boolean enabled = true;
-
-    /**
      * Mount the bound (polyfill) protocol routes and accept the {@code bound}
      * tier. Set {@code false} to run native DBSC only: the four bound routes are
      * not served, the state route answers {@code phase: "unbound"} so the client
@@ -143,14 +137,6 @@ public class DbscProperties {
         public void setWindow(Duration window) {
             this.window = window;
         }
-    }
-
-    public boolean isEnabled() {
-        return enabled;
-    }
-
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
     }
 
     public boolean isBound() {

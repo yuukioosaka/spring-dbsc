@@ -67,7 +67,7 @@ class AutoConfigurationIntegrationTest {
         assertNotNull(dbsc, "DbscService must be provided by the auto-configuration");
         assertNotNull(cookieScope, "CookieScope must be provided too");
         assertNotNull(storage, "a StorageAdapter must be provided even without a DataSource");
-        assertTrue(dbsc.properties().isEnabled(), "DBSC is on by default");
+        assertTrue(dbsc.properties().isBound(), "the bound protocol is on by default");
     }
 
     @Test
