@@ -1,0 +1,306 @@
+package click.yukio.dbsc.storage;
+
+import click.yukio.dbsc.core.BoundKey;
+import click.yukio.dbsc.core.BoundKeyKind;
+import click.yukio.dbsc.core.Challenge;
+import click.yukio.dbsc.core.Json;
+import click.yukio.dbsc.core.Session;
+import click.yukio.dbsc.core.StorageAdapter;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Optional;
+
+/**
+ * Durable JDBC-backed storage (spec 06).
+ *
+ * <p>Persistence MUST be durable for any deployment that can restart: a store
+ * that loses bound keys breaks live sessions, because the browser still holds a
+ * binding cookie, refresh fails with {@code KEY_NOT_FOUND_NATIVE}, and the
+ * browser loops registration.
+ *
+ * <p>The atomicity requirement is met by
+ * {@code UPDATE challenges SET consumed = true WHERE jti = ? AND consumed = false}
+ * and checking the affected-row count — never a read followed by a separate
+ * write, which would let an attacker race a captured proof against the
+ * legitimate client and have both accepted.
+ */
+public class JdbcStorageAdapter implements StorageAdapter {
+
+    private final DataSource dataSource;
+
+    public JdbcStorageAdapter(DataSource dataSource) {
+        this.dataSource = dataSource;
+    }
+
+    /** Creates the schema when absent. Safe to call on every start. */
+    public void initialize() {
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS dbsc_sessions (
+                        id              VARCHAR(255) PRIMARY KEY,
+                        user_id         VARCHAR(255) NOT NULL,
+                        tier            VARCHAR(16)  NOT NULL,
+                        created_at      BIGINT       NOT NULL,
+                        expires_at      BIGINT       NOT NULL,
+                        last_refresh_at BIGINT       NOT NULL
+                    )
+                    """);
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS dbsc_sessions_user_idx ON dbsc_sessions (user_id)");
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS dbsc_bound_keys (
+                        session_id VARCHAR(255) NOT NULL,
+                        kind       VARCHAR(16)  NOT NULL,
+                        jwk_json   TEXT         NOT NULL,
+                        algorithm  VARCHAR(16)  NOT NULL,
+                        created_at BIGINT       NOT NULL,
+                        PRIMARY KEY (session_id, kind)
+                    )
+                    """);
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS dbsc_challenges (
+                        jti        VARCHAR(255) PRIMARY KEY,
+                        session_id VARCHAR(255) NOT NULL,
+                        created_at BIGINT       NOT NULL,
+                        expires_at BIGINT       NOT NULL,
+                        consumed   BOOLEAN      NOT NULL
+                    )
+                    """);
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS dbsc_challenges_session_idx ON dbsc_challenges (session_id)");
+        } catch (SQLException e) {
+            throw new StorageException("failed to initialize the DBSC schema", e);
+        }
+    }
+
+    // ---- Sessions ----
+
+    @Override
+    public Optional<Session> getSession(String id) {
+        String sql = "SELECT id, user_id, tier, created_at, expires_at, last_refresh_at "
+                + "FROM dbsc_sessions WHERE id = ?";
+        return StorageSupport.optional(queryOne(sql, statement -> statement.setString(1, id), this::readSession));
+    }
+
+    @Override
+    public void setSession(Session session) {
+        String sql = """
+                MERGE INTO dbsc_sessions
+                    (id, user_id, tier, created_at, expires_at, last_refresh_at)
+                KEY (id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """;
+        update(sql, statement -> {
+            statement.setString(1, session.id());
+            statement.setString(2, session.userId());
+            statement.setString(3, session.tier().wireValue());
+            statement.setLong(4, session.createdAt());
+            statement.setLong(5, session.expiresAt());
+            statement.setLong(6, session.lastRefreshAt());
+        });
+    }
+
+    @Override
+    public void deleteSession(String id) {
+        update("DELETE FROM dbsc_challenges WHERE session_id = ?", s -> s.setString(1, id));
+        update("DELETE FROM dbsc_bound_keys WHERE session_id = ?", s -> s.setString(1, id));
+        update("DELETE FROM dbsc_sessions WHERE id = ?", s -> s.setString(1, id));
+    }
+
+    // ---- Bound keys ----
+
+    @Override
+    public Optional<BoundKey> getBoundKey(String sessionId, BoundKeyKind kind) {
+        if (kind != null) {
+            String sql = "SELECT session_id, kind, jwk_json, algorithm, created_at "
+                    + "FROM dbsc_bound_keys WHERE session_id = ? AND kind = ?";
+            return StorageSupport.optional(queryOne(
+                    sql,
+                    statement -> {
+                        statement.setString(1, sessionId);
+                        statement.setString(2, kind.wireValue());
+                    },
+                    this::readBoundKey));
+        }
+        // Without a kind, return "native" first and fall back to "bound".
+        Optional<BoundKey> nativeKey = getBoundKey(sessionId, BoundKeyKind.NATIVE);
+        return nativeKey.isPresent() ? nativeKey : getBoundKey(sessionId, BoundKeyKind.BOUND);
+    }
+
+    @Override
+    public void setBoundKey(BoundKey key) {
+        String sql = """
+                MERGE INTO dbsc_bound_keys
+                    (session_id, kind, jwk_json, algorithm, created_at)
+                KEY (session_id, kind)
+                VALUES (?, ?, ?, ?, ?)
+                """;
+        update(sql, statement -> {
+            statement.setString(1, key.sessionId());
+            statement.setString(2, key.kind().wireValue());
+            statement.setString(3, Json.write(key.jwk()));
+            statement.setString(4, key.algorithm());
+            statement.setLong(5, key.createdAt());
+        });
+    }
+
+    @Override
+    public void deleteBoundKey(String sessionId, BoundKeyKind kind) {
+        if (kind != null) {
+            update("DELETE FROM dbsc_bound_keys WHERE session_id = ? AND kind = ?", statement -> {
+                statement.setString(1, sessionId);
+                statement.setString(2, kind.wireValue());
+            });
+        } else {
+            update("DELETE FROM dbsc_bound_keys WHERE session_id = ?", statement ->
+                    statement.setString(1, sessionId));
+        }
+    }
+
+    // ---- Challenges ----
+
+    @Override
+    public Optional<Challenge> getChallenge(String jti) {
+        String sql = "SELECT jti, session_id, created_at, expires_at, consumed "
+                + "FROM dbsc_challenges WHERE jti = ?";
+        return StorageSupport.optional(queryOne(sql, statement -> statement.setString(1, jti), this::readChallenge));
+    }
+
+    @Override
+    public void setChallenge(Challenge challenge) {
+        String sql = """
+                MERGE INTO dbsc_challenges (jti, session_id, created_at, expires_at, consumed)
+                KEY (jti)
+                VALUES (?, ?, ?, ?, ?)
+                """;
+        update(sql, statement -> {
+            statement.setString(1, challenge.jti());
+            statement.setString(2, challenge.sessionId());
+            statement.setLong(3, challenge.createdAt());
+            statement.setLong(4, challenge.expiresAt());
+            statement.setBoolean(5, challenge.consumed());
+        });
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>The conditional update writes only when the row is still unconsumed and
+     * reports the affected-row count: exactly one concurrent caller observes
+     * {@code true}.
+     */
+    @Override
+    public boolean consumeChallenge(String jti) {
+        String sql = "UPDATE dbsc_challenges SET consumed = true WHERE jti = ? AND consumed = false";
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, jti);
+            return statement.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new StorageException("consumeChallenge failed for jti", e);
+        }
+    }
+
+    // ---- Revocation ----
+
+    @Override
+    public void revokeSession(String sessionId) {
+        deleteSession(sessionId);
+    }
+
+    // ---- Row mapping ----
+
+    private Session readSession(ResultSet rs) throws SQLException {
+        return new Session(
+                rs.getString("id"),
+                rs.getString("user_id"),
+                click.yukio.dbsc.core.ProtectionTier.fromWire(rs.getString("tier")),
+                rs.getLong("created_at"),
+                rs.getLong("expires_at"),
+                rs.getLong("last_refresh_at"));
+    }
+
+    private BoundKey readBoundKey(ResultSet rs) throws SQLException {
+        String sessionId = rs.getString("session_id");
+        String jwkJson = rs.getString("jwk_json");
+        Map<String, Object> jwk = jwkJson == null ? null : Json.tryParseObject(jwkJson);
+        return new BoundKey(
+                sessionId,
+                BoundKeyKind.fromWire(rs.getString("kind")),
+                StorageSupport.requireJwk(jwk, sessionId),
+                rs.getString("algorithm"),
+                rs.getLong("created_at"));
+    }
+
+    private Challenge readChallenge(ResultSet rs) throws SQLException {
+        return new Challenge(
+                rs.getString("jti"),
+                rs.getString("session_id"),
+                rs.getLong("created_at"),
+                rs.getLong("expires_at"),
+                rs.getBoolean("consumed"));
+    }
+
+    // ---- JDBC plumbing ----
+
+    @FunctionalInterface
+    private interface Binder {
+        void bind(PreparedStatement statement) throws SQLException;
+    }
+
+    @FunctionalInterface
+    private interface RowMapper<T> {
+        T map(ResultSet resultSet) throws SQLException;
+    }
+
+    private <T> T queryOne(String sql, Binder binder, RowMapper<T> mapper) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            binder.bind(statement);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? mapper.map(resultSet) : null;
+            }
+        } catch (SQLException e) {
+            throw new StorageException("query failed: " + sql, e);
+        }
+    }
+
+    private <T> java.util.List<T> queryList(String sql, Binder binder, RowMapper<T> mapper) {
+        java.util.List<T> results = new java.util.ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            binder.bind(statement);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    results.add(mapper.map(resultSet));
+                }
+            }
+            return results;
+        } catch (SQLException e) {
+            throw new StorageException("query failed: " + sql, e);
+        }
+    }
+
+    private void update(String sql, Binder binder) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            binder.bind(statement);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new StorageException("update failed: " + sql, e);
+        }
+    }
+
+    /** Thrown when the backing store fails. */
+    public static class StorageException extends RuntimeException {
+        public StorageException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+}

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <title>DBSC demo — app</title>
+    <style>
+        body { font: 15px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 3rem auto; padding: 0 1rem; }
+        h1 { font-size: 1.3rem; }
+        h2 { font-size: 1.05rem; margin-top: 2rem; }
+        button { padding: .4rem .9rem; font: inherit; cursor: pointer; margin-right: .5rem; }
+        pre { background: #f4f4f4; padding: .75rem; border-radius: 4px; overflow: auto; min-height: 2.5rem; }
+        .hint { color: #555; font-size: .9rem; }
+        code { background: #eee; padding: .1rem .3rem; border-radius: 3px; }
+    </style>
+</head>
+<body>
+<h1>Signed in as <span th:text="${#authentication != null ? #authentication.name : 'anonymous'}">user</span></h1>
+
+<h2>1. Unguarded route</h2>
+<p class="hint">Answers with a valid login cookie alone — this is what a stolen cookie replays.</p>
+<button onclick="hit('/app/whoami', 'GET')">GET /app/whoami</button>
+<pre id="whoami"></pre>
+
+<h2>2. Guarded route</h2>
+<p class="hint">
+    Requires a fresh per-request proof signed by the device key, bound to the body.
+    With no proof it is <code>403</code>, never <code>401</code> — Chromium treats 401 on
+    these paths as fatal.
+</p>
+<button onclick="hit('/app/payment', 'POST')">POST /app/payment (no proof)</button>
+<pre id="payment"></pre>
+
+<!-- The app chain keeps CSRF on, so the JS must echo the token. Without it every
+     POST is refused by CsrfFilter before DBSC ever sees it, and the 403 becomes
+     indistinguishable from the DBSC guard's own 403. -->
+<meta name="csrf" th:content="${_csrf != null ? _csrf.token : ''}"/>
+<meta name="csrf-header" th:content="${_csrf != null ? _csrf.headerName : 'X-CSRF-TOKEN'}"/>
+
+<h2>3. Browser state</h2>
+<p class="hint">
+    For full detail open <code>/app/whoami</code> directly, or watch the server log —
+    every DBSC decision is logged with its reason.
+</p>
+    <pre id="browser">Open /app/whoami in a new tab to see the live DBSC report.</pre>
+
+<script>
+    const csrfToken = document.querySelector('meta[name="csrf"]').content;
+    const csrfHeader = document.querySelector('meta[name="csrf-header"]').content;
+
+    async function hit(path, method) {
+        const out = document.getElementById(path.includes('payment') ? 'payment' : 'whoami');
+        out.textContent = '…';
+        const headers = {};
+        if (method !== 'GET') {
+            headers['Content-Type'] = 'application/json';
+            headers[csrfHeader] = csrfToken;
+        }
+        try {
+            const res = await fetch(path, {
+                method,
+                credentials: 'same-origin',
+                headers,
+                body: method === 'GET' ? undefined : JSON.stringify({ amount: 1000, currency: 'usd' })
+            });
+            out.textContent = res.status + ' ' + res.statusText + '\n\n' + await res.text();
+        } catch (e) {
+            out.textContent = 'request failed: ' + e;
+        }
+    }
+</script>
+</body>
+</html>

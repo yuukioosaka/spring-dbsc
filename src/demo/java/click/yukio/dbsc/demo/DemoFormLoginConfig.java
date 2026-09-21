@@ -1,0 +1,192 @@
+package click.yukio.dbsc.demo;
+
+import click.yukio.dbsc.DbscService;
+import click.yukio.dbsc.web.DbscProofGuardFilter;
+import click.yukio.dbsc.web.DbscFilterConfiguration.GuardedRoute;
+import click.yukio.dbsc.web.DbscFilter;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.provisioning.InMemoryUserDetailsManager;
+import org.springframework.security.web.SecurityFilterChain;
+import jakarta.servlet.http.HttpSession;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.authentication.logout.LogoutHandler;
+import org.springframework.security.web.csrf.CsrfFilter;
+import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
+import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
+import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
+import org.springframework.security.web.util.matcher.OrRequestMatcher;
+
+/**
+ * The application's own security chains, with the DBSC filters inside them.
+ *
+ * <p>This is the shape of every real adopter: the library ships the two filters, the
+ * application decides where they sit. Nothing has to be opted out of or worked
+ * around, because the library declares no chain of its own.
+ *
+ * <p>Two chains, in order. The protocol chain exists because these routes must be
+ * reachable <em>unauthenticated</em>, must not have CSRF applied to them, and must
+ * reach {@code DbscFilter} rather than Security's entry point — a 401 there is fatal
+ * to Chromium. Everything else is the application's, with the proof guard layered on
+ * top of authentication.
+ */
+@Configuration(proxyBeanMethods = false)
+@EnableWebSecurity
+public class DemoFormLoginConfig {
+
+    /** Guards the payment route, binding the request body into the proof. */
+    @Bean
+    GuardedRoute paymentRoute() {
+        return GuardedRoute.withBody("/app/payment");
+    }
+
+    /**
+     * The one DBSC call an application has to make. It runs after Spring Security
+     * has authenticated the user and created the session, because that is the
+     * earliest point at which both exist.
+     */
+    @Bean
+    DemoLoginSuccessHandler demoLoginSuccessHandler(DbscService dbsc) {
+        return new DemoLoginSuccessHandler(dbsc);
+    }
+
+    /**
+     * The DBSC protocol routes, unauthenticated by construction.
+     *
+     * <p>Matched on Ant patterns rather than the String overload, which resolves
+     * to {@code MvcRequestMatcher} and drags in an MVC dependency the filter layer
+     * has no business having.
+     */
+    @Bean
+    @Order(0)
+    SecurityFilterChain dbscProtocolChain(
+            HttpSecurity http, @Qualifier("dbscFilter") DbscFilter dbscFilter) throws Exception {
+        http
+                // One OrRequestMatcher rather than chained securityMatcher() calls:
+                // each call SETS the matcher, so chaining silently keeps only the
+                // last path and the other routes fall through to the app chain.
+                .securityMatcher(new OrRequestMatcher(
+                        new AntPathRequestMatcher("/dbsc/**"),
+                        new AntPathRequestMatcher("/dbsc-bound/**"),
+                        new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
+                .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
+                // Chromium drives these routes before any user session exists and
+                // posts no CSRF token with them.
+                .sessionManagement(session -> session
+                        .sessionCreationPolicy(
+                                org.springframework.security.config.http.SessionCreationPolicy.STATELESS))
+                .csrf(csrf -> csrf.disable())
+                // CsrfFilter sits before UsernamePasswordAuthenticationFilter, so a
+                // filter positioned relative to the latter would still land after
+                // it and let CSRF reject the browser's registration POST first.
+                // Anchor on CsrfFilter instead, so DBSC sees the request first.
+                .addFilterBefore(dbscFilter, CsrfFilter.class);
+        return http.build();
+    }
+
+    /**
+     * The application chain: form login, authorization, and the proof guard.
+     *
+     * <p>The guard runs before authorization, so a request without a valid proof
+     * is refused with DBSC's 403 before any application logic or session lookup
+     * happens. It layers <em>on top of</em> authentication: a valid proof is never
+     * a substitute for logging in.
+     */
+    @Bean
+    @Order(1)
+    SecurityFilterChain appChain(
+            HttpSecurity http,
+            @Qualifier("dbscProofGuardFilter") DbscProofGuardFilter guardFilter,
+            DemoLoginSuccessHandler successHandler,
+            DbscService dbsc) throws Exception {
+
+        http
+                .securityMatcher(new AntPathRequestMatcher("/**"))
+                .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/login", "/css/**", "/favicon.ico").permitAll()
+                        .requestMatchers("/app/payment").authenticated()
+                        .anyRequest().authenticated())
+                .formLogin(form -> form
+                        .loginPage("/login")
+                        .successHandler(successHandler)
+                        .permitAll())
+                // Spring Security keeps the CSRF token in the session and, by
+                // default, only accepts it as a request parameter. The demo's
+                // fetch() calls send JSON, so the token has to be accepted as a
+                // header instead; without this every POST is refused by
+                // CsrfFilter and the 403 is indistinguishable from DBSC's own.
+                .csrf(csrf -> csrf
+                        .csrfTokenRepository(new HttpSessionCsrfTokenRepository())
+                        .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
+                .logout(logout -> logout
+                        .logoutUrl("/logout")
+                        .addLogoutHandler(demoLogoutHandler(dbsc))
+                        .logoutSuccessUrl("/login?loggedout"))
+                .addFilterBefore(guardFilter, UsernamePasswordAuthenticationFilter.class);
+        return http.build();
+    }
+
+    /**
+     * Ends the DBSC binding when the user logs out.
+     *
+     * <p>{@code terminate()} tells the browser to forget the binding and clears
+     * the binding cookie. Without it the device key outlives the login session:
+     * the browser keeps refreshing a session the application has already ended,
+     * and a later login re-couples to a stale key instead of registering a fresh
+     * one.
+     */
+    private static LogoutHandler demoLogoutHandler(DbscService dbsc) {
+        return (request, response, authentication) -> {
+            HttpSession session = request.getSession(false);
+            if (session != null) {
+                dbsc.terminate(session.getId(), request, response);
+            }
+        };
+    }
+
+    /**
+     * Boot auto-registers every {@code Filter} bean as a plain servlet filter,
+     * outside the security chain — which would run both DBSC filters a second time,
+     * before authentication and on every path. Disabling the registrations keeps
+     * them in the chains only.
+     */
+    @Bean
+    FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
+        FilterRegistrationBean<DbscFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    @Bean
+    FilterRegistrationBean<DbscProofGuardFilter> dbscProofGuardFilterRegistration(
+            DbscProofGuardFilter filter) {
+        FilterRegistrationBean<DbscProofGuardFilter> registration =
+                new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    @Bean
+    PasswordEncoder passwordEncoder() {
+        return PasswordEncoderFactories.createDelegatingPasswordEncoder();
+    }
+
+    @Bean
+    UserDetailsService userDetailsService(PasswordEncoder encoder) {
+        UserDetails user = User.withUsername("demo")
+                .password(encoder.encode("demo"))
+                .roles("USER")
+                .build();
+        return new InMemoryUserDetailsManager(user);
+    }
+}

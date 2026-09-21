@@ -1,0 +1,70 @@
+name: Build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test (Java ${{ matrix.java }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The library targets Java 25. Testing on 26 as well catches the case
+        # where a newer JDK tightens something the build relies on; it is
+        # allowed to fail without blocking the build.
+        java: ['25', '26']
+        include:
+          - java: '25'
+            experimental: false
+          - java: '26'
+            experimental: true
+
+    continue-on-error: ${{ matrix.experimental }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: temurin
+          cache: maven
+
+      # `verify` rather than `test` so the packaged JAR is produced as well, which
+      # is the artifact that actually ships. src/demo stays out of this build: it
+      # is behind the `demo` profile on purpose.
+      - name: Build and test
+        run: mvn -B --no-transfer-progress verify
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-java-${{ matrix.java }}
+          path: target/surefire-reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload library JAR
+        if: matrix.java == '25' && success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spring-dbsc-jar
+          path: target/spring-dbsc-*.jar
+          if-no-files-found: error
+          retention-days: 14

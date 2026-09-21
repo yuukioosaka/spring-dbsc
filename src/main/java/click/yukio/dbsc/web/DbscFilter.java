@@ -1,0 +1,277 @@
+package click.yukio.dbsc.web;
+
+import click.yukio.dbsc.DbscService;
+import click.yukio.dbsc.config.DbscProperties;
+import click.yukio.dbsc.core.DbscErrorCode;
+import click.yukio.dbsc.core.DbscException;
+import click.yukio.dbsc.core.Json;
+import click.yukio.dbsc.protocol.DbscHeaders;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Serves every DBSC protocol route, as a filter rather than as controllers.
+ *
+ * <p>Why a filter: these routes are a protocol surface, not application
+ * endpoints. They must be reachable <em>before</em> the application's own
+ * authentication and routing run, must never be wrapped by a peer's exception
+ * handling or content negotiation, and must answer with DBSC's own status and
+ * header contract — where 403 rather than 401 is load-bearing. A single
+ * {@link OncePerRequestFilter} placed early in the chain gives exactly that, and
+ * it means the routes cannot be accidentally re-mapped, secured differently, or
+ * shadowed by a peer controller.
+ *
+ * <p>A request on a DBSC path is <strong>terminated here</strong>: the filter
+ * writes the response in full and never calls {@link FilterChain#doFilter}. Every
+ * other request passes straight through untouched.
+ *
+ * <p>The demo registers it before the application's authentication filter; see
+ * {@code DemoFormLoginConfig}. The ordering matters because a 403 from DBSC must not
+ * be replaced by Spring Security's 401, which Chromium treats as a hard failure and
+ * responds to by terminating the session.
+ */
+public class DbscFilter extends OncePerRequestFilter {
+
+    private static final Logger log = LoggerFactory.getLogger(DbscFilter.class);
+
+    private final DbscService dbsc;
+    private final DbscProperties properties;
+    private final List<Route> routes;
+
+    public DbscFilter(DbscService dbsc, DbscProperties properties) {
+        this.dbsc = dbsc;
+        this.properties = properties;
+        this.routes = List.of(
+                new Route("POST", properties.getRegistrationPath(), this::nativeRegistration),
+                new Route("POST", properties.getRefreshPath(), this::nativeRefresh),
+                new Route("GET", properties.getBoundPath() + "/state", this::boundState),
+                new Route("GET", properties.getBoundPath() + "/challenge", this::boundChallenge),
+                new Route("POST", properties.getBoundPath() + "/registration", this::boundRegistration),
+                new Route("POST", properties.getBoundPath() + "/refresh", this::boundRefresh),
+                new Route("GET", "/.well-known/device-bound-sessions", this::wellKnownDocument));
+    }
+
+    @Override
+    protected void doFilterInternal(
+            HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+            throws ServletException, IOException {
+
+        for (Route route : routes) {
+            if (!route.matches(request)) {
+                continue;
+            }
+            log.debug("DBSC route {} {} entered", request.getMethod(), request.getRequestURI());
+            // A DBSC route owns its response completely; the chain stops here.
+            handle(route, request, response);
+            return;
+        }
+
+        chain.doFilter(request, response);
+    }
+
+    /**
+     * The filter must not run late: Spring Security's authentication entry point
+     * answers 401, and on the refresh route Chromium treats 401 as fatal. Register
+     * before {@code UsernamePasswordAuthenticationFilter}.
+     */
+    @Override
+    protected boolean shouldNotFilterAsyncDispatch() {
+        return false;
+    }
+
+    private void handle(Route route, HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        try {
+            route.handler().handle(request, response);
+        } catch (DbscException e) {
+            // Every rejected proof is charged to the client's failure budget, so a
+            // client that keeps presenting invalid proofs is throttled even when
+            // its request volume alone would stay under the limit. A request that
+            // was *itself* refused for rate limiting is exempt: it was already
+            // counted on the way in, and billing the refusal too would push the
+            // window out every time the client retries.
+            if (e.code() != DbscErrorCode.RATE_LIMITED) {
+                dbsc.recordRateLimitFailure(request);
+            }
+            writeError(response, e);
+        } catch (IllegalArgumentException e) {
+            // A bound-route body that is not valid JSON is a client bug: 400.
+            dbsc.recordRateLimitFailure(request);
+            writeJson(response, HttpStatus.BAD_REQUEST, Map.of("error", "MALFORMED_JWS",
+                    "message", String.valueOf(e.getMessage())));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Native protocol (spec 02)
+    // ------------------------------------------------------------------
+
+    private void nativeRegistration(HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        Map<String, Object> config = dbsc.handleRegistration(request, response);
+        writeJson(response, HttpStatus.OK, config);
+    }
+
+    private void nativeRefresh(HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        Map<String, Object> config = dbsc.handleRefresh(request, response);
+        if (config == null) {
+            // The 403, its challenge header and its cookie are already written by
+            // the service, which had to decide the status before returning.
+            return;
+        }
+        writeJson(response, HttpStatus.OK, config);
+    }
+
+    // ------------------------------------------------------------------
+    // Bound protocol (spec 03)
+    // ------------------------------------------------------------------
+
+    private void boundState(HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        DbscService.BoundStateResult result = dbsc.boundState(request);
+        if (result.challenge() != null) {
+            // The client needs the JTI as a cookie too: the registration route
+            // validates the challenge it finds in the cookie jar.
+            var scope = dbsc.cookieScope();
+            response.addHeader("Set-Cookie", scope.setCookieValue(
+                    scope.challengeCookieName(), result.challenge().jti(),
+                    dbsc.properties().challengeTtlMs()));
+        }
+        writeJson(response, HttpStatus.OK, result.body());
+    }
+
+    private void boundChallenge(HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        DbscService.BoundChallengeResult result = dbsc.boundChallenge(request, response);
+        // Spec 03 pins `{"error":"no session"}` for the sessionless case.
+        writeJson(response, result.hasSession() ? HttpStatus.OK : HttpStatus.FORBIDDEN, result.body());
+    }
+
+    private void boundRegistration(HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        Map<String, Object> body = Json.parseObject(readBody(request));
+        writeJson(response, HttpStatus.OK, dbsc.boundRegistration(
+                request,
+                Json.object(body, "publicKey"),
+                Json.string(body, "signature"),
+                Json.string(body, "challenge")));
+    }
+
+    private void boundRefresh(HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        Map<String, Object> body = Json.parseObject(readBody(request));
+        writeJson(response, HttpStatus.OK, dbsc.boundRefresh(
+                request,
+                response,
+                Json.string(body, "signature"),
+                Json.string(body, "challenge"),
+                Json.longValue(body, "timestamp")));
+    }
+
+    // ------------------------------------------------------------------
+    // Well-known document
+    // ------------------------------------------------------------------
+
+    private void wellKnownDocument(HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
+        Map<String, Object> document = new LinkedHashMap<>();
+        document.put("registering_origins", List.of());
+        document.put("relying_origins", List.of());
+        if (properties.getCookieDomain() != null && !properties.getCookieDomain().isBlank()) {
+            document.put("provider_origin", "https://" + properties.getCookieDomain());
+        }
+        // Public, cacheable metadata: unlike the protocol responses it holds no
+        // session material and no key material.
+        response.setHeader("Cache-Control", "public, max-age=300");
+        writeJson(response, HttpStatus.OK, document);
+    }
+
+    // ------------------------------------------------------------------
+    // Response plumbing
+    // ------------------------------------------------------------------
+
+    /**
+     * Writes the DBSC JSON response: JSON content type, no-store, and the server
+     * clock that lets a client correct skew before signing a time-bound message.
+     *
+     * <p>{@code Cache-Control} is set only when the handler has not set one. The
+     * well-known document is deliberately cacheable, and a blanket {@code no-store}
+     * here would silently override it.
+     */
+    private void writeJson(HttpServletResponse response, HttpStatus status, Object body)
+            throws IOException {
+        if (response.isCommitted()) {
+            return;
+        }
+        response.setStatus(status.value());
+        response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        response.setCharacterEncoding("UTF-8");
+        if (status == HttpStatus.OK) {
+            response.setHeader(DbscHeaders.SERVER_TIME, Long.toString(System.currentTimeMillis()));
+        }
+        if (response.getHeader("Cache-Control") == null) {
+            response.setHeader("Cache-Control", "no-store");
+        }
+        response.getWriter().write(Json.write(body));
+        response.flushBuffer();
+    }
+
+    /**
+     * Maps a DBSC failure onto its status. The mapping is duplicated nowhere else
+     * now that the routes are filters: this is the single place it happens.
+     */
+    private void writeError(HttpServletResponse response, DbscException e) throws IOException {
+        HttpStatus status = switch (e.code()) {
+            case RATE_LIMITED -> HttpStatus.TOO_MANY_REQUESTS;
+            // A missing bound-protocol cookie or field is a client bug, not a
+            // rejected proof, so it is the one 400 among the DBSC failures.
+            case BAD_REQUEST -> HttpStatus.BAD_REQUEST;
+            default -> HttpStatus.FORBIDDEN;
+        };
+        log.debug("DBSC {} -> {}: {}", e.code(), status.value(), e.getMessage());
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("error", e.code().name());
+        body.put("message", e.getMessage());
+        writeJson(response, status, body);
+    }
+
+    /** Reads the request body. The filter is a terminal handler, so this is safe. */
+    private String readBody(HttpServletRequest request) throws IOException {
+        return new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * A method + path the filter owns.
+     *
+     * @param method  the HTTP method to match
+     * @param path    the exact path to match
+     * @param handler what to do when it matches
+     */
+    private record Route(String method, String path, Handler handler) {
+
+        boolean matches(HttpServletRequest request) {
+            return method.equalsIgnoreCase(request.getMethod())
+                    && path.equals(request.getRequestURI());
+        }
+    }
+
+    @FunctionalInterface
+    private interface Handler {
+        void handle(HttpServletRequest request, HttpServletResponse response) throws IOException;
+    }
+}

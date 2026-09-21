@@ -1,0 +1,23 @@
+# Test-facing configuration.
+#
+# Uses an in-memory H2 database and disables the Secure flag, so the tests can
+# exercise the cookie mechanics over plain HTTP.
+
+dbsc:
+  enabled: true
+  bound: true
+  secure: false
+  storage: jdbc
+  rate-limit:
+    enabled: false
+
+spring:
+  datasource:
+    url: jdbc:h2:mem:dbsc-test;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+
+logging:
+  level:
+    click.yukio.dbsc: INFO

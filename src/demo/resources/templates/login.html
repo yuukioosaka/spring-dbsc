@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <title>DBSC demo — login</title>
+    <style>
+        body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 4rem auto; padding: 0 1rem; }
+        h1 { font-size: 1.3rem; }
+        label { display: block; margin: 1rem 0 .25rem; }
+        input { width: 100%; padding: .5rem; font: inherit; box-sizing: border-box; }
+        button { margin-top: 1rem; padding: .5rem 1rem; font: inherit; cursor: pointer; }
+        .note { background: #f4f4f4; padding: .75rem 1rem; border-radius: 4px; margin-top: 2rem; }
+        .err { color: #b00; margin-top: 1rem; }
+        code { background: #eee; padding: .1rem .3rem; border-radius: 3px; }
+    </style>
+</head>
+<body>
+<h1>DBSC demo — sign in</h1>
+
+<p th:if="${param.error}" class="err">Bad credentials. Use <code>demo</code> / <code>demo</code>.</p>
+<p th:if="${param.loggedout}">Signed out.</p>
+
+<form method="post" th:action="@{/login}">
+    <label for="username">Username</label>
+    <input id="username" name="username" value="demo" autocomplete="username"/>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" value="demo" autocomplete="current-password"/>
+    <button type="submit">Sign in</button>
+</form>
+
+<div class="note">
+    <p><strong>This page must be served over HTTPS.</strong> If your browser shows a
+        certificate warning, accept it once — the DBSC cookies are <code>__Host-</code>
+        prefixed and <code>Secure</code>, so they are invisible over plain HTTP and the
+        flow cannot be exercised at all.</p>
+    <p>Sign in with <code>demo</code> / <code>demo</code>. On success the server calls
+        <code>dbsc.bind()</code> with the servlet session id, which sets
+        <code>Secure-Session-Registration</code> plus two short-lived cookies.</p>
+    <p><strong>Chromium 145+</strong> then POSTs <code>/dbsc/registration</code> on its
+        own within about a second — no JavaScript involved. Watch the network tab for it.</p>
+</div>
+</body>
+</html>

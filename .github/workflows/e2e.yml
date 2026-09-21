@@ -1,0 +1,94 @@
+name: E2E (live HTTPS)
+
+# The unit suite mocks nothing but the servlet container; this workflow drives the
+# real thing. It boots the demo app over HTTPS and runs scripts/e2e.py against it
+# with a deliberately tiny challenge TTL, because that is the only way to observe
+# CHALLENGE_EXPIRED: at production TTLs the check is skipped, not passed.
+#
+# Separate from build.yml because it is slower and because a failure here means
+# something different: the protocol is broken end to end, not a unit regressed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Live HTTPS end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: temurin
+          cache: maven
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The suite signs ES256 proofs, so it needs a real crypto library rather
+      # than hand-rolled ASN.1.
+      - name: Install test dependencies
+        run: python -m pip install --upgrade cryptography
+
+      - name: Generate the demo keystore
+        run: sh scripts/make-keystore.sh
+
+      # Started with the demo profile and a 2-second challenge TTL, which is what
+      # makes the CHALLENGE_EXPIRED scenario reachable at test speed.
+      - name: Start the demo over HTTPS
+        run: |
+          nohup mvn -B --no-transfer-progress -Pdemo \
+            -Dspring-boot.run.jvmArguments="-Ddbsc.challenge-ttl=2s" \
+            spring-boot:run > /tmp/demo.log 2>&1 &
+          for i in $(seq 1 60); do
+            if grep -q "Started DemoApplication" /tmp/demo.log; then
+              echo "demo is up after ${i}s"
+              exit 0
+            fi
+            if grep -qE "BUILD FAILURE|APPLICATION FAILED TO START" /tmp/demo.log; then
+              echo "demo failed to start"
+              tail -100 /tmp/demo.log
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "demo did not start within 120s"
+          tail -100 /tmp/demo.log
+          exit 1
+
+      - name: Run the end-to-end suite
+        env:
+          DBSC_CHALLENGE_TTL: '2'
+        run: python scripts/e2e.py
+
+      - name: Demo log on failure
+        if: failure()
+        run: tail -200 /tmp/demo.log
+
+      - name: Upload demo log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-log
+          path: /tmp/demo.log
+          if-no-files-found: ignore
+          retention-days: 7

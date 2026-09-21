@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.6</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>click.yukio.dbsc</groupId>
+  <artifactId>spring-dbsc</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <name>spring-dbsc</name>
+  <description>Embeddable Spring Boot implementation of Device Bound Session Credentials (DBSC Toolkit Protocol 1.0)</description>
+  <url>https://github.com/yuukioosaka/spring-dbsc</url>
+
+  <licenses>
+    <license>
+      <name>MIT License</name>
+      <url>https://opensource.org/licenses/MIT</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>yuukioosaka</id>
+      <url>https://github.com/yuukioosaka</url>
+    </developer>
+  </developers>
+
+  <scm>
+    <connection>scm:git:https://github.com/yuukioosaka/spring-dbsc.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/yuukioosaka/spring-dbsc.git</developerConnection>
+    <url>https://github.com/yuukioosaka/spring-dbsc</url>
+  </scm>
+
+  <!--
+    The library JAR is what consumers depend on. Packaging is left at the default
+    "jar"; the Spring Boot repackage goal is deliberately off, since there is no
+    main class to make executable and the plain JAR is what a host app wants on
+    its classpath.
+
+    src/demo is an OPT-IN sample app (form login over HTTPS) used for manual
+    browser testing. It is not part of the library: run it with -Pdemo.
+  -->
+
+  <properties>
+    <java.version>25</java.version>
+    <maven.compiler.release>25</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-configuration-processor</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-thymeleaf</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Test-only, and never packaged: it exists so NonFormLoginChainTest can build a
+      real oauth2Login() chain. The library itself has no OAuth2 dependency and
+      must not grow one: DBSC is a servlet-layer concern that sits beside whatever
+      authenticates the user.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-client</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <skip>true</skip>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <!--
+      Adds src/demo to the build and turns the library JAR into a runnable one.
+
+        mvn -Pdemo -Dmaven.repo.local=.m2repo spring-boot:run
+
+      To run over HTTPS you also need a keystore; see src/demo/resources/
+      README-DEMO.md.
+    -->
+    <profile>
+      <id>demo</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <version>3.6.1</version>
+            <executions>
+              <execution>
+                <id>add-demo-source</id>
+                <phase>generate-sources</phase>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <configuration>
+                  <sources>
+                    <source>src/demo/java</source>
+                  </sources>
+                </configuration>
+              </execution>
+              <execution>
+                <id>add-demo-resources</id>
+                <phase>generate-resources</phase>
+                <goals>
+                  <goal>add-resource</goal>
+                </goals>
+                <configuration>
+                  <resources>
+                    <resource>
+                      <directory>src/demo/resources</directory>
+                    </resource>
+                  </resources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+            <configuration>
+              <skip>false</skip>
+              <mainClass>click.yukio.dbsc.demo.DemoApplication</mainClass>
+              <arguments>
+                <!-- The demo's own config file, kept out of the way of the
+                     library's defaults, which are also named application.yaml. -->
+                <argument>--spring.profiles.active=demo</argument>
+              </arguments>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

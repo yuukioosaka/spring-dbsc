@@ -1,0 +1,83 @@
+package click.yukio.dbsc.demo;
+
+import click.yukio.dbsc.DbscService;
+import click.yukio.dbsc.core.Session;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpSession;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Optional;
+
+/**
+ * The "why is my browser bound / not bound" report.
+ *
+ * <p>Three different things are easy to confuse, so the report keeps them apart:
+ *
+ * <ul>
+ *   <li>{@code tier} — what the server enforces <em>right now</em>. This is the
+ *       one that decides whether guarded routes open.</li>
+ *   <li>{@code nativeKey} / {@code boundKey} — which key the browser actually
+ *       registered: {@code native} on Chromium 145+, {@code bound} via the
+ *       polyfill SDK, or neither.</li>
+ *   <li>{@code skippedReason} — why the browser declined, e.g. an unsupported
+ *       platform or a profile without the hardware key facility. It arrives in
+ *       the {@code Sec-Session-Skipped} header, and it is the difference between
+ *       "broken" and "this browser will never support it".</li>
+ * </ul>
+ *
+ * <p>Note that {@code dbscSessionId} is expected to equal {@code httpSessionId}:
+ * that equality is the whole point of passing the application's own session id to
+ * {@code bind()}. If they ever diverge, the DBSC binding has been coupled to a
+ * session the application no longer uses.
+ */
+record WhoamiReport(
+        String httpSessionId,
+        String dbscSessionId,
+        String userId,
+        String tier,
+        boolean nativeKey,
+        boolean boundKey,
+        String skippedReason) {
+
+    /** Builds the report for a request; never returns {@code null}. */
+    static WhoamiReport of(DbscService dbsc, HttpServletRequest request) {
+        HttpSession httpSession = request.getSession(false);
+        String httpSessionId = httpSession == null ? null : httpSession.getId();
+
+        Optional<Session> found = dbsc.sessionFor(request);
+        if (found.isEmpty()) {
+            return new WhoamiReport(
+                    httpSessionId, null, null, "none", false, false, skippedReason(request));
+        }
+
+        Session session = found.get();
+        return new WhoamiReport(
+                httpSessionId,
+                session.id(),
+                session.userId(),
+                dbsc.tierFor(session.id()).wireValue(),
+                dbsc.hasNativeKey(session.id()),
+                dbsc.hasBoundKey(session.id()),
+                skippedReason(request));
+    }
+
+    /** Convenience for the Thymeleaf templates, which read this as a map. */
+    Map<String, Object> asMap() {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("httpSessionId", httpSessionId);
+        map.put("dbscSessionId", dbscSessionId);
+        map.put("userId", userId);
+        map.put("tier", tier);
+        map.put("nativeKey", nativeKey);
+        map.put("boundKey", boundKey);
+        map.put("skippedReason", skippedReason);
+        map.put("coupled", java.util.Objects.equals(httpSessionId, dbscSessionId));
+        return map;
+    }
+
+    private static String skippedReason(HttpServletRequest request) {
+        String skipped = request.getHeader("Sec-Session-Skipped");
+        return skipped == null || skipped.isBlank() ? null : skipped;
+    }
+}
