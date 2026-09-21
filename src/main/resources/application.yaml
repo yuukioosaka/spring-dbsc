@@ -10,20 +10,18 @@
 # in cleartext and the __Host- prefix is unavailable.
 
 dbsc:
-  enabled: true
-  bound: true
   secure: false
   # jdbc when the host has a DataSource and the state must survive a restart;
   # memory otherwise. An in-memory store breaks live sessions across a restart.
   storage: jdbc
   registration-path: /dbsc/registration
   refresh-path: /dbsc/refresh
-  bound-path: /dbsc-bound
+  # Grace window past the binding cookie's expiry: a freshness poll that lands
+  # while the browser's next refresh is in flight still reads the old tier.
   bound-cookie-ttl: 10m
   registration-cookie-ttl: 24h
   challenge-ttl: 5m
   refresh-grace: 30s
-  timestamp-window: 5m
   session-ttl: 7d
   # Two budgets per client: total requests, and failed attempts. The failure
   # budget is what stops an attacker grinding challenges, since it trips long

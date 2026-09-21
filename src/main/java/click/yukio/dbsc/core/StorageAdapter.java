@@ -26,21 +26,15 @@ public interface StorageAdapter {
     // ---- Bound keys ----
 
     /**
-     * Read a bound key. Pass {@code kind} to disambiguate when both a
-     * {@code native} and a {@code bound} row exist (Chromium sessions). Without
-     * {@code kind} the adapter returns {@code native} first, falling back to
-     * {@code bound}.
+     * Read the session's registered key, if it has one.
      */
-    Optional<BoundKey> getBoundKey(String sessionId, BoundKeyKind kind);
+    Optional<BoundKey> getBoundKey(String sessionId);
 
-    /** Create or replace, keyed by {@code (sessionId, kind)}. */
+    /** Create or replace, keyed by {@code sessionId}. */
     void setBoundKey(BoundKey key);
 
-    /**
-     * Delete the bound key(s) for a session. Pass {@code kind} to remove just one
-     * slot; without {@code kind} both slots are removed.
-     */
-    void deleteBoundKey(String sessionId, BoundKeyKind kind);
+    /** Delete the session's key. */
+    void deleteBoundKey(String sessionId);
 
     // ---- Challenges ----
 

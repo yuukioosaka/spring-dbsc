@@ -17,29 +17,20 @@ public enum DbscErrorCode {
     JTI_MISMATCH,
     SIGNATURE_INVALID,
     KEY_NOT_FOUND_NATIVE,
-    KEY_NOT_FOUND_BOUND,
-    /** Legacy, kind-agnostic code retained for back-compat. */
-    KEY_NOT_FOUND,
     SESSION_NOT_FOUND,
-    /** No session record for the cookie, so nothing has been registered yet. */
-    SESSION_NOT_REGISTERED,
     SESSION_ALREADY_REGISTERED,
     RATE_LIMITED,
-    MISSING_PROOF,
-    MALFORMED_PROOF,
-    PROOF_REPLAY,
 
     /**
-     * A structurally incomplete request: a missing bound-protocol cookie or body
-     * field. Spec 08 maps this to 400 rather than 403, because it is a client bug
-     * and not a rejected proof.
+     * A structurally incomplete request: a missing cookie or body field. Spec 08
+     * maps this to 400 rather than 403, because it is a client bug and not a
+     * rejected signature.
      */
     BAD_REQUEST;
 
-    /** Codes that indicate a proof/signature problem rather than a protocol misuse. */
+    /** Codes that indicate a signature problem rather than a protocol misuse. */
     private static final List<DbscErrorCode> SECURITY_RELEVANT = List.of(
-            SIGNATURE_INVALID, MALFORMED_JWS, INVALID_JWK, JTI_MISMATCH,
-            PROOF_REPLAY, MALFORMED_PROOF);
+            SIGNATURE_INVALID, MALFORMED_JWS, INVALID_JWK, JTI_MISMATCH);
 
     public boolean isSecurityRelevant() {
         return SECURITY_RELEVANT.contains(this);

@@ -7,9 +7,6 @@ import click.yukio.dbsc.protocol.CookieScope;
 import click.yukio.dbsc.protocol.DbscProtocolEngine;
 import click.yukio.dbsc.ratelimit.InMemoryRateLimiter;
 import click.yukio.dbsc.ratelimit.RateLimiter;
-import click.yukio.dbsc.replay.InMemoryProofReplayCache;
-import click.yukio.dbsc.replay.JdbcProofReplayCache;
-import click.yukio.dbsc.replay.ProofReplayCache;
 import click.yukio.dbsc.storage.InMemoryStorageAdapter;
 import click.yukio.dbsc.storage.JdbcStorageAdapter;
 import click.yukio.dbsc.telemetry.TelemetryPublisher;
@@ -33,8 +30,7 @@ import java.time.Clock;
  *
  * <p>Every collaborator is replaceable: an application that already has a
  * session store can supply its own {@link StorageAdapter}, and a deployment with
- * more than one process should supply a shared {@link ProofReplayCache} and
- * {@link RateLimiter}.
+ * more than one process should supply a shared {@link RateLimiter}.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(DbscProperties.class)
@@ -89,25 +85,6 @@ public class DbscAutoConfiguration {
         return new DbscProtocolEngine(storage, properties, challenges, clock, telemetry);
     }
 
-    /**
-     * A replay cache shared through the application's {@link DataSource}, so the
-     * check-and-record is atomic across processes. Falls back to a single-process
-     * cache when no DataSource is available.
-     */
-    @Bean
-    @ConditionalOnMissingBean(ProofReplayCache.class)
-    public ProofReplayCache dbscReplayCache(ObjectProvider<DataSource> dataSource) {
-        DataSource ds = dataSource.getIfAvailable();
-        if (ds == null) {
-            log.warn("DBSC replay cache: in-memory (single process only)");
-            return new InMemoryProofReplayCache();
-        }
-        JdbcProofReplayCache cache = new JdbcProofReplayCache(ds);
-        cache.initialize();
-        log.info("DBSC replay cache: JDBC (multi-process)");
-        return cache;
-    }
-
     @Bean
     @ConditionalOnMissingBean(RateLimiter.class)
     public RateLimiter dbscRateLimiter(DbscProperties properties) {
@@ -142,7 +119,6 @@ public class DbscAutoConfiguration {
             DbscProtocolEngine engine,
             CookieScope cookieScope,
             RateLimiter rateLimiter,
-            ProofReplayCache replayCache,
             Clock clock) {
         return new DbscService(
                 properties,
@@ -151,7 +127,6 @@ public class DbscAutoConfiguration {
                 engine,
                 cookieScope,
                 rateLimiter,
-                replayCache,
                 clock,
                 properties.isTrustForwardedHeaders());
     }
@@ -167,7 +142,7 @@ public class DbscAutoConfiguration {
         @Bean
         @ConditionalOnMissingBean(StorageAdapter.class)
         public StorageAdapter devStorageAdapter() {
-            log.warn("DBSC storage: in-memory — bound keys are lost on restart. "
+            log.warn("DBSC storage: in-memory — keys are lost on restart. "
                     + "Live sessions will break. Development only.");
             return new InMemoryStorageAdapter();
         }

@@ -3,7 +3,6 @@ package click.yukio.dbsc;
 import click.yukio.dbsc.core.Challenge;
 import click.yukio.dbsc.core.ProtectionTier;
 import click.yukio.dbsc.core.Session;
-import click.yukio.dbsc.replay.JdbcProofReplayCache;
 import click.yukio.dbsc.storage.JdbcStorageAdapter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -26,9 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>The in-memory adapter gets its atomicity from
  * {@code ConcurrentHashMap.compute}; the JDBC adapter gets it from a conditional
- * {@code UPDATE} and a primary key. Those are different mechanisms with the same
- * contract, so each needs its own test — a non-atomic challenge consume is a
- * replay vulnerability, and a non-atomic replay cache is not a replay defence.
+ * {@code UPDATE} and a primary key. A non-atomic challenge consume is a replay
+ * vulnerability, so it needs its own test.
  *
  * <p>Each test uses its own uniquely-named in-memory H2 database, so they can run
  * in parallel without sharing state.
@@ -70,24 +68,6 @@ class JdbcAdapterConcurrencyTest {
 
         assertEquals(1, winners.get(),
                 "the UPDATE ... WHERE consumed = false must let exactly one caller win");
-    }
-
-    @Test
-    @DisplayName("JDBC replay cache: exactly one of N identical proofs is accepted")
-    void replayCacheAdmitsOne() throws Exception {
-        JdbcProofReplayCache cache = new JdbcProofReplayCache(dataSource);
-        cache.initialize();
-
-        String key = "sess.POST./demo/payment.1700000000000.sigPrefix";
-        AtomicInteger accepted = new AtomicInteger();
-        runConcurrently(() -> {
-            if (cache.checkAndRecord(key, 600_000)) {
-                accepted.incrementAndGet();
-            }
-        });
-
-        assertEquals(1, accepted.get(),
-                "a primary-key INSERT must accept the first proof and reject every replay");
     }
 
     @Test

@@ -10,99 +10,83 @@ specification.
 
 This artifact is meant to be **embedded in an existing Spring Boot application**:
 it ships no `@SpringBootApplication` and no controllers. You add it as a
-dependency, call `bind()` from your own login route, and declare which of your
-existing routes need a proof.
+dependency, call `bind()` from your own login route, and wire one filter into your
+own security chain.
 
-The point of DBSC: a session cookie that is stolen off the wire is useless on
-another device, because the session is bound to a private key that never leaves
-the browser. A stolen cookie either fails a per-request signature check, or gets
-the session demoted to `none` the moment someone tries to refresh with it.
+The point of DBSC: a session cookie stolen off the wire is useless on another
+device, because the session is bound to a private key that never leaves the
+browser's hardware. When the owner's browser refreshes the binding and the
+attacker's device cannot produce the signature, the session is demoted to `none`
+and the theft is reported as `session_stolen`.
 
 ## What's implemented
 
 | Area | Status |
 |---|---|
-| Native protocol (Chromium, spec 02) | ✅ registration + refresh |
-| Bound protocol (Web Crypto polyfill, spec 03) | ✅ all four routes — see [the caveats](#native-vs-polyfill-bound--read-this-before-choosing) |
-| Per-request proof guard (spec 04) | ✅ incl. body binding |
+| Native protocol (Chromium, spec 02) | ✅ registration, refresh, well-known document |
+| Hardware-backed key binding (TPM / Secure Enclave) | ✅ `ES256` + `RS256` |
 | Atomic challenge consumption | ✅ in-memory + JDBC |
-| Proof replay cache | ✅ in-memory + JDBC |
-| Tier model + demotion-on-failure | ✅ |
+| Tier model + demotion-on-failure | ✅ `dbsc` / `none` |
 | Telemetry events | ✅ 6 event types |
-| Rate limiting | ✅ |
+| Rate limiting | ✅ per-IP, with a separate failure budget |
 | DPoP (spec 10) | ❌ out of scope — an orthogonal layer |
 
-**Test status: 112 tests passing**, including all 8 conformance vectors from
-`dbsc-toolkit/spec/vectors` replayed through the real engine.
+**Test status: 72 tests passing**, including the toolkit's language-neutral
+conformance vectors (`registration-header`, `registration`, `refresh`) replayed
+through the real engine.
 
-## Native vs. polyfill (`bound`) — read this before choosing
+## The protection model
 
-DBSC proper — the [W3C draft](https://w3c.github.io/webappsec-dbsc/) and what
-Chromium implements — is the **native** mechanism: the browser mints a key in
-hardware-backed, non-extractable storage, and no script on the page can ever call
-it. That is the mechanism this library treats as the real one, and registering it
-requires no client code at all.
+DBSC — the [W3C draft](https://w3c.github.io/webappsec-dbsc/) and what Chromium
+implements — is what this library implements, and this library implements *only*
+that. The browser mints a key in **hardware-backed, non-extractable storage**, and
+no script on the page can ever read or call it. Registering a session therefore
+requires **no client code at all**: sending `Secure-Session-Registration` is the
+whole handshake.
 
-The **`bound` tier is a different thing wearing the same name.** It is a
-**Web Crypto polyfill, outside the DBSC specification**, shipped by
-[`dbsc-toolkit`](https://github.com/SulimanAbdulrazzaq/dbsc-toolkit) for browsers
-that have not implemented native DBSC yet. Instead of a hardware key it stores a
-P-256 private key in **IndexedDB, where page script can read it**, and signs
-proofs in JavaScript:
+That is the guarantee, stated precisely: an attacker who steals the session cookie
+cannot produce a refresh signature, and the browser cannot be made to produce one
+for them. Three properties of the implementation carry it.
 
-```html
-<script type="module">
-  import { initBoundDbsc } from "/dbsc-client/index.js";
-  initBoundDbsc();
-</script>
-```
+**A session's key is the session's key.** The key is stored once per `sessionId`
+(`BoundKey` has no other identity — re-registering replaces it), and registration
+is refused outright with `SESSION_ALREADY_REGISTERED` when a key is already
+present. There is no second, weaker key type and no path by which a
+script-readable credential can stand in for a hardware one.
 
-That one property — an **extractable** key in script-reachable storage — is the
-whole story, and it has consequences worth stating plainly:
+**Demotion on a failed refresh is the theft response.** A refresh whose signature
+fails consumes the challenge, moves the session to `tier: none`, and emits
+`session_stolen` — and the key is deliberately **kept**, because it is what makes
+the next failure recognisable as a replay. The stored tier is therefore
+authoritative: a key sets the *ceiling* a session can reach, not whether it is
+currently protected. `dbsc.tierFor(sessionId)` reports `dbsc` only while the
+session is actually trustworthy.
 
-- **Any XSS anywhere on the origin is a signing oracle.** A single injected script
-  can export the private key or just call the signer, and it can do so from a
-  different page than the one being protected. The cookie-theft scenario DBSC
-  exists to defeat is *not* closed by the polyfill: an attacker who steals the
-  cookie can also steal the key that is supposed to make it useless.
-- **Theft resistance is therefore much weaker than native**, not merely "lower".
-  Native keys cannot be exported even by the page that owns them; polyfill keys
-  are readable by any script that reaches the same origin.
-- **It is opt-in client code**, so unlike the native path it depends on you
-  shipping `dbsc-client` and on it running — a broken script, a strict CSP, or a
-  blocked module silently means "bound sessions are impossible", not "degraded".
+**The tier model has two values, not three.** `dbsc` means a hardware-backed key
+is registered; `none` means nothing is bound, or a refresh signature failed. There
+is no intermediate or weaker tier, and a stored value the library does not
+recognise reads as `none` rather than being trusted.
 
-Because these are genuinely different guarantees, the library keeps them in
-separate tiers rather than pretending they are equivalent:
+### What the library does not do
 
-| Tier | Key | How it is registered | Relative strength |
-|---|---|---|---|
-| `dbsc` | Native, non-extractable, hardware-backed | `Secure-Session-Registration`, no client code | The DBSC mechanism |
-| `bound` | Web Crypto P-256, **script-readable** | `/dbsc-bound/*` via `dbsc-toolkit` client | Weaker; XSS turns it into an oracle |
-| `none` | — | — | Nothing is bound |
+Two things are easy to assume from the name, and both are false here:
 
-### What that means for the proof guard
+- **It does not guard your routes.** No filter verifies a per-request proof. The
+  protocol surface (`/dbsc/registration`, `/dbsc/refresh`,
+  `/.well-known/device-bound-sessions`) is all the library serves, and it does not
+  touch any other path. Your own authentication and authorization remain the only
+  thing standing in front of your endpoints.
+- **It does not sign anything per request.** DBSC has no per-request proof to
+  verify: the browser signs only when it registers and when it refreshes, and the
+  signature never leaves the browser's own protocol flow. What the library gives
+  you is **freshness** — a session whose browser has stopped proving possession
+  gets demoted — so the security decision available to you is "is this session's
+  tier currently `dbsc`?", not "did this request carry a valid proof?".
 
-The guard verifies `X-Dbsc-Bound-Proof` against **the polyfill key**, because a
-native key never leaves the browser and no page script can sign with it. So the
-guard's tier check is not an upgrade — it is a **refusal threshold**, and today it
-is only ever `bound`:
-
-- A guarded route requires at least tier `bound`, i.e. it **accepts a
-  script-readable key as sufficient**. That is the only behaviour the guard has,
-  and it is a real weakening relative to what "DBSC-protected" sounds like.
-  There is currently **no per-route way to demand `dbsc`** short of contributing
-  one; the helpers are a compatibility bridge, not a strict mode.
-- Setting `dbsc.bound: false` is the blunt instrument that does exist: the
-  polyfill routes stop being served, so no session can reach tier `bound` through
-  them and only natively registered sessions can satisfy a guard. Be aware of the
-  trade — a browser with no native DBSC support then cannot bind at all, so this
-  is an availability decision as much as a security one.
-
-If you want the honest short version: **the polyfill is a compatibility bridge,
-not a security upgrade.** Treat a `bound` session as "bound to a key that XSS can
-steal", and use `dbsc.bound: false` when you would rather have no binding than
-that one.
+Wiring a DBSC session only makes an endpoint **DBSC-aware** if you make it so:
+gate that endpoint on `dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)` (see
+[Act on the tier](#act-on-the-tier)). Adopting the library never silently changes
+the behaviour of an existing endpoint.
 
 ## Requirements
 
@@ -128,18 +112,18 @@ That is the whole installation. A normal Boot app picks up `DbscAutoConfiguratio
 from the JAR's `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`
 — no extra annotation.
 
-### 2. Wire the filters into your chain
+### 2. Wire `DbscFilter` into your chain
 
-The library ships **two `OncePerRequestFilter` beans and no `SecurityFilterChain`.**
-Nothing is registered into Spring Security for you, because *where* the filters sit,
-which paths bypass authentication, and what authorization runs underneath them are
-policy decisions that belong to your application. A library-supplied chain would either
-collide with yours (two chains matching `/**` is a hard startup error) or, worse, be
-kept and silently replace your authorization rules.
+The library ships **one `OncePerRequestFilter` bean and no `SecurityFilterChain`.**
+Nothing is registered into Spring Security for you, because *where* the filter sits,
+which paths bypass authentication, and what authorization runs elsewhere in the chain
+are policy decisions that belong to your application. A library-supplied chain would
+either collide with yours (two chains matching `/**` is a hard startup error) or,
+worse, be kept and silently replace your authorization rules.
 
-So the setup is two chains: a small protocol chain that must stay unauthenticated, and
-your own application chain. Both filters are declared for you — `DbscFilter` and
-`DbscProofGuardFilter` arrive as beans from `DbscFilterConfiguration`.
+`DbscFilter` arrives as a bean named `dbscFilter` from `DbscFilterConfiguration`.
+Put it in **your** chain — usually its own protocol chain, so the routes it serves
+stay unauthenticated:
 
 ```java
 @Configuration
@@ -154,7 +138,6 @@ public class MySecurityConfig {
         http
                 .securityMatcher(new OrRequestMatcher(
                         new AntPathRequestMatcher("/dbsc/**"),
-                        new AntPathRequestMatcher("/dbsc-bound/**"),
                         new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
                 .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
@@ -163,17 +146,14 @@ public class MySecurityConfig {
         return http.build();
     }
 
-    /** Your application, with the DBSC proof guard layered on top of it. */
+    /** Your application, under your own authentication and authorization. */
     @Bean
     @Order(1)
-    public SecurityFilterChain appChain(HttpSecurity http, DbscProofGuardFilter guardFilter)
-            throws Exception {
+    public SecurityFilterChain appChain(HttpSecurity http) throws Exception {
         http
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/login", "/css/**").permitAll()
-                        .requestMatchers("/api/transfer").authenticated())
-                // Before authentication: DBSC's 403 must never become a 401.
-                .addFilterBefore(guardFilter, UsernamePasswordAuthenticationFilter.class);
+                        .requestMatchers("/api/transfer").authenticated());
         return http.build();
     }
 }
@@ -185,7 +165,7 @@ The three details that actually matter, and how each one fails:
 |---|---|
 | `OrRequestMatcher` for the protocol paths — `securityMatcher()` **sets**, it does not accumulate | Only the last path is matched; the rest fall through to your chain, which answers a Spring 403 before `DbscFilter` runs |
 | `addFilterBefore(..., UsernamePasswordAuthenticationFilter.class)` **and** CSRF off on the protocol chain | The browser's registration POST is rejected by CSRF first, or Security's entry point turns DBSC's 403 into a 401 — which Chromium treats as fatal and deletes the session |
-| One filter **bean per chain** | `OncePerRequestFilter` records itself in a request attribute, so the same instance in a second chain silently skips it |
+| The bean is registered in **one** chain only | `OncePerRequestFilter` records itself in a request attribute, so the same instance in a second chain silently skips it |
 
 Anchoring on `UsernamePasswordAuthenticationFilter.class` is **not** a dependency on
 form login. `HttpSecurity` registers that class as an ordering *position* when it is
@@ -194,7 +174,8 @@ naming a filter **instance** would require the filter to exist, so this is valid
 OIDC, HTTP Basic, pre-authentication, and no authentication at all.
 
 Boot also auto-registers every `Filter` bean as a plain servlet filter *outside* the
-security chain, which would run both filters a second time on every path. Disable that:
+security chain, which would run the DBSC filter a second time on every path. Disable
+that:
 
 ```java
 @Bean
@@ -204,6 +185,14 @@ FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
     return registration;
 }
 ```
+
+One instance per chain. `OncePerRequestFilter` records that it has run in a request
+attribute, so registering the *same* instance in two chains makes the second chain
+silently skip it.
+
+If you do not use Spring Security at all, see
+[No Spring Security at all](#no-spring-security-at-all) — `DbscFilter` is not a
+Security component and registers as a plain servlet filter.
 
 ### Examples
 
@@ -220,9 +209,7 @@ and the authenticated principal together:
 public class OidcSecurityConfig {
 
     @Bean
-    SecurityFilterChain appChain(HttpSecurity http,
-                                 DbscProofGuardFilter guardFilter,
-                                 DbscService dbsc) throws Exception {
+    SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc) throws Exception {
         http
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/login/**", "/oauth2/**").permitAll()
@@ -233,23 +220,18 @@ public class OidcSecurityConfig {
                     dbsc.bind(sessionIdFor(request), user.getSubject(),
                               86_400_000L, request, response);
                     response.sendRedirect("/");
-                }))
-                .addFilterBefore(guardFilter, UsernamePasswordAuthenticationFilter.class);
+                }));
         return http.build();
     }
 
     /**
-     * The session id DBSC binds to. It must be stable for the browser session
-     * across requests, because every later proof is checked against the session
-     * record created here.
+     * The session id DBSC binds to: the application's own session id, which is
+     * stable for the browser session across requests. Every later refresh is
+     * looked up by it, so it must not be derived from anything request-scoped.
      *
      * <p>The OIDC subject is NOT suitable: it identifies the user, not the
      * browser, so it is shared across tabs, devices and concurrent logins. Binding
-     * to it would make two browsers share one DBSC session and let either one
-     * satisfy the other's proofs.
-     *
-     * <p>Use whatever your application already treats as the session identifier.
-     * With an HttpSession, that is its id:
+     * to it would make two browsers share one DBSC session.
      */
     private static String sessionIdFor(HttpServletRequest request) {
         return request.getSession().getId();
@@ -261,17 +243,20 @@ public class OidcSecurityConfig {
 `HttpSession`. Note the ordering: `bind()` reads the session, so the session must already
 exist at that point. In a success handler it does, because authentication created it.
 
-##### Caveat: call `bind()` from a same-site page, not from the callback
+If your app has no `HttpSession`, bind to whatever opaque id you already mint per
+client — as in [the stateless example](#stateless-api--bearer-tokens) — rather than
+inventing one for this.
 
-Behind an OIDC or SAML callback the response above is cross-site, and Chromium will
-report:
+##### Caveat: the registration POST is deferred behind a cross-site callback
+
+When `bind()` runs in an OIDC or SAML callback, Chromium logs:
 
 ```
 Registration returned challenge error response code
 POST /dbsc/registration -> 403
 ```
 
-The cause is a DBSC-specific rule, not a Spring bug:
+and the session stays unbound. The cause is a DBSC-specific rule, not a Spring bug:
 
 > Chromium makes DBSC requests inherit the **initiator** of the request that caused
 > them, and DBSC cookies are subject to `SameSite`. The login callback response is
@@ -288,9 +273,9 @@ still inherits it. Only a **client-side navigation** does.
 
 `bind()` already handles half of this: when the request carries
 `Sec-Fetch-Site: cross-site` it records the session but **withholds the registration
-header**, so Chromium is never told to make a doomed POST. It is then up to the
-application to call `bind()` once more from a same-site request. Do that by deferring
-the binding by one browser-initiated hop:
+header**, so Chromium is never told to make a doomed POST. The registration intent is
+therefore **deferred** to the next request that is same-site; it is up to the
+application to make one happen by deferring the binding by one browser-initiated hop:
 
 ```java
 // 1. Success handler: redirect to an HTML page, do NOT bind here.
@@ -316,10 +301,10 @@ public void bind(Authentication auth, HttpServletRequest request,
 ```
 
 If your app is **stateless** and has no `HttpSession`, do not invent one just for this —
-bind to whatever opaque id you already mint per client, as in the stateless example
-below. What matters is that the id is **per browser session** and **reused across every
-subsequent request from that session**, since the DBSC record is looked up by it on
-each refresh and each guarded request.
+bind to whatever opaque id you already mint per client, as in
+[the stateless example](#stateless-api--bearer-tokens). What matters is that the id is
+**per browser session** and **reused across every subsequent request from that session**,
+since the DBSC record is looked up by it on each refresh.
 
 #### Form login (password)
 
@@ -328,9 +313,7 @@ the success handler there too:
 
 ```java
 @Bean
-SecurityFilterChain appChain(HttpSecurity http,
-                             DbscProofGuardFilter guardFilter,
-                             DbscService dbsc) throws Exception {
+SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc) throws Exception {
     http
             .authorizeHttpRequests(auth -> auth
                     .requestMatchers("/login", "/css/**").permitAll()
@@ -344,8 +327,7 @@ SecurityFilterChain appChain(HttpSecurity http,
                     }))
             .logout(logout -> logout.logoutSuccessHandler((request, response, auth) ->
                     dbsc.sessionFor(request)
-                            .ifPresent(s -> dbsc.terminate(s.id(), request, response))))
-            .addFilterBefore(guardFilter, UsernamePasswordAuthenticationFilter.class);
+                            .ifPresent(s -> dbsc.terminate(s.id(), request, response))));
     return http.build();
 }
 ```
@@ -372,45 +354,46 @@ public TokenResponse login(@RequestBody Credentials credentials,
 
 #### No Spring Security at all
 
-The filters are not Security components — nothing in either one touches a Security
-request wrapper or context. Register them as plain servlet filters:
+`DbscFilter` is not a Security component — nothing in it touches a Security request
+wrapper or context. Register it as a plain servlet filter:
 
 ```java
 @Bean
 FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
     var registration = new FilterRegistrationBean<>(filter);
-    registration.addUrlPatterns("/dbsc/*", "/dbsc-bound/*", "/.well-known/*");
+    registration.addUrlPatterns("/dbsc/*", "/.well-known/*");
     registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
     return registration;
 }
 ```
 
-### 3. Bind, guard, terminate
+### 3. Bind, terminate, act on the tier
 
-Now the three lifetime calls. Details and the reasoning are in
+Details and the reasoning are in
 [Wiring it into your own app](#wiring-it-into-your-own-app); the short version:
 
 - **`dbsc.bind(sessionId, userId, ttlMillis, request, response)`** — at the end of your
   login handler. Binding is idempotent per session; the browser does the rest of the
   native registration on its own.
-- **`GuardedRoute` beans** — declare which paths need a per-request proof.
-  Nothing is guarded by default.
 - **`dbsc.terminate(...)`** — on logout, so the browser forgets the binding instead of
   retrying against a dead session.
+- **`dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)`** — the DBSC state your own
+  code reads when it wants to require a bound session. See
+  [Act on the tier](#act-on-the-tier).
 
 ## Architecture
 
-The protocol is served by **two `OncePerRequestFilter`s wired into the Spring
-Security chain**, not by controllers:
+The protocol is served by **one `OncePerRequestFilter` that your own Spring Security
+chain invokes**, not by controllers:
 
-| Filter | Responsibility |
+| Component | Responsibility |
 |---|---|
-| `DbscFilter` | Owns every protocol route (`/dbsc/*`, `/dbsc-bound/*`, `/.well-known/device-bound-sessions`). Terminates the chain for those paths. |
-| `DbscProofGuardFilter` | Enforces a per-request proof on the paths you declare as `GuardedRoute`. Goes in *your* chain. |
+| `DbscFilter` | Owns every protocol route (`/dbsc/*`, `/.well-known/device-bound-sessions`). Terminates the chain for those paths; passes everything else through untouched. |
 
-`DbscService` sits below both as the HTTP facade, and `DbscProtocolEngine` below
-that as the protocol itself — neither depends on Spring Security. See
-[How it is wired (and why)](#how-it-is-wired-and-why) for the reasoning.
+`DbscService` sits below it as the HTTP facade, and `DbscProtocolEngine` below that as
+the protocol itself — neither depends on Spring Security. See
+[How it is wired (and why)](#how-it-is-wired-and-why) for the reasoning. There is no
+second filter: the library does not guard application routes.
 
 ## Running the tests
 
@@ -445,7 +428,7 @@ python3 scripts/check-error-coverage.py
 
 The web tests run against `DbscTestHostApplication` in `src/test` — a miniature
 host app that stands in for yours: a login route that calls `bind()`, a `whoami`
-route, a guarded `payment` route, and a logout route. Read it first when wiring
+route, a `payment` route, and a logout route. Read it first when wiring
 the library up; it is the smallest complete integration.
 
 ## Wiring it into your own app
@@ -500,57 +483,61 @@ public void logout(HttpServletRequest request, HttpServletResponse response) {
 }
 ```
 
-### 3. Guard the routes that matter
+### 3. Act on the tier
 
-A guarded route requires a `bound` key plus a fresh `X-Dbsc-Bound-Proof`. Declare the
-paths:
+There is nothing to declare and nothing to enable: the library does not guard routes.
+Your authentication and authorization keep working exactly as they did, and DBSC is
+**additional state** your own code can consult when a decision deserves it:
 
 ```java
-@Bean
-GuardedRoute transferRoute() {
-    return GuardedRoute.withBody("/api/transfer");
+@PostMapping("/api/transfer")
+public ResponseEntity<?> transfer(@RequestBody Transfer body, HttpServletRequest request) {
+    Optional<Session> session = dbsc.sessionFor(request);
+    if (session.isEmpty() || dbsc.tierFor(session.get().id()) != ProtectionTier.DBSC) {
+        // Signed in, but this browser is not proving possession of a bound key.
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(stepUpOrReauthenticate());
+    }
+    return transferService.execute(body);
 }
 ```
 
-`withBody` binds the request body into the proof, so a captured proof cannot be
-replayed against a modified payload. Use `withoutBody` for routes with no
-meaningful body.
+Three things to be deliberate about in that check:
 
-Something to be deliberate about: the helpers above accept tier `bound`, and
-`bound` is the **Web Crypto polyfill**, whose key page script can read. Guarding a
-route with them does not buy what "DBSC-protected" suggests if you are relying on
-theft resistance — see [Native vs. polyfill](#native-vs-polyfill-bound--read-this-before-choosing).
-There is no per-route way to demand the stronger native tier today; the way to
-refuse the polyfill outright is `dbsc.bound: false`, which stops `/dbsc-bound/*`
-from being served at all. That is a deliberate availability trade — a browser
-without native DBSC support then cannot bind.
+- **It is a step-up decision, not an authentication one.** A `dbsc` tier never
+  substitutes for being authenticated; read it *in addition to* your own checks, as
+  above.
+- **`tierFor` is the live answer, not the value on the record.** It accounts for the
+  refresh cadence and the grace window, so a session whose browser has stopped
+  refreshing reads `none` — which is the demotion you are actually trying to surface.
+- **Expect `none` to be normal.** A browser without DBSC support (or a user who has
+  just logged in, before registration completes) is legitimately unbound, so decide in
+  advance whether that is a hard refusal or a softer "verify again" prompt.
 
-Declaring the route gives the guard filter something to enforce; **the filter itself
-still has to be in the chain serving that path**, which is the `appChain` bean in step
-2. Both halves are required, and a `GuardedRoute` with no guard filter in the matching
-chain enforces nothing.
-
-**Nothing is guarded by default.** Adopting DBSC never silently changes the
-behaviour of existing endpoints; guarding is opt-in per path.
+If your application cannot act on a weaker tier — for example a compliance rule that
+says a stolen cookie must never be usable — say so explicitly rather than assuming the
+handshake alone covers it: `bind()` and the routes are all the library does, and it is
+application code like the block above that turns a bound session into an enforced one.
 
 ## How it is wired (and why)
 
-DBSC is implemented as **two `OncePerRequestFilter`s** rather than controllers, and
-both live in the Spring Security chain:
+DBSC is implemented as **one `OncePerRequestFilter`** rather than controllers,
+and it runs inside the Spring Security chain because that is where your application
+decides what is reachable:
 
 ```mermaid
 flowchart TD
     A[Request] --> B{DBSC protocol paths?}
     B -- yes --> C[DbscFilter<br/>before UsernamePasswordAuthenticationFilter]
     C --> C2[terminates:<br/>writes status + headers + body]
-    B -- no --> D[your app chain]
-    D --> D3[DbscProofGuardFilter<br/>before authentication]
-    D3 -- proof invalid --> D2[403 + JSON,<br/>chain stops]
-    D3 -- proof valid --> E[your authorization rules]
+    B -- no --> E[your authentication<br/>and authorization]
     E --> F[your controller]
 ```
 
-The reasons for filters rather than controllers:
+Neither branch consults DBSC state: the protocol paths are served and stop there, and
+everything else is your application's chain, unchanged. Gating an endpoint on the tier
+is your code, not a filter — see [Act on the tier](#act-on-the-tier).
+
+The reasons for a filter rather than controllers:
 
 - **These are a protocol surface, not endpoints.** The routes must be reachable
   before any application session exists, and must answer with DBSC's own status
@@ -561,11 +548,9 @@ The reasons for filters rather than controllers:
   must answer 403. If Spring Security handled these paths itself it would answer
   401 first. `DbscFilter` is registered *before* Spring Security's authentication
   entry points precisely so nothing upstream can replace that status.
-- **One filter replaces two collaborating pieces.** The earlier interceptor-based
-  guard had to read the body to hash it, which required a *second* filter to make
-  the body replayable for the handler. As a filter, the guard buffers the body
-  once and passes a `ReplayableBodyRequest` down the chain — the round trip
-  through the servlet body is now handled in one place.
+- **It owns no state the application needs to configure.** The filter is handed the
+  session-agnostic protocol surface only, so it adds no ordering constraints to your
+  chain beyond the one above and no policy of its own over your routes.
 
 ### Using your own `SecurityFilterChain`
 
@@ -573,26 +558,17 @@ That is the only way to use the library — [Getting Started](#getting-started) 
 full worked example, and the two chains there are the shape to copy. This section only
 adds the reasoning behind the filter placement.
 
-Two placement rules, and what breaks without them:
-
 - **`dbscFilter` goes in the chain that owns the protocol paths, before
-authentication.** Security would otherwise answer 401 there, and Chromium treats 401
-on the refresh route as fatal.
-- **`dbscProofGuardFilter` goes in your application chain, before authentication.**
-It layers on top of authorization: a valid proof is never a substitute for being
-authenticated.
-
-One instance per chain. `OncePerRequestFilter` records that it has run in a request
-attribute, so registering the *same* instance in two chains makes the second chain
-silently skip it.
+  authentication.** Security would otherwise answer 401 there, and Chromium treats 401
+  on the refresh route as fatal. It belongs in exactly one chain.
 
 And the detail that is easy to miss: **the protocol paths must be served by a chain with
 CSRF disabled.** The browser's registration POST carries no CSRF token, so a chain that
 applies CSRF to `/dbsc/**` rejects it before `DbscFilter` ever runs.
 
 If you do not use Spring Security at all, see
-[No Spring Security at all](#no-spring-security-at-all) — the filters are not Security
-components and register as plain servlet filters.
+[No Spring Security at all](#no-spring-security-at-all) — `DbscFilter` is not a Security
+component and registers as a plain servlet filter.
 
 ### Replace the collaborators you have opinions about
 
@@ -601,9 +577,10 @@ bean, so defining your own replaces the default. The ones most worth replacing:
 
 | Bean | Default | Replace when |
 |---|---|---|
-| `StorageAdapter` | JDBC, else in-memory | You already have a session store — implement the interface; the only hard requirement is an **atomic** `consumeChallenge` |
-| `ProofReplayCache` | JDBC, else in-memory | You run more than one process (the in-memory cache is per-JVM) |
-| `RateLimiter` | In-memory, per-IP | Same — or you use a gateway/bucket you already have |
+| `StorageAdapter` | JDBC when a `DataSource` is present, else in-memory | You already have a key/session store — implement the interface; the only hard requirement is an **atomic** `consumeChallenge` |
+| `RateLimiter` | In-memory, per-IP | You run more than one process (the in-memory limiter is per-JVM) — or you use a gateway/bucket you already have |
+| `CookieScope` | Resolved from `secure` / `cookie-scope` / `cookie-domain` | You build cookie names or attributes yourself |
+| `ChallengeService`, `DbscProtocolEngine`, `TelemetryPublisher` | Library defaults | You need different challenge or telemetry behaviour |
 | `Clock` | `Clock.systemUTC()` | You need to freeze time. Override the bean **named `dbscClock`** (`@ConditionalOnMissingBean(name = "dbscClock")`) |
 
 ```java
@@ -622,30 +599,29 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 
 | Key | Default | Notes |
 |---|---|---|
-| `bound` | `true` | Whether the polyfill protocol (`/dbsc-bound/*`, spec 03) is served. It is **not** the W3C mechanism: its key is script-readable, so XSS makes it a signing oracle. `false` runs native only — see [Native vs. polyfill](#native-vs-polyfill-bound--read-this-before-choosing) |
 | `secure` | `true` | `__Host-` cookies + `Secure`. **Turn off only for localhost HTTP** |
 | `cookie-scope` | `host` | `site` enables multi-subdomain and requires `cookie-domain` |
 | `cookie-domain` | — | e.g. `example.com`; required for `site` scope |
 | `registration-path` | `/dbsc/registration` | what the registration header advertises |
 | `refresh-path` | `/dbsc/refresh` | also the `refresh_url` in the JSON config |
-| `bound-path` | `/dbsc-bound` | base path of the polyfill routes |
-| `bound-cookie-ttl` | `10m` | binding cookie lifetime == refresh cadence |
-| `registration-cookie-ttl` | `24h` | |
-| `challenge-ttl` | `5m` | |
+| `bound-cookie-ttl` | `10m` | lifetime of the binding cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
+| `registration-cookie-ttl` | `24h` | lifetime of the pre-registration cookie carrying the session id |
+| `challenge-ttl` | `5m` | lifetime of a challenge JTI |
 | `refresh-grace` | `30s` | softens the freshness poll across a refresh |
-| `timestamp-window` | `5m` | clock skew accepted in bound refreshes/proofs |
-| `session-ttl` | `7d` | |
-| `telemetry-per-request-proofs` | `false` | per-request proof outcomes are noisy |
+| `session-ttl` | `7d` | default lifetime applied by `bind()` when the caller does not set one |
 | `rate-limit.enabled` | `true` | |
 | `rate-limit.capacity` | `30` | per IP, per window |
+| `rate-limit.failure-capacity` | `15` | **failed** attempts per IP, per window — trips long before `capacity` does |
 | `rate-limit.window` | `1m` | |
+| `storage` | `jdbc` when a `DataSource` is present | `memory` for tests and local dev only |
+| `trust-forwarded-headers` | `false` | believe `X-Forwarded-For` / `X-Forwarded-Proto`. Leave off unless a reverse proxy is known to overwrite them — they drive the IP used for rate limiting |
 
 ### Storage
 
-With a `DataSource` on the classpath, sessions, keys, challenges and replay
-entries all live in the database (`dbsc.storage: jdbc`).
+With a `DataSource` on the classpath, sessions, keys and challenges all live in the
+database (`dbsc.storage: jdbc`).
 
-For tests and local dev, `dbsc.storage: memory` swaps in heap-backed adapters.
+For tests and local dev, `dbsc.storage: memory` swaps in a heap-backed store.
 **Not for production**: every restart breaks live sessions, because the browser
 still holds a cookie for a key the server no longer remembers.
 
@@ -659,65 +635,63 @@ dbsc:
 
 #### Schema
 
-The tables are created on startup by `JdbcStorageAdapter.initialize()` and
-`JdbcProofReplayCache.initialize()`, which issue `CREATE TABLE IF NOT EXISTS` and are
-safe to run on every boot. A fresh database needs no setup.
+The tables are created on startup by `JdbcStorageAdapter.initialize()`, which issues
+`CREATE TABLE IF NOT EXISTS` and is safe to run on every boot. A fresh database needs
+no setup.
 
-That default is convenient but it means the application's database user needs **DDL
-rights at runtime**. Many production setups do not grant that, and some run schema
-changes through a migration tool so that every change is reviewed and versioned. Both
-are reasonable; pick one:
+That default is convenient, but in production the schema should be owned by a migration
+tool (Flyway, Liquibase, or whatever the application already uses), for two reasons:
 
-**Default — let the library create the schema.** No config. The runtime user needs
-`CREATE TABLE` / `CREATE INDEX`.
+- The runtime database user otherwise needs **DDL rights**, which many production
+  setups deliberately withhold.
+- Schema changes then get reviewed, versioned and rolled out like every other change,
+  instead of silently appearing on the first boot of a new release.
 
-**Managed — let your migration tool own it.** The same DDL is shipped as Flyway
-migrations under [`src/main/resources/db/migration/`](./src/main/resources/db/migration):
+The DDL is shipped for exactly that, at
+[`src/main/resources/db/migration/V1__dbsc_storage.sql`](./src/main/resources/db/migration/V1__dbsc_storage.sql):
 
-| Migration | Contents |
+| Table | Contents |
 |---|---|
-| `V1__dbsc_storage.sql` | `dbsc_sessions`, `dbsc_bound_keys`, `dbsc_challenges` |
-| `V2__dbsc_proof_replay.sql` | `dbsc_proof_replay` |
+| `dbsc_sessions` | one row per bound session (`id` PK, `user_id`, `tier`, timestamps) |
+| `dbsc_bound_keys` | the registered hardware key it holds — `session_id` PK, so **one key per session** |
+| `dbsc_challenges` | outstanding JTIs, with the `consumed` flag that makes consumption atomic |
 
-The DDL is **identical** to what `initialize()` issues, and both are idempotent, so
-there is no conflict either way: applying the migrations and then starting the app
-leaves the schema unchanged. That also means you can adopt migrations on an existing
-deployment without a baseline step.
+The file is a plain `CREATE TABLE IF NOT EXISTS` migration: drop it into your
+migration tool's directory, or run its statements however you already run schema
+changes. It is **byte-identical** to what `initialize()` issues and both are
+idempotent, so there is no conflict either way — applying it and then starting the app
+leaves the schema unchanged, and you can adopt it on an existing deployment without a
+baseline step.
 
-The SQL is deliberately portable — no vendor-specific types, no sequences — so the
-same files work on PostgreSQL, MySQL, MariaDB, H2 and SQL Server. Timestamps are
-`BIGINT` epoch milliseconds throughout, matching how the protocol carries them.
+The SQL is deliberately portable — no vendor-specific types, no sequences — so it works
+on PostgreSQL, MySQL, MariaDB, H2 and SQL Server. Timestamps are `BIGINT` epoch
+milliseconds throughout, matching how the protocol carries them.
 
-`V2` is a separate migration because `dbsc_proof_replay` belongs to a different
-collaborator (`ProofReplayCache`) that an application may replace or omit. Keeping it
-out of `V1` means the sessions schema does not depend on a component you might not use.
-
-If you would rather not carry the migrations, the two `initialize()` methods are also
-safe to call yourself from a schema-management hook — the DDL statements are quoted at
-the top of `JdbcStorageAdapter` and `JdbcProofReplayCache`.
+If you would rather not carry the migration at all, `initialize()` is also safe to call
+yourself from a schema-management hook — the DDL statements are quoted at the top of
+`JdbcStorageAdapter`.
 
 ## Things worth knowing
 
 A few behaviours are load-bearing and easy to get wrong if you reimplement or
 extend this:
 
-- **Never 401 on the native refresh route.** Chromium ignores 401 there and the
-  session silently dies. Every DBSC failure is 403, except a missing
-  bound-protocol cookie/field (400) and a tripped rate limit (429).
+- **Never 401 on the refresh route.** Chromium ignores 401 there and the
+  session silently dies. Every DBSC failure is 403, except a structurally incomplete
+  request (400) and a tripped rate limit (429).
 - **A failed refresh signature must consume the challenge and demote to
   `none`.** That demotion is the actual theft response, not a side effect.
-- **`200` with no JSON body on a native route means opt-out**, and the browser
+- **`200` with no JSON body on a protocol route means opt-out**, and the browser
   drops the session. Always return the JSON config on success.
 - **The `attributes` string in the JSON config must match the real
   `Set-Cookie` bytes**, so the browser's cookie matcher recognises it. It
   deliberately excludes `Max-Age`, which the spec's match set does not include.
-- **Tier only climbs.** A session with a native key stays `dbsc` even after the
-  polyfill co-registers, because the native binding is strictly stronger.
-- **The `bound` tier is the polyfill, not DBSC.** Its key lives in IndexedDB and
-  is readable by page script, so it trades theft resistance for reach. The guard
-  accepts it, and there is currently no per-route way to demand better —
-  `dbsc.bound: false` refuses the polyfill entirely. See
-  [Native vs. polyfill](#native-vs-polyfill-bound--read-this-before-choosing).
+- **A key can only be registered once per session.** A second registration is
+  refused with `SESSION_ALREADY_REGISTERED`; re-binding means starting a new session.
+- **`tier` is what makes a session protected, not the presence of a key.** A
+  demoted session keeps its key on purpose (so a later failure is still recognisable
+  as `session_stolen`), which is why `tierFor()` reads the stored tier rather than
+  inferring protection from the key.
 
 ## License
 

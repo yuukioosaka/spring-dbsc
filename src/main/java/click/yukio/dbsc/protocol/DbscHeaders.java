@@ -26,10 +26,7 @@ public final class DbscHeaders {
     public static final String LEGACY_RESPONSE = "Sec-Session-Response";
     public static final String LEGACY_SKIPPED = "Sec-Session-Skipped";
 
-    /** Per-request proof header (spec 04). */
-    public static final String BOUND_PROOF = "X-Dbsc-Bound-Proof";
-
-    /** Server clock hint on bound endpoints (spec 03). */
+    /** Server clock hint. */
     public static final String SERVER_TIME = "X-Server-Time";
 
     private DbscHeaders() {

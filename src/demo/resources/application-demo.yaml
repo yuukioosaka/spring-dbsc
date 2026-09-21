@@ -15,11 +15,11 @@ server:
     key-store-type: PKCS12
     key-alias: dbsc-demo
   # Tomcat defaults to an 8 KB *aggregate* header limit, which is smaller than the
-  # 8192-byte single-header limit DBSC enforces for X-Dbsc-Bound-Proof (spec 04).
-  # Left at the default, an oversized proof is rejected by Tomcat with a 400 HTML
-  # page before any DBSC filter runs, so the spec's MALFORMED_PROOF branch is
-  # unreachable. Raise it above 8192 so the protocol layer gets to judge the
-  # header; a browser will never legitimately send one this large.
+  # 8192-byte single-header limit DBSC enforces for Sec-Session-Response (the
+  # registration JWS). Left at the default, an oversized JWS is rejected by Tomcat
+  # with a 400 HTML page before any DBSC filter runs, so the spec's MALFORMED_JWS
+  # branch is unreachable. Raise it above 8192 so the protocol layer gets to judge
+  # the header; a browser will never legitimately send one this large.
   max-http-request-header-size: 32KB
 
 dbsc:
@@ -29,10 +29,9 @@ dbsc:
   # overridden explicitly.
   secure: true
   storage: jdbc
-  bound: true
   # The library default is 30 requests / 15 failures per minute, which is right for
   # production but too tight for scripts/e2e.py: the suite performs dozens of
-  # registrations in a few seconds, and its negative cases (malformed proofs,
+  # registrations in a few seconds, and its negative cases (malformed JWTs,
   # replayed challenges, bad signatures) are *supposed* to fail. Against the
   # defaults the suite throttles itself and the 429s surface as unrelated
   # failures further down. The limiter stays enabled; its behaviour is asserted in
@@ -47,7 +46,7 @@ spring:
   application:
     name: spring-dbsc-demo
   datasource:
-    # File-backed, so bound keys survive a restart. An in-memory store would break
+    # File-backed, so registered keys survive a restart. An in-memory store would break
     # every live binding on each reload — the browser keeps its cookie, the
     # server forgets the key, and refresh loops KEY_NOT_FOUND_NATIVE forever.
     url: jdbc:h2:file:./data/demo;DB_CLOSE_DELAY=-1

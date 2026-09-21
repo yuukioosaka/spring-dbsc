@@ -14,14 +14,6 @@ import java.time.Duration;
 @ConfigurationProperties(prefix = "dbsc")
 public class DbscProperties {
 
-    /**
-     * Mount the bound (polyfill) protocol routes and accept the {@code bound}
-     * tier. Set {@code false} to run native DBSC only: the four bound routes are
-     * not served, the state route answers {@code phase: "unbound"} so the client
-     * SDK stands down, and non-Chromium browsers stay at {@code tier: none}.
-     */
-    private boolean bound = true;
-
     /** Use {@code __Host-} cookies and the {@code Secure} flag. Default true. */
     private boolean secure = true;
 
@@ -54,10 +46,9 @@ public class DbscProperties {
     /** Path Chromium POSTs a refresh JWS to, and the value of {@code refresh_url}. */
     private String refreshPath = "/dbsc/refresh";
 
-    /** Base path of the bound/polyfill protocol routes. */
-    private String boundPath = "/dbsc-bound";
-
-    /** Lifetime of the binding cookie. */
+    /**
+     * Grace window applied after the binding cookie expires.
+     */
     private Duration boundCookieTtl = Duration.ofMinutes(10);
 
     /** Lifetime of the pre-registration cookie that carries the session id. */
@@ -73,14 +64,8 @@ public class DbscProperties {
      */
     private Duration refreshGrace = Duration.ofSeconds(30);
 
-    /** Acceptable clock skew for timestamps in bound refreshes and proofs. */
-    private Duration timestampWindow = Duration.ofMinutes(5);
-
     /** Default lifetime assigned by {@code bind()} when the caller does not set one. */
     private Duration sessionTtl = Duration.ofDays(7);
-
-    /** Emit per-request proof outcomes to the telemetry event stream. */
-    private boolean telemetryPerRequestProofs = false;
 
     /** Rate limiting for the unauthenticated registration/refresh surface. */
     private RateLimit rateLimit = new RateLimit();
@@ -139,14 +124,6 @@ public class DbscProperties {
         }
     }
 
-    public boolean isBound() {
-        return bound;
-    }
-
-    public void setBound(boolean bound) {
-        this.bound = bound;
-    }
-
     public boolean isSecure() {
         return secure;
     }
@@ -195,14 +172,6 @@ public class DbscProperties {
         this.refreshPath = refreshPath;
     }
 
-    public String getBoundPath() {
-        return boundPath;
-    }
-
-    public void setBoundPath(String boundPath) {
-        this.boundPath = boundPath;
-    }
-
     public Duration getBoundCookieTtl() {
         return boundCookieTtl;
     }
@@ -235,28 +204,12 @@ public class DbscProperties {
         this.refreshGrace = refreshGrace;
     }
 
-    public Duration getTimestampWindow() {
-        return timestampWindow;
-    }
-
-    public void setTimestampWindow(Duration timestampWindow) {
-        this.timestampWindow = timestampWindow;
-    }
-
     public Duration getSessionTtl() {
         return sessionTtl;
     }
 
     public void setSessionTtl(Duration sessionTtl) {
         this.sessionTtl = sessionTtl;
-    }
-
-    public boolean isTelemetryPerRequestProofs() {
-        return telemetryPerRequestProofs;
-    }
-
-    public void setTelemetryPerRequestProofs(boolean telemetryPerRequestProofs) {
-        this.telemetryPerRequestProofs = telemetryPerRequestProofs;
     }
 
     public RateLimit getRateLimit() {
@@ -285,19 +238,7 @@ public class DbscProperties {
         return refreshGrace.toMillis();
     }
 
-    public long timestampWindowMs() {
-        return timestampWindow.toMillis();
-    }
-
     public long sessionTtlMs() {
         return sessionTtl.toMillis();
-    }
-
-    /**
-     * The {@code refreshIntervalMs} reported by the bound protocol. The client
-     * refreshes on this cadence, so it tracks the binding cookie's lifetime.
-     */
-    public long boundRefreshIntervalMs() {
-        return boundCookieTtlMs();
     }
 }

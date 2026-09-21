@@ -4,8 +4,6 @@
 # exercise the cookie mechanics over plain HTTP.
 
 dbsc:
-  enabled: true
-  bound: true
   secure: false
   storage: jdbc
   rate-limit:

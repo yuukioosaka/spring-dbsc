@@ -21,7 +21,8 @@ Without DBSC_CHALLENGE_TTL those checks are reported as skipped, not failed.
 
 RATE_LIMITED needs a third thing: the demo raises its rate-limit budgets to 1000 so
 this suite's own deliberate failures do not throttle it, which makes the 429 branch
-unreachable there. Start a second instance with a small failure budget:
+unreachable there. Start a second instance with a small failure budget, and drive it
+with repeated rejected *registrations*:
 
     mvn -Pdemo -Dmaven.repo.local=.m2repo \
         -Dspring-boot.run.arguments="--server.port=9443 \
@@ -30,9 +31,14 @@ unreachable there. Start a second instance with a small failure budget:
         spring-boot:run
     DBSC_RATE_LIMIT_FAILURES=5 python3 scripts/e2e.py
 
+That instance's window is 90s, and because the limiter keeps its counters for a
+whole window against a key derived from the client IP, a previous run -- or an
+earlier section -- can leave it already throttled. The suite probes for that, waits
+the window out when needed, and only then measures; it never skips for it.
+
 Requires `cryptography` (EC keygen + ES256 signing).
 """
-import base64, hashlib, json, os, re, ssl, sys, time
+import base64, json, os, re, ssl, sys, time
 import http.cookiejar
 import urllib.request, urllib.parse
 
@@ -112,20 +118,6 @@ def request(opener, method, path, body=None, headers=None, form=True, base=None)
         return e.code, dict(e.headers), e.read().decode()
 
 
-def raw_request(opener, method, path, data, headers=None):
-    """Sends exact bytes, so a body-hash proof can be computed over them.
-
-    `request(..., form=False)` JSON-encodes a dict, which makes it impossible to
-    control the bytes a proof is signed over. Proof tests need byte-for-byte
-    control, so they use this instead.
-    """
-    req = urllib.request.Request(BASE + path, data=data, headers=dict(headers or {}), method=method)
-    try:
-        with opener.open(req) as r:
-            return r.status, dict(r.headers), r.read().decode()
-    except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers), e.read().decode()
-
 
 def cookie_value(jar, name):
     for c in jar:
@@ -142,7 +134,7 @@ def cookie(jar, name):
 
 
 class Key:
-    """An ES256 key pair, the way both DBSC tiers use them."""
+    """An ES256 key pair, the way the native tier uses them."""
 
     def __init__(self):
         self.priv = ec.generate_private_key(ec.SECP256R1())
@@ -160,10 +152,10 @@ class Key:
         r, s = utils.decode_dss_signature(der)
         return b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
 
-    def jws(self, payload: dict, include_jwk=True) -> str:
+    def jws(self, payload: dict, include_jwk=True, alg="ES256") -> str:
         # typ must be dbsc+jwt; the verifier rejects anything else, including the
         # plain "jwt" a generic JOSE library would default to.
-        head = {"alg": "ES256", "typ": "dbsc+jwt"}
+        head = {"alg": alg, "typ": "dbsc+jwt"}
         if include_jwk:
             head["jwk"] = self.public_jwk()
         h = b64u(json.dumps(head, separators=(",", ":")).encode())
@@ -230,14 +222,15 @@ def native_register(opener, jar, sid, key):
     return jti, status, text
 
 
-def native_register_manual(opener, jti, key):
+def native_register_manual(opener, jti, key, base=None):
     """Native registration with the JTI supplied, rather than read from the jar.
 
     Needed when the JTI must be re-presented after its cookie was cleared or
-    expired. Returns (jti, status, text).
+    expired, and when registration is aimed at the low-budget instance rather than
+    the main demo. Returns (jti, status, text).
     """
     status, _, text = request(
-        opener, "POST", "/dbsc/registration", body=b"", headers={
+        opener, "POST", "/dbsc/registration", body=b"", base=base, headers={
             "Secure-Session-Response": key.jws({"jti": jti}),
             "Content-Type": "application/json"})
     return jti, status, text
@@ -259,55 +252,6 @@ def binder_cookie_header(jar, sid, jti):
     return "; ".join(parts)
 
 
-def bound_challenge(opener, jar, path="/dbsc-bound/challenge"):
-    """Fetches a bound-protocol challenge from the response *body*.
-
-    The bound routes carry their JTI in JSON, never in a cookie: the challenge
-    cookie belongs to the native routes, and a second writer to the same name
-    would invalidate a native registration already in flight. Returns
-    (jti, status, text).
-    """
-    status, _, text = request(opener, "GET", path)
-    if status != 200:
-        return None, status, text
-    return json.loads(text).get("challenge"), status, text
-
-
-def bound_register(opener, jar, key):
-    """Runs bound registration off a challenge read from the JSON body."""
-    jti, status, text = bound_challenge(opener, jar)
-    if jti is None:
-        return None, status, text
-    status, headers, text = request(
-        opener, "POST", "/dbsc-bound/registration", form=False, body={
-            "publicKey": key.public_jwk(),
-            "signature": key.sign(jti),
-            "challenge": jti})
-    return jti, status, text
-
-
-def bound_session(user="demo"):
-    """A logged-in client holding both a native and a bound key, plus live CSRF.
-
-    Reaching any spec-04 path requires a bound key, which is only obtainable by
-    going through both registrations, so the proof tests share this setup.
-    """
-    opener, jar = new_client()
-    status, _, sid, _ = login(opener, jar, user)
-    native = Key()
-    native_register(opener, jar, sid, native)
-    bound = Key()
-    bound_register(opener, jar, bound)
-    return opener, jar, sid, native, bound, current_csrf(opener)
-
-
-def signed_proof(key, sid, method, path, ts, body=None):
-    """Builds an X-Dbsc-Bound-Proof header for a given (sid, method, path, ts)."""
-    bh = b64u(hashlib.sha256(body).digest()) if body is not None else None
-    msg = f"{sid}.{method}.{path}.{ts}" + (f".{bh}" if bh else "")
-    header_value = f"ts={ts};sig={key.sign(msg)}"
-    return (header_value + f";bh={bh}") if bh else header_value
-
 
 def tier_of(opener):
     """The tier /app/whoami reports, or None when it is not JSON."""
@@ -322,6 +266,34 @@ def tier_of(opener):
 
 def now_ms():
     return int(time.time() * 1000)
+
+
+# The low-budget instance's dbsc.rate-limit.window. A dry run against it is the only
+# way to read it from here, and the window only matters for measurement: the checks
+# below sleep it out so their attempt counts start from a fresh budget.
+_RATE_WINDOW_RAW = os.environ.get("DBSC_RATE_LIMIT_WINDOW") or "90s"
+
+
+def p_window_seconds():
+    """The low-budget instance's rate-limit window, in seconds."""
+    m = re.fullmatch(r"(\d+)(ms|s|m|h)?", _RATE_WINDOW_RAW.strip())
+    if not m:
+        return 90
+    value = int(m.group(1))
+    return {"ms": value / 1000, "m": value * 60, "h": value * 3600}.get(m.group(2), value)
+
+
+def p_tripped(opener, jar):
+    """Whether the low-budget instance already refuses this client.
+
+    A dry registration that cannot succeed: it presents no challenge cookie, so it
+    is rejected whether or not the client is throttled. A 429 here means the
+    failure budget is already spent -- by an earlier run, since the limiter holds
+    its counters for a whole window -- and that is exactly the state this section
+    has to clear before it can measure anything.
+    """
+    _, status, _ = native_register_manual(opener, "n" * 43, Key(), base=RATE_BASE)
+    return status == 429
 
 
 def main():
@@ -373,7 +345,7 @@ def main():
               cookie_value(jar, "__Host-dbsc-challenge") is None)
 
     # ---------------------------------------------------- 3. tier is now dbsc
-    print("\n-- 3. tier promotion and the unguarded route --")
+    print("\n-- 3. tier promotion --")
     status, _, text = request(opener, "GET", "/app/whoami")
     check("GET /app/whoami -> 200", status == 200, f"got {status}")
     who = json.loads(text) if status == 200 else {}
@@ -434,35 +406,37 @@ def main():
                 "Sec-Secure-Session-Id": session_id,
                 "Secure-Session-Response": refresh_jws(bogus, ch_now)})
         check("wrong-key refresh -> 403", status == 403, f"got {status}")
+        check("a bad refresh signature is reported as SIGNATURE_INVALID",
+              "SIGNATURE_INVALID" in t4, t4[:200])
         _, _, tw = request(opener, "GET", "/app/whoami")
         w = json.loads(tw)
         check("tier demoted to none after a failed refresh", w.get("tier") == "none", str(w))
 
-    # ------------------------------------------------------- 7. proof guard
-    print("\n-- 7. guarded route (/app/payment) --")
-    # Re-arm the session first: the previous step deliberately demoted it, and a
-    # demoted session cannot reach the proof check at all.
-    status, _, _, csrf = login(opener, jar)
-    csrf = current_csrf(opener)
-    status, _, tg = request(
-        opener, "POST", "/app/payment",
-        body={"amount": 1000, "currency": "usd"},
-        headers={"X-CSRF-TOKEN": csrf}, form=False)
-    check("no proof -> 403", status == 403, f"got {status}")
-    check("no proof -> DBSC error body, not a Spring error page",
-          "MISSING_PROOF" in tg or "KEY_NOT_FOUND" in tg, tg[:200])
+    # ------------------------------------------------- 7. bound routes are gone
+    # This pins the removal: the bound (Web Crypto polyfill) protocol was deleted,
+    # so its routes must not come back -- by re-registration, by an alias, or by a
+    # wildcard handler that would silently resurrect an unauthenticated surface.
+    #
+    # The exact status is not asserted for every method. An unauthenticated request
+    # for an /app-scoped path is answered by the login redirect before routing ever
+    # happens, so a status pin here would be measuring the security chain, not the
+    # absence of the route. What must hold -- authenticated or not -- is that no
+    # bound route produces a bound response.
+    print("\n-- 7. the removed bound protocol is not served --")
+    for path in ("/dbsc-bound/state", "/dbsc-bound/challenge",
+                 "/dbsc-bound/registration", "/dbsc-bound/refresh"):
+        for method in ("GET", "POST"):
+            status, _, text = request(
+                opener, method, path, body={} if method == "POST" else None, form=False)
+            check(f"{method} {path} is not served",
+                  status in (404, 403, 302, 401) and "phase" not in text,
+                  f"got {status}: {text[:120]}")
+            check(f"{method} {path} never returns a bound payload",
+                  not text.strip().startswith("{") or "phase" not in text,
+                  f"got {status}: {text[:120]}")
 
-    # ------------------------------------------------------- 8. bound flow
-    print("\n-- 8. bound (toolkit) flow --")
-    status, _, ts = request(opener, "GET", "/dbsc-bound/state")
-    check("GET /dbsc-bound/state -> 200", status == 200, f"got {status}: {ts[:200]}")
-    status, _, tc = request(opener, "GET", "/dbsc-bound/challenge")
-    check("GET /dbsc-bound/challenge -> 200", status == 200, f"got {status}: {tc[:200]}")
-    check("the bound challenge arrives in the body, not the cookie jar",
-          bool(json.loads(tc).get("challenge")) if status == 200 else False, tc[:200])
-
-    # ---------------------------------------------------- 9. well-known
-    print("\n-- 9. well-known metadata --")
+    # ---------------------------------------------------- 8. well-known
+    print("\n-- 8. well-known metadata --")
     status, wh, twk = request(opener, "GET", "/.well-known/device-bound-sessions")
     check("GET /.well-known/device-bound-sessions -> 200", status == 200, f"got {status}")
     check("well-known is cacheable",
@@ -566,9 +540,8 @@ def main():
 
     # ------------------------------------------------- C. already-registered
     print("\n-- C. a second registration of the same kind is refused --")
-    # A fresh *native* challenge: the bound routes keep their JTI in the body and
-    # never touch the challenge cookie, so this one has to come from the native
-    # refresh leg.
+    # A fresh challenge: the login's cookie was consumed by the first registration,
+    # and the refresh leg is what re-arms the session with another JTI.
     request(a_opener, "POST", "/dbsc/refresh", body=b"",
             headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": a_sid})
     a_ch2 = cookie_value(a_jar, "__Host-dbsc-challenge")
@@ -579,295 +552,42 @@ def main():
     check("second native registration -> SESSION_ALREADY_REGISTERED",
           "SESSION_ALREADY_REGISTERED" in text, f"{status} {text[:160]}")
 
-    # The next section asserts the bound flow against the *same* session, so the
-    # challenge it consumes is the one the native registration just passed over.
-    request(a_opener, "POST", "/dbsc/refresh", body=b"",
-            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": a_sid})
-
-    # The native key must not block the *bound* registration: the kinds are
-    # tracked separately and a Chromium session is expected to hold both.
-    a_bound = Key()
-    _, status, text = bound_register(a_opener, a_jar, a_bound)
-    check("bound registration still succeeds with a native key present",
-          status == 200, f"{status} {text[:160]}")
-    check("tier stays dbsc when both keys exist",
-          (json.loads(text) if status == 200 else {}).get("tier") == "dbsc", text[:160])
-    check("bound refresh_url is /dbsc-bound/refresh",
-          (json.loads(text) if status == 200 else {}).get("refresh_url") == "/dbsc-bound/refresh",
-          text[:160])
-
-    _, status2, text2 = bound_register(a_opener, a_jar, Key())
-    check("second bound registration -> SESSION_ALREADY_REGISTERED",
-          "SESSION_ALREADY_REGISTERED" in text2, f"{status2} {text2[:160]}")
-
-    # ------------------------------------------------- D. bound state phases
-    print("\n-- D. /dbsc-bound/state reports the phase the client must act on --")
-    d_anon, _ = new_client()
-    status, _, text = request(d_anon, "GET", "/dbsc-bound/state")
-    d_state = json.loads(text) if status == 200 else {}
-    check("sessionless state -> 200 {phase: unbound, sessionId: null}",
-          status == 200 and d_state.get("phase") == "unbound" and d_state.get("sessionId") is None,
-          f"{status} {text[:160]}")
-
-    # A fresh login that has done neither registration needs a polyfill key.
-    e_opener, e_jar = new_client()
-    _, _, e_sid, _ = login(e_opener, e_jar)
-    e_login_ch = cookie_value(e_jar, "__Host-dbsc-challenge")
-    status, _, text = request(e_opener, "GET", "/dbsc-bound/state")
-    e_state = json.loads(text)
-    check("no keys at all -> needs-registration with a challenge",
-          e_state.get("phase") == "needs-registration" and bool(e_state.get("challenge")),
-          text[:200])
-    # The bound protocol carries its challenge in the JSON body. It must NOT write
-    # the challenge cookie, which belongs to the native routes: a second writer to
-    # that name invalidates the native registration the login primed, and the
-    # registration POST that follows then fails JTI_MISMATCH.
-    check("state leaves the native challenge cookie untouched",
-          cookie_value(e_jar, "__Host-dbsc-challenge") == e_login_ch,
-          f"{e_login_ch} -> {cookie_value(e_jar, '__Host-dbsc-challenge')}")
-    check("the state challenge is not the native login challenge",
-          e_state.get("challenge") != e_login_ch, text[:200])
-
-    e_native = Key()
-    native_register(e_opener, e_jar, e_sid, e_native)
-    status, _, text = request(e_opener, "GET", "/dbsc-bound/state")
-    e_state = json.loads(text)
-    check("native key but no bound key -> needs-bound-registration, tier stays dbsc",
-          e_state.get("phase") == "needs-bound-registration" and e_state.get("tier") == "dbsc",
-          text[:200])
-    check("needs-bound-registration advertises refreshIntervalMs",
-          isinstance(e_state.get("refreshIntervalMs"), int), text[:200])
-
-    e_bound = Key()
-    bound_register(e_opener, e_jar, e_bound)
-    status, _, text = request(e_opener, "GET", "/dbsc-bound/state")
-    e_state = json.loads(text)
-    check("both keys -> phase bound and no further challenge",
-          e_state.get("phase") == "bound" and "challenge" not in e_state, text[:200])
-
-    status, _, text = request(d_anon, "GET", "/dbsc-bound/challenge")
-    check("sessionless challenge -> 403 with the prose body {\"error\":\"no session\"}",
-          status == 403 and json.loads(text).get("error") == "no session", f"{status} {text[:160]}")
-    check("the sessionless error is prose, not a SCREAMING_SNAKE code",
-          "no session" in text and "_" not in text, text[:160])
-
-    status, _, text = request(
-        d_anon, "POST", "/dbsc-bound/registration", body={}, form=False)
-    check("bound registration without a session cookie -> 400 BAD_REQUEST",
-          status == 400 and "BAD_REQUEST" in text, f"{status} {text[:160]}")
-
-    # ------------------------------------------------- E. bound refresh
-    print("\n-- E. bound refresh validates the timestamp before the key --")
-    e_ch, _, text = bound_challenge(e_opener, e_jar)
-    e_ts = now_ms()
-    status, e_headers, e_text = request(
-        e_opener, "POST", "/dbsc-bound/refresh", form=False, body={
-            "challenge": e_ch, "signature": e_bound.sign(f"{e_ch}.{e_ts}"), "timestamp": e_ts})
-    check("bound refresh with a fresh timestamp -> 200", status == 200, f"{status} {e_text[:160]}")
-    check("bound endpoints advertise the server clock (X-Server-Time)",
-          header(e_headers, "X-Server-Time") is not None, str(e_headers)[:160])
-    # The bound flow keeps its JTI in the body, so a refresh has nothing to clear
-    # and must not clear the native routes' cookie either.
-    check("a successful bound refresh leaves the challenge cookie alone",
-          "__Host-dbsc-challenge" not in " ".join(all_headers(e_headers, "Set-Cookie")),
-          str(e_headers)[:200])
-
-    e_ch2, _, _ = bound_challenge(e_opener, e_jar)
-    stale = now_ms() - 10 * 60 * 1000
-    status, _, text = request(
-        e_opener, "POST", "/dbsc-bound/refresh", form=False, body={
-            "challenge": e_ch2, "signature": e_bound.sign(f"{e_ch2}.{stale}"), "timestamp": stale})
-    check("bound refresh with a stale timestamp -> SIGNATURE_INVALID",
-          status == 403 and "SIGNATURE_INVALID" in text, f"{status} {text[:160]}")
-
-    e_opener2, e_jar2, e_sid2, e_nat2, e_bnd2, _ = bound_session()
-    e_ch3, _, _ = bound_challenge(e_opener2, e_jar2)
-    e_ts3 = now_ms()
-    # Signed by a *different* key than the one registered: the signature is
-    # well-formed and in-window, so only the key lookup can reject it.
-    e_wrong = Key()
-    status, _, text = request(
-        e_opener2, "POST", "/dbsc-bound/refresh", form=False, body={
-            "challenge": e_ch3, "signature": e_wrong.sign(f"{e_ch3}.{e_ts3}"), "timestamp": e_ts3})
-    check("bound refresh with the wrong key -> SIGNATURE_INVALID",
-          status == 403 and "SIGNATURE_INVALID" in text, f"{status} {text[:160]}")
-    check("a failed bound refresh demotes the session to none",
-          tier_of(e_opener2) == "none", str(tier_of(e_opener2)))
-
-    # ------------------------------------------------ F. Sec-Session-Skipped
-    print("\n-- F. Sec-Session-Skipped is diagnostic and never an error --")
-    status, _, text = request(e_opener2, "GET", "/dbsc-bound/state", headers={
-        "Sec-Session-Skipped": 'quota_exceeded;session_identifier="abc", unreachable, not_a_reason'})
-    f_state = json.loads(text) if status == 200 else {}
-    check("a skipped header does not change the status", status == 200, f"got {status}")
-    skipped = f_state.get("nativeSkipped") or []
-    check("nativeSkipped echoes the recognised reasons in order",
-          [s.get("reason") for s in skipped] == ["quota_exceeded", "unreachable"], str(skipped))
-    check("session_identifier is unquoted when echoed",
-          skipped and skipped[0].get("sessionId") == "abc", str(skipped))
-    check("an unrecognised token is ignored, not an error",
-          all(s.get("reason") != "not_a_reason" for s in skipped), str(skipped))
-
-    # ------------------------------------------------------ G. cross-protocol
-    print("\n-- G. a proof from one protocol is rejected by the other --")
+    # ------------------------------------------------------ D. cross-protocol
+    # Only the native JWS form is served, so anything shaped like the removed
+    # two-segment bound signature must be a malformed JWS rather than, say, a
+    # crash or a silently accepted proof.
+    print("\n-- D. a proof that is not a JWS is rejected as MALFORMED_JWS --")
     status, _, text = request(
         b_opener, "POST", "/dbsc/registration", body=b"", headers={
             "Secure-Session-Response": b64u(b"x") + "." + b64u(b"y"),
             "Content-Type": "application/json"})
-    check("a two-segment bound signature on the native route -> MALFORMED_JWS",
+    check("a two-segment bound-style signature on the native route -> MALFORMED_JWS",
           "MALFORMED_JWS" in text, f"{status} {text[:160]}")
 
-    # --------------------------------------------------------- H. tier matrix
-    print("\n-- H. tier reflects the surviving keys --")
-    h1, h1_jar = new_client()
-    _, _, h1_sid, _ = login(h1, h1_jar)
-    check("a session with neither key reads tier none", tier_of(h1) == "none", str(tier_of(h1)))
+    # --------------------------------------------------------- E. tier matrix
+    print("\n-- E. tier reflects the surviving keys --")
+    e1, e1_jar = new_client()
+    _, _, e1_sid, _ = login(e1, e1_jar)
+    check("a session with no key reads tier none", tier_of(e1) == "none", str(tier_of(e1)))
 
-    h2, h2_jar = new_client()
-    _, _, h2_sid, _ = login(h2, h2_jar)
-    h2_bound = Key()
-    bound_register(h2, h2_jar, h2_bound)
-    check("a bound-only session reads tier bound", tier_of(h2) == "bound", str(tier_of(h2)))
+    e2, e2_jar = new_client()
+    _, _, e2_sid, _ = login(e2, e2_jar)
+    e2_key = Key()
+    _, e2_status, e2_text = native_register(e2, e2_jar, e2_sid, e2_key)
+    check("a session that registered natively reads tier dbsc",
+          tier_of(e2) == "dbsc", f"{e2_status} {e2_text[:120]}")
 
-    status, _, text = request(h2, "GET", "/app/whoami")
+    # The removed tier must never be produced by the survivor: a native client
+    # that registered correctly is dbsc, not some resurrected bound tier.
+    status, _, text = request(e2, "GET", "/app/whoami")
     who2 = json.loads(text)
-    check("whoami reports boundKey true and nativeKey false",
-          who2.get("boundKey") is True and who2.get("nativeKey") is False, str(who2))
+    check("whoami reports nativeKey true and a tier of dbsc",
+          who2.get("nativeKey") is True and who2.get("tier") == "dbsc", str(who2))
+    check("the bound tier is never produced",
+          who2.get("tier") not in ("bound", None), str(who2))
 
-    # ------------------------------------------- I. per-request proof (04)
-    print("\n-- I. per-request proof on the guarded route --")
-    p_opener, p_jar, p_sid, p_native, p_bound, p_csrf = bound_session()
-    p_body = b'{"amount":1000,"currency":"usd"}'
-    p_headers = {"X-CSRF-TOKEN": p_csrf, "Content-Type": "application/json"}
-
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body, dict(p_headers))
-    check("a guarded route without a proof -> 403 MISSING_PROOF",
-          status == 403 and "MISSING_PROOF" in text, f"{status} {text[:160]}")
-
-    p_ts = now_ms()
-    p_proof = signed_proof(p_bound, p_sid, "POST", "/app/payment", p_ts, p_body)
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body,
-        dict(p_headers, **{"X-Dbsc-Bound-Proof": p_proof}))
-    check("a valid proof over the exact body -> 200", status == 200, f"{status} {text[:200]}")
-    check("the guarded handler still sees the replayed body",
-          "1000" in text, text[:200])
-
-    # The replay cache is checked after the signature (spec 04), so the very same
-    # proof bytes are now refused.
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body,
-        dict(p_headers, **{"X-Dbsc-Bound-Proof": p_proof}))
-    check("replaying an identical proof -> 403 PROOF_REPLAY",
-          status == 403 and "PROOF_REPLAY" in text, f"{status} {text[:160]}")
-
-    # Mutating the body invalidates the body hash, which is the whole point of
-    # binding the body: the signature itself is still perfectly valid.
-    p_body2 = b'{"amount":1,"currency":"usd"}'
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body2,
-        dict(p_headers, **{"X-Dbsc-Bound-Proof": p_proof}))
-    check("a proof reused on a modified body -> SIGNATURE_INVALID",
-          status == 403 and (
-              "SIGNATURE_INVALID" in text or "MALFORMED_PROOF" in text),
-          f"{status} {text[:160]}")
-
-    # A proof signed for one path must not open another.
-    p_ts3 = now_ms()
-    wrong_path = signed_proof(p_bound, p_sid, "POST", "/app/other", p_ts3, p_body)
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body,
-        dict(p_headers, **{"X-Dbsc-Bound-Proof": wrong_path}))
-    check("a proof scoped to another path -> SIGNATURE_INVALID",
-          status == 403 and "SIGNATURE_INVALID" in text, f"{status} {text[:160]}")
-
-    p_ts4 = now_ms()
-    wrong_method = signed_proof(p_bound, p_sid, "GET", "/app/payment", p_ts4, p_body)
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body,
-        dict(p_headers, **{"X-Dbsc-Bound-Proof": wrong_method}))
-    check("the signed method is bound into the message",
-          status == 403 and "SIGNATURE_INVALID" in text, f"{status} {text[:160]}")
-
-    stale_ts = now_ms() - 10 * 60 * 1000
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body,
-        dict(p_headers, **{"X-Dbsc-Bound-Proof":
-                           signed_proof(p_bound, p_sid, "POST", "/app/payment", stale_ts, p_body)}))
-    check("a stale proof timestamp -> SIGNATURE_INVALID",
-          status == 403 and "SIGNATURE_INVALID" in text, f"{status} {text[:160]}")
-
-    # -------------------------------------------- J. proof header parse rules
-    print("\n-- J. proof header parse rules (MALFORMED_PROOF) --")
-    j_ts = now_ms()
-    j_valid = signed_proof(p_bound, p_sid, "POST", "/app/payment", j_ts, p_body)
-    long_value = "ts=" + str(j_ts) + ";sig=" + ("A" * 8300)
-    malformed_cases = [
-        ("a segment with no '='", "ts" + str(j_ts) + ";sig=" + ("A" * 40)),
-        ("a segment with an empty value", f"ts={j_ts};sig="),
-        ("a duplicate key", f"ts={j_ts};ts={j_ts};sig={'A' * 40}"),
-        ("more than 8 segments", ";".join(f"k{i}=v" for i in range(9))),
-        ("a non-numeric ts", "ts=abc;sig=" + ("A" * 40)),
-        ("a fractional ts", "ts=1.5;sig=" + ("A" * 40)),
-        ("a header over 8192 bytes", long_value),
-        ("a proof with no ts", "sig=" + ("A" * 40)),
-        ("a proof with no sig", f"ts={j_ts}"),
-    ]
-    for label, value in malformed_cases:
-        status, _, text = raw_request(
-            p_opener, "POST", "/app/payment", p_body,
-            dict(p_headers, **{"X-Dbsc-Bound-Proof": value}))
-        check(f"{label} -> MALFORMED_PROOF",
-              status == 403 and "MALFORMED_PROOF" in text, f"{status} {text[:140]}")
-
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body,
-        dict(p_headers, **{"X-Dbsc-Bound-Proof": ""}))
-    check("an empty proof header value -> MISSING_PROOF",
-          status == 403 and "MISSING_PROOF" in text, f"{status} {text[:140]}")
-
-    # Body signing is on for this route, so omitting bh is malformed; carrying a
-    # bogus bh is a signature failure, because the hash is part of the message.
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body,
-        dict(p_headers, **{"X-Dbsc-Bound-Proof":
-                           f"ts={now_ms()};sig={p_bound.sign('anything')}"}))
-    check("a body-signed route rejects a proof with no bh -> MALFORMED_PROOF",
-          status == 403 and "MALFORMED_PROOF" in text, f"{status} {text[:160]}")
-
-    # Segment order is not significant, so the same proof reordered must verify.
-    p_ts5 = now_ms()
-    bh5 = b64u(hashlib.sha256(p_body).digest())
-    msg5 = f"{p_sid}.POST./app/payment.{p_ts5}.{bh5}"
-    reordered = f"bh={bh5};sig={p_bound.sign(msg5)};ts={p_ts5}"
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body,
-        dict(p_headers, **{"X-Dbsc-Bound-Proof": reordered}))
-    check("proof segment order is not significant", status == 200, f"{status} {text[:160]}")
-
-    # Values carry whitespace around the ';' separators in the wild.
-    p_ts6 = now_ms()
-    bh6 = b64u(hashlib.sha256(p_body).digest())
-    msg6 = f"{p_sid}.POST./app/payment.{p_ts6}.{bh6}"
-    spaced = f"ts={p_ts6}; sig={p_bound.sign(msg6)}; bh={bh6}"
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body,
-        dict(p_headers, **{"X-Dbsc-Bound-Proof": spaced}))
-    check("whitespace around segments is tolerated", status == 200, f"{status} {text[:160]}")
-
-    # Proof verification must not be poisoned by earlier garbage: the cache is
-    # only written after the cryptographic checks pass.
-    p_ts7 = now_ms()
-    status, _, text = raw_request(
-        p_opener, "POST", "/app/payment", p_body,
-        dict(p_headers, **{"X-Dbsc-Bound-Proof":
-                           signed_proof(p_bound, p_sid, "POST", "/app/payment", p_ts7, p_body)}))
-    check("a valid proof still verifies after many garbage proofs",
-          status == 200, f"{status} {text[:160]}")
-
-    # ------------------------------------- K. challenge expiry and consumption
-    print("\n-- K. challenge lifecycle: single-use and expiry --")
+    # ------------------------------------- F. challenge expiry and consumption
+    print("\n-- F. challenge lifecycle: single-use and expiry --")
 
     # A consumed challenge is observable at any TTL, so this always runs. The JTI
     # is resent explicitly because the server clears the cookie once it is used.
@@ -890,41 +610,21 @@ def main():
     check("reusing a consumed JTI -> CHALLENGE_CONSUMED",
           "CHALLENGE_CONSUMED" in text, f"{status} {text[:160]}")
 
-    # Consumption is not scoped to the route that used it: the bound protocol
-    # shares one challenge store, so a JTI burnt natively is burnt everywhere.
+    # The same must hold on the refresh leg: one challenge store, one consumption.
     k2_opener, k2_jar = new_client()
     _, _, k2_sid, _ = login(k2_opener, k2_jar)
     k2_jti = cookie_value(k2_jar, "__Host-dbsc-challenge")
     k2_ck = binder_cookie_header(k2_jar, k2_sid, k2_jti)
-    k2_native = Key()
-    m, status, text = native_register_manual(k2_opener, k2_jti, k2_native)
-    check("a challenge works on the native route", status == 200, f"{status} {text[:160]}")
-    k2_bound = Key()
-    status, _, text = request(
-        k2_opener, "POST", "/dbsc-bound/registration", form=False, headers={"Cookie": k2_ck}, body={
-            "publicKey": k2_bound.public_jwk(),
-            "signature": k2_bound.sign(k2_jti),
-            "challenge": k2_jti})
-    check("a JTI consumed by the native route -> CHALLENGE_CONSUMED on the bound route",
-          "CHALLENGE_CONSUMED" in text, f"{status} {text[:160]}")
-
-    # The reverse direction: a JTI the bound route issued is consumable natively.
-    k2b_opener, k2b_jar = new_client()
-    _, _, k2b_sid, _ = login(k2b_opener, k2b_jar)
-    k2b_jti, status, text = bound_challenge(k2b_opener, k2b_jar)
-    k2b_bound = Key()
-    status, _, text = request(
-        k2b_opener, "POST", "/dbsc-bound/registration", form=False, body={
-            "publicKey": k2b_bound.public_jwk(),
-            "signature": k2b_bound.sign(k2b_jti),
-            "challenge": k2b_jti})
-    check("a challenge issued by the bound route registers the bound key",
+    k2_key = Key()
+    _, status, text = native_register_manual(k2_opener, k2_jti, k2_key)
+    check("a challenge works on the native registration route",
           status == 200, f"{status} {text[:160]}")
     status, _, text = request(
-        k2b_opener, "POST", "/dbsc-bound/refresh", form=False, body={
-            "challenge": k2b_jti, "signature": k2b_bound.sign(f"{k2b_jti}.{now_ms()}"),
-            "timestamp": now_ms()})
-    check("the same JTI on the bound refresh -> CHALLENGE_CONSUMED",
+        k2_opener, "POST", "/dbsc/refresh", body=b"", headers={
+            "Secure-Session-Response": refresh_jws(k2_key, k2_jti),
+            "Cookie": k2_ck,
+            "Content-Type": "application/json"})
+    check("the same JTI replayed on the native refresh route -> CHALLENGE_CONSUMED",
           "CHALLENGE_CONSUMED" in text, f"{status} {text[:160]}")
 
     if CHALLENGE_TTL_S is None:
@@ -962,149 +662,129 @@ def main():
         check("an unknown JTI -> CHALLENGE_NOT_FOUND",
               "CHALLENGE_NOT_FOUND" in text, f"{status} {text[:160]}")
 
-    # ------------------------------------------------- L. guard needs a binding
-    print("\n-- L. a guarded route requires an actual binding --")
-    k_opener, k_jar = new_client()
-    _, _, k_sid, _ = login(k_opener, k_jar)
-    k_csrf = current_csrf(k_opener)
-    k_ts = now_ms()
-    k_key = Key()
-    status, _, text = raw_request(
-        k_opener, "POST", "/app/payment", p_body,
-        {"X-CSRF-TOKEN": k_csrf or "x", "Content-Type": "application/json",
-         "X-Dbsc-Bound-Proof": signed_proof(k_key, k_sid, "POST", "/app/payment", k_ts, p_body)})
-    check("a proof with no bound key -> 403, not a crash", status == 403, f"{status} {text[:160]}")
-    check("the refusal names KEY_NOT_FOUND_BOUND",
-          "KEY_NOT_FOUND_BOUND" in text, text[:160])
-    check("the refusal is a DBSC error body, not a Spring default page",
-          "error" in text and "timestamp" not in text, text[:160])
-
     # ------------------------------------------------- N. INVALID_JWK
-    print("\n-- N. a JWK that breaks the key rules is INVALID_JWK, not a crash --")
+    # Only the native route is served now, so the JWK rules are exercised through
+    # the JWS header -- the same place a browser's key travels.
+    print("\n-- G. a JWK that breaks the key rules is INVALID_JWK, not a crash --")
     n_opener, n_jar = new_client()
     _, _, n_sid, _ = login(n_opener, n_jar)
     # Each of these trips a different rule in Jwk.validate. The signature is real
     # and the challenge is live, so only the key check can reject the request.
     for label, bad_key, expect in [
             ("an unsupported curve (P-384) -> INVALID_JWK",
-             {"kty": "EC", "crv": "P-384", "x": "a", "y": "b"}, "unsupported curve"),
+             {"kty": "EC", "crv": "P-384", "x": "AA", "y": "AA"}, "unsupported curve"),
             ("an EC key with no coordinates -> INVALID_JWK",
              {"kty": "EC", "crv": "P-256"}, "missing x or y"),
             ("an unsupported key type (oct) -> INVALID_JWK",
              {"kty": "oct", "k": "AAAA"}, "unsupported key type"),
             ("an RSA modulus under 2048 bits -> INVALID_JWK",
              {"kty": "RSA", "n": "AQAB"}, "too short")]:
-        n_ch, _, _ = bound_challenge(n_opener, n_jar)
-        n_key = Key()
+        request(n_opener, "POST", "/dbsc/refresh", body=b"",
+                headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": n_sid})
+        n_jti = cookie_value(n_jar, "__Host-dbsc-challenge")
+        if n_jti is None:
+            check(f"{label}", False, "no challenge cookie to present")
+            continue
+        n_head = {"alg": "ES256", "typ": "dbsc+jwt", "jwk": bad_key}
+        n_h = b64u(json.dumps(n_head, separators=(",", ":")).encode())
+        n_p = b64u(json.dumps({"jti": n_jti}, separators=(",", ":")).encode())
         status, _, text = request(
-            n_opener, "POST", "/dbsc-bound/registration", form=False, body={
-                "publicKey": bad_key, "signature": n_key.sign(n_ch), "challenge": n_ch})
+            n_opener, "POST", "/dbsc/registration", body=b"", headers={
+                "Secure-Session-Response": f"{n_h}.{n_p}.{b64u(b'0' * 64)}",
+                "Content-Type": "application/json"})
         check(label, status == 403 and "INVALID_JWK" in text, f"{status} {text[:160]}")
         # The rule that fired is named, so a caller can tell a rejected curve from
         # an undersized modulus without reading the source.
         check(f"  ...and names the rule: {expect}", expect in text, text[:160])
 
-    # The native route validates the JWK carried in the JWS header, not just the
-    # one in a bound body, so it must reject a bad key on its own path too.
-    n_jti = cookie_value(n_jar, "__Host-dbsc-challenge")
-    n_bad_head = {"alg": "ES256", "typ": "dbsc+jwt",
-                  "jwk": {"kty": "EC", "crv": "P-384", "x": "AA", "y": "AA"}}
-    n_h = b64u(json.dumps(n_bad_head, separators=(",", ":")).encode())
-    n_p = b64u(json.dumps({"jti": n_jti}).encode())
-    status, _, text = request(
-        n_opener, "POST", "/dbsc/registration", body=b"", headers={
-            "Secure-Session-Response": f"{n_h}.{n_p}.{b64u(b'0' * 64)}",
-            "Content-Type": "application/json"})
-    check("a native registration carrying a bad JWK -> INVALID_JWK",
-          status == 403 and "INVALID_JWK" in text, f"{status} {text[:160]}")
+    # A JWK whose shape contradicts the declared alg. Jwk.validate() accepts the key
+    # on its own terms, so the mismatch is caught one step later by
+    # Jwk.detectAlgorithm(). Without this check UNKNOWN_ALGORITHM has no coverage at
+    # all: the only other path to it was the removed bound route's ES256-only rule.
+    alg_opener, alg_jar = new_client()
+    _, _, alg_sid, _ = login(alg_opener, alg_jar)
+    request(alg_opener, "POST", "/dbsc/refresh", body=b"",
+            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": alg_sid})
+    alg_jti = cookie_value(alg_jar, "__Host-dbsc-challenge")
+    if alg_jti is None:
+        check("alg disagreeing with the JWK -> UNKNOWN_ALGORITHM", False,
+              "no challenge cookie to present")
+    else:
+        alg_key = Key()
+        status, _, text = request(
+            alg_opener, "POST", "/dbsc/registration", body=b"", headers={
+                "Secure-Session-Response": alg_key.jws({"jti": alg_jti}, alg="RS256"),
+                "Content-Type": "application/json"})
+        check("alg disagreeing with the JWK -> UNKNOWN_ALGORITHM",
+              status == 403 and "UNKNOWN_ALGORITHM" in text, f"{status} {text[:160]}")
+        check("  ...and is not reported as INVALID_JWK",
+              "INVALID_JWK" not in text, text[:160])
 
-    # ------------------------------------------------- O. SESSION_NOT_REGISTERED
-    print("\n-- O. a refresh naming a session that was never stored --")
-    # A challenge is bound to whatever session id the request presents, so a forged
-    # id gets a legitimate challenge. Authentication comes back as OK for *that*
-    # id, but no record exists for it: the refresh must be refused rather than
-    # treated as an unknown-but-plausible client. This is the forged-cookie case.
-    o_forged = "f" * 32
-    o_rg, o_rg_jar = new_client()
-    login(o_rg, o_rg_jar)
-    o_key = Key()
-    status, _, text = request(o_rg, "GET", "/dbsc-bound/challenge",
-                              headers={"Cookie": f"__Host-dbsc-reg={o_forged}"})
-    check("a forged session id can still obtain a challenge", status == 200, f"{status} {text[:160]}")
-    o_ch = json.loads(text).get("challenge") if status == 200 else None
-    o_ts = now_ms()
-    status, _, text = request(
-        o_rg, "POST", "/dbsc-bound/refresh", form=False,
-        headers={"Cookie": f"__Host-dbsc-reg={o_forged}"},
-        body={"challenge": o_ch, "signature": o_key.sign(f"{o_ch}.{o_ts}"),
-              "timestamp": o_ts})
-    check("a refresh for an unstored session -> SESSION_NOT_REGISTERED",
-          status == 403 and "SESSION_NOT_REGISTERED" in text, f"{status} {text[:160]}")
-    check("it is not reported as a missing key or a bad signature",
-          "KEY_NOT_FOUND" not in text and "SIGNATURE_INVALID" not in text, text[:160])
-
-    # ------------------------------------------------ Q. JTI_MISMATCH
-    print("\n-- Q. a challenge presented by the wrong session --")
+    # ------------------------------------------------- H. JTI_MISMATCH
+    print("\n-- H. a challenge presented by the wrong session --")
     # A JTI is bound to the session it was issued for. Two sessions are set up and
     # one's challenge is presented on the other, which is the case a stolen or
     # replayed challenge hits. The signature is made by the *right* key for the
     # presenting session, so the session binding is the only thing rejecting it.
-    q1, q1_jar, _, _, q1_bound, _ = bound_session()
-    q2, q2_jar, _, _, q2_bound, _ = bound_session()
-    q1_ch, _, _ = bound_challenge(q1, q1_jar)
-    q_ts = now_ms()
+    q1, q1_jar = new_client()
+    _, _, q1_sid, _ = login(q1, q1_jar)
+    request(q1, "POST", "/dbsc/refresh", body=b"",
+            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": q1_sid})
+    q1_ch = cookie_value(q1_jar, "__Host-dbsc-challenge")
+
+    q2, q2_jar = new_client()
+    _, _, q2_sid, _ = login(q2, q2_jar)
+    request(q2, "POST", "/dbsc/refresh", body=b"",
+            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": q2_sid})
+    q2_ch = cookie_value(q2_jar, "__Host-dbsc-challenge")
+    q2_key = Key()
+    # q2 must hold a real key, or the key lookup would reject the request before
+    # the session binding is ever compared.
+    native_register_manual(q2, q2_ch, q2_key)
+
+    # The challenge q1 was issued has since been consumed by the registration
+    # above, so it is spent before the session binding is even compared. Re-arm
+    # q1 with a live challenge and present *that* from the other session.
+    request(q1, "POST", "/dbsc/refresh", body=b"",
+            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": q1_sid})
+    q1_live = cookie_value(q1_jar, "__Host-dbsc-challenge")
+    check("q1 holds a live challenge to present from the other session",
+          q1_live is not None)
+
     status, _, text = request(
-        q2, "POST", "/dbsc-bound/refresh", form=False, body={
-            "challenge": q1_ch,
-            "signature": q2_bound.sign(f"{q1_ch}.{q_ts}"),
-            "timestamp": q_ts})
+        q2, "POST", "/dbsc/refresh", body=b"", headers={
+            "Secure-Session-Response": refresh_jws(q2_key, q1_live),
+            "Cookie": binder_cookie_header(q2_jar, q2_sid, q1_live),
+            "Content-Type": "application/json"})
     check("another session's challenge -> JTI_MISMATCH",
           status == 403 and "JTI_MISMATCH" in text, f"{status} {text[:160]}")
     check("it is not reported as missing or expired",
           "CHALLENGE_NOT_FOUND" not in text and "CHALLENGE_EXPIRED" not in text, text[:160])
 
-    # -------------------------------------------- R. UNKNOWN_ALGORITHM
-    print("\n-- R. a valid key the bound protocol cannot use --")
-    # A 2048-bit RSA key is a perfectly valid JWK and the native protocol accepts
-    # it, but the bound polyfill is ES256-only. It is therefore UNKNOWN_ALGORITHM
-    # (the algorithm cannot be honoured) rather than INVALID_JWK (the key is bad),
-    # and the two must not be conflated.
-    r_opener, r_jar = new_client()
-    _, _, r_sid, _ = login(r_opener, r_jar)
-    r_ch, _, _ = bound_challenge(r_opener, r_jar)
-    # An RSA modulus of the minimum permitted size, so only the algorithm check can
-    # object: Jwk.validate accepts this key.
-    r_n = b64u(bytes([0x80]) + b"\x00" * 255)
-    r_key = Key()
-    status, _, text = request(
-        r_opener, "POST", "/dbsc-bound/registration", form=False, body={
-            "publicKey": {"kty": "RSA", "n": r_n},
-            "signature": r_key.sign(r_ch), "challenge": r_ch})
-    check("an RSA key on the bound route -> UNKNOWN_ALGORITHM",
-          status == 403 and "UNKNOWN_ALGORITHM" in text, f"{status} {text[:160]}")
-    check("it is not reported as INVALID_JWK",
-          "INVALID_JWK" not in text, text[:160])
-
-    # ---------------------------------------------------- 10. logout
-    print("\n-- M. logout terminates the binding --")
+    # ---------------------------------------------------- M. logout
+    # On its own client: "opener" was deliberately demoted to tier none in step 6,
+    # and this is the binding-termination check, not a re-test of that demotion.
+    print("\n-- I. logout terminates the binding --")
+    l_opener, l_jar = new_client()
+    login(l_opener, l_jar)
     # Logout clears the binding cookie by expiring it, so check the Set-Cookie
     # header rather than the jar: a jar may simply drop an expired cookie.
     status, lh, _ = request(
-        opener, "POST", "/logout", body=b"",
-        headers={"X-CSRF-TOKEN": csrf or current_csrf(opener)})
+        l_opener, "POST", "/logout", body=b"",
+        headers={"X-CSRF-TOKEN": current_csrf(l_opener) or "x"})
     check("POST /logout responds with a redirect", status in (302, 303), f"got {status}")
     set_cookies = ", ".join(all_headers(lh, "Set-Cookie"))
     check("logout expires the DBSC binding cookie",
           "__Host-dbsc-session" in set_cookies, set_cookies[:200])
 
-    # ---------------------------------- 11. unauthenticated access is refused
-    print("\n-- 11. an anonymous client is refused --")
+    # ---------------------------------- J. unauthenticated access is refused
+    print("\n-- J. an anonymous client is refused --")
     anon, _ = new_client()
     status, _, _ = request(anon, "GET", "/app/whoami")
     check("anonymous GET /app/whoami is not 200", status != 200, f"got {status}")
 
-    # ------------------------------------------------- P. RATE_LIMITED
-    print("\n-- P. a client that keeps failing is throttled --")
+    # ------------------------------------------------- K. RATE_LIMITED
+    print("\n-- K. a client that keeps failing is throttled --")
     if RATE_LIMIT_FAILURES is None:
         skip("repeated failures -> 429 RATE_LIMITED",
              "start a second demo on " + RATE_BASE + " with a small "
@@ -1113,56 +793,56 @@ def main():
         # A separate instance: the demo's own budgets are 1000 so that this suite's
         # deliberate failures do not throttle it, which leaves RATE_LIMITED
         # unreachable there. The limiter counts failures, not just requests, so a
-        # loop of rejected proofs is what trips it.
-        #
-        # The limiter keys on client IP and holds its counters for a whole window,
-        # and every local run shares one IP. A previous run -- or a previous
-        # section -- can therefore leave this instance already throttled, which
-        # would make "it trips after N attempts" meaningless. Probing first tells
-        # the two situations apart instead of failing on a spent window.
+        # loop of rejected registrations is what trips it.
         p_opener, p_jar = new_client()
         p_status, _, p_sid, _ = login(p_opener, p_jar, base=RATE_BASE)
         if p_status != 302:
             check("the low-budget demo accepts the same login", False,
                   f"login returned {p_status}; is a second instance on {RATE_BASE}?")
         else:
+            # The probe below is deliberately outside the loop: this section's
+            # loop must start at attempt 0 of a *fresh* window, or "it trips at
+            # the configured budget" measures a window that was already partly
+            # spent. Window lengths here are a minute or so, so starting one only
+            # costs seconds -- and waiting is not a skipped check, it is the
+            # precondition for the real one.
+            if p_tripped(p_opener, p_jar):
+                window = p_window_seconds()
+                print(f"     the rate-limit window is already spent; waiting {window}s")
+                time.sleep(window)
             p_key = Key()
 
-            def p_refresh():
-                ts = now_ms()
-                return request(
-                    p_opener, "POST", "/dbsc-bound/refresh", form=False, base=RATE_BASE, body={
-                        "challenge": "never-issued",
-                        "signature": p_key.sign(f"never-issued.{ts}"),
-                        "timestamp": ts})
+            def p_register():
+                # No challenge cookie is ever presented on this leg, so every
+                # attempt is rejected and charged to the client's failure budget.
+                # An unknown, never-consumed JTI is used rather than a replayed one,
+                # because a consumed challenge short-circuits ahead of the failure
+                # accounting entirely.
+                _, status, text = native_register_manual(
+                    p_opener, "n" * 43, p_key, base=RATE_BASE)
+                return status, text
 
-            # Each iteration presents a proof whose challenge was never issued, so
-            # every request fails and is charged to the client's failure budget.
             throttled_at = None
+            text = ""
             for i in range(RATE_LIMIT_FAILURES + 10):
-                status, _, text = p_refresh()
+                status, text = p_register()
                 if status == 429:
                     throttled_at = i
                     break
-            check("repeating a rejected proof -> 429 RATE_LIMITED", throttled_at is not None,
+            check("repeating a rejected registration -> 429 RATE_LIMITED",
+                  throttled_at is not None,
                   f"never throttled in {RATE_LIMIT_FAILURES + 10} attempts; last was {status} {text[:120]}")
             if throttled_at is not None:
                 check("the 429 body carries RATE_LIMITED, not a generic error",
                       "RATE_LIMITED" in text, text[:160])
-                if throttled_at == 0:
-                    # The window was already spent before this section started, so
-                    # the attempt count says nothing. Say so rather than assert it.
-                    skip("it trips at the configured failure budget, not before",
-                         "the instance was already throttled when this section began")
-                else:
-                    check("it trips at the configured failure budget, not before",
-                          throttled_at >= RATE_LIMIT_FAILURES - 1,
-                          f"tripped after {throttled_at} attempts, budget {RATE_LIMIT_FAILURES}")
+                check("it trips at the configured failure budget, not before",
+                      throttled_at >= RATE_LIMIT_FAILURES - 1,
+                      f"tripped after {throttled_at} attempts, budget {RATE_LIMIT_FAILURES}")
                 # A throttled request must not be charged again, or a client that
                 # keeps retrying would push its own lockout out forever. Waiting out
                 # a whole window is the only way to observe that here, so it is done
                 # once and the check is kept cheap.
-                status2, _, _ = p_refresh()
+                status2, _ = p_register()
                 check("a refused request stays refused while retried", status2 == 429,
                       f"got {status2}")
 

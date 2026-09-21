@@ -57,10 +57,6 @@ public class DbscFilter extends OncePerRequestFilter {
         this.routes = List.of(
                 new Route("POST", properties.getRegistrationPath(), this::nativeRegistration),
                 new Route("POST", properties.getRefreshPath(), this::nativeRefresh),
-                new Route("GET", properties.getBoundPath() + "/state", this::boundState),
-                new Route("GET", properties.getBoundPath() + "/challenge", this::boundChallenge),
-                new Route("POST", properties.getBoundPath() + "/registration", this::boundRegistration),
-                new Route("POST", properties.getBoundPath() + "/refresh", this::boundRefresh),
                 new Route("GET", "/.well-known/device-bound-sessions", this::wellKnownDocument));
     }
 
@@ -108,7 +104,7 @@ public class DbscFilter extends OncePerRequestFilter {
             }
             writeError(response, e);
         } catch (IllegalArgumentException e) {
-            // A bound-route body that is not valid JSON is a client bug: 400.
+            // A non-JSON body on a protocol route is a client bug: 400.
             dbsc.recordRateLimitFailure(request);
             writeJson(response, HttpStatus.BAD_REQUEST, Map.of("error", "MALFORMED_JWS",
                     "message", String.valueOf(e.getMessage())));
@@ -134,50 +130,6 @@ public class DbscFilter extends OncePerRequestFilter {
             return;
         }
         writeJson(response, HttpStatus.OK, config);
-    }
-
-    // ------------------------------------------------------------------
-    // Bound protocol (spec 03)
-    // ------------------------------------------------------------------
-
-    private void boundState(HttpServletRequest request, HttpServletResponse response)
-            throws IOException {
-        // No cookie is written here. The bound protocol passes its challenge in
-        // the JSON body, and the browser echoes it from there; the challenge
-        // cookie belongs to the *native* routes alone. Writing it here used to
-        // clobber a challenge the native registration was primed with, because
-        // both would use the same cookie name, and the registration POST that
-        // followed then failed JTI_MISMATCH against a JTI Chrome had never seen.
-        DbscService.BoundStateResult result = dbsc.boundState(request);
-        writeJson(response, HttpStatus.OK, result.body());
-    }
-
-    private void boundChallenge(HttpServletRequest request, HttpServletResponse response)
-            throws IOException {
-        DbscService.BoundChallengeResult result = dbsc.boundChallenge(request, response);
-        // Spec 03 pins `{"error":"no session"}` for the sessionless case.
-        writeJson(response, result.hasSession() ? HttpStatus.OK : HttpStatus.FORBIDDEN, result.body());
-    }
-
-    private void boundRegistration(HttpServletRequest request, HttpServletResponse response)
-            throws IOException {
-        Map<String, Object> body = Json.parseObject(readBody(request));
-        writeJson(response, HttpStatus.OK, dbsc.boundRegistration(
-                request,
-                Json.object(body, "publicKey"),
-                Json.string(body, "signature"),
-                Json.string(body, "challenge")));
-    }
-
-    private void boundRefresh(HttpServletRequest request, HttpServletResponse response)
-            throws IOException {
-        Map<String, Object> body = Json.parseObject(readBody(request));
-        writeJson(response, HttpStatus.OK, dbsc.boundRefresh(
-                request,
-                response,
-                Json.string(body, "signature"),
-                Json.string(body, "challenge"),
-                Json.longValue(body, "timestamp")));
     }
 
     // ------------------------------------------------------------------
@@ -235,9 +187,6 @@ public class DbscFilter extends OncePerRequestFilter {
     private void writeError(HttpServletResponse response, DbscException e) throws IOException {
         HttpStatus status = switch (e.code()) {
             case RATE_LIMITED -> HttpStatus.TOO_MANY_REQUESTS;
-            // A missing bound-protocol cookie or field is a client bug, not a
-            // rejected proof, so it is the one 400 among the DBSC failures.
-            case BAD_REQUEST -> HttpStatus.BAD_REQUEST;
             default -> HttpStatus.FORBIDDEN;
         };
         log.debug("DBSC {} -> {}: {}", e.code(), status.value(), e.getMessage());
@@ -257,7 +206,6 @@ public class DbscFilter extends OncePerRequestFilter {
     }
 
     /**
-     * A method + path the filter owns.
      *
      * @param method  the HTTP method to match
      * @param path    the exact path to match

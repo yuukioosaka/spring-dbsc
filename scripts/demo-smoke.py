@@ -39,11 +39,17 @@ for path in ["/app", "/app/whoami"]:
         print(f"\n== GET {path}: ERR {e.code}")
         print("  ", e.read().decode()[:200])
 
-# the guarded route, with no proof
+# /app/payment is an ordinary authenticated POST. DBSC no longer guards routes, so
+# the only things that can refuse it are the login session and CSRF. The demo page
+# reads the token and header name from the same <meta> tags the layout emits.
+page = op.open(BASE + "/app").read().decode()
+tok2 = re.search(r'name="csrf" content="([^"]*)"', page).group(1)
+hdr2 = re.search(r'name="csrf-header" content="([^"]*)"', page).group(1)
 req = urllib.request.Request(BASE + "/app/payment",
     data=b'{"amount":1000,"currency":"usd"}',
-    headers={"Content-Type": "application/json"}, method="POST")
+    headers={"Content-Type": "application/json", hdr2: tok2},
+    method="POST")
 try:
-    r = op.open(req); print(f"\n== POST /app/payment (no proof): {r.status}"); print("  ", r.read().decode()[:200])
+    r = op.open(req); print(f"\n== POST /app/payment (authenticated): {r.status}"); print("  ", r.read().decode()[:200])
 except urllib.error.HTTPError as e:
-    print(f"\n== POST /app/payment (no proof): {e.code} (expected 403)"); print("  ", e.read().decode()[:200])
+    print(f"\n== POST /app/payment: {e.code}"); print("  ", e.read().decode()[:200])

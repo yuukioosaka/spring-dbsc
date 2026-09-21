@@ -66,6 +66,7 @@ jobs:
         env:
           DBSC_CHALLENGE_TTL: '2'
           DBSC_RATE_LIMIT_FAILURES: '5'
+          DBSC_RATE_LIMIT_WINDOW: '90s'
         run: python scripts/e2e.py
 
       # Guards against a new error code being added without a scenario that

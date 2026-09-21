@@ -2,7 +2,6 @@ package click.yukio.dbsc;
 
 import click.yukio.dbsc.config.DbscProperties;
 import click.yukio.dbsc.web.DbscFilter;
-import click.yukio.dbsc.web.DbscProofGuardFilter;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.Bean;
@@ -58,13 +57,7 @@ class NonFormLoginChainTest {
         }
 
         @Bean
-        DbscProofGuardFilter dbscProofGuardFilter() {
-            return new DbscProofGuardFilter(null, List.of(), request -> false);
-        }
-
-        @Bean
-        SecurityFilterChain chain(HttpSecurity http, DbscFilter dbscFilter,
-                                  DbscProofGuardFilter guardFilter) throws Exception {
+        SecurityFilterChain chain(HttpSecurity http, DbscFilter dbscFilter) throws Exception {
             http
                     .securityMatcher(new AntPathRequestMatcher("/**"))
                     .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
@@ -73,8 +66,7 @@ class NonFormLoginChainTest {
                     .csrf(csrf -> csrf.disable())
                     // Deliberately no formLogin(): the point is whether the anchor
                     // below resolves without it.
-                    .addFilterBefore(dbscFilter, UsernamePasswordAuthenticationFilter.class)
-                    .addFilterBefore(guardFilter, UsernamePasswordAuthenticationFilter.class);
+                    .addFilterBefore(dbscFilter, UsernamePasswordAuthenticationFilter.class);
             return http.build();
         }
     }
@@ -109,17 +101,14 @@ class NonFormLoginChainTest {
                     .toList();
 
             int dbsc = order.indexOf("DbscFilter");
-            int guard = order.indexOf("DbscProofGuardFilter");
             int authz = order.indexOf("AuthorizationFilter");
 
             assertTrue(dbsc >= 0, "DbscFilter must be installed, order was " + order);
-            assertTrue(guard >= 0, "DbscProofGuardFilter must be installed, order was " + order);
             assertTrue(authz >= 0, "AuthorizationFilter must be present, order was " + order);
-            // The anchors name UsernamePasswordAuthenticationFilter's position, and
-            // authorization runs after it -- so both DBSC filters precede it and can
+            // The anchor names UsernamePasswordAuthenticationFilter's position, and
+            // authorization runs after it -- so the DBSC filter precedes it and can
             // answer 403 before Spring Security can replace it with its own 401/403.
             assertTrue(dbsc < authz, "DbscFilter must precede authorization, order was " + order);
-            assertTrue(guard < authz, "guard must precede authorization, order was " + order);
         } finally {
             context.close();
         }
@@ -142,11 +131,6 @@ class NonFormLoginChainTest {
         @Bean
         DbscFilter dbscFilter(DbscProperties properties) {
             return new DbscFilter(null, properties);
-        }
-
-        @Bean
-        DbscProofGuardFilter dbscProofGuardFilter() {
-            return new DbscProofGuardFilter(null, List.of(), request -> false);
         }
 
         /**
@@ -177,8 +161,7 @@ class NonFormLoginChainTest {
         }
 
         @Bean
-        SecurityFilterChain chain(HttpSecurity http, DbscFilter dbscFilter,
-                                  DbscProofGuardFilter guardFilter) throws Exception {
+        SecurityFilterChain chain(HttpSecurity http, DbscFilter dbscFilter) throws Exception {
             http
                     .securityMatcher(new AntPathRequestMatcher("/**"))
                     .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
@@ -188,14 +171,13 @@ class NonFormLoginChainTest {
                     .oauth2Login(org.springframework.security.config.Customizer.withDefaults())
                     // The library's anchors, unchanged, in a chain whose
                     // authentication is OIDC rather than a login form.
-                    .addFilterBefore(dbscFilter, UsernamePasswordAuthenticationFilter.class)
-                    .addFilterBefore(guardFilter, UsernamePasswordAuthenticationFilter.class);
+                    .addFilterBefore(dbscFilter, UsernamePasswordAuthenticationFilter.class);
             return http.build();
         }
     }
 
     @Test
-    @DisplayName("a real oauth2Login() chain accommodates the DBSC filters")
+    @DisplayName("a real oauth2Login() chain accommodates the DBSC filter")
     void oauth2LoginChainBuilds() {
         AnnotationConfigWebApplicationContext context = new AnnotationConfigWebApplicationContext();
         context.register(Oauth2LoginChain.class, WebSecurityConfiguration.class);
@@ -206,11 +188,10 @@ class NonFormLoginChainTest {
                     .map(filter -> filter.getClass().getSimpleName())
                     .toList();
 
-            // OIDC login is in the chain, and so are both DBSC filters.
+            // OIDC login is in the chain, and so is the DBSC filter.
             assertTrue(order.stream().anyMatch(name -> name.contains("OAuth2")),
                     "an OAuth2 login filter must be present, order was " + order);
             assertTrue(order.contains("DbscFilter"), "DBSC protocol filter installed: " + order);
-            assertTrue(order.contains("DbscProofGuardFilter"), "guard installed: " + order);
 
             int dbsc = order.indexOf("DbscFilter");
             int authz = order.indexOf("AuthorizationFilter");

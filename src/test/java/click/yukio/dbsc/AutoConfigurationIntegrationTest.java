@@ -35,15 +35,15 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
  *
  * <p>The host app below declares no DBSC beans, no database, and no XML — the
  * only DBSC-specific line in it is {@code dbsc.bind(...)}. Everything else
- * (storage, challenge service, engine, cookie scope, rate limiter, replay cache)
- * has to arrive from {@link DbscAutoConfiguration}. If a future change adds a
- * required collaborator without a default, this test fails, which is the point.
+ * (storage, challenge service, engine, cookie scope, rate limiter) has to arrive
+ * from {@link DbscAutoConfiguration}. If a future change adds a required
+ * collaborator without a default, this test fails, which is the point.
  */
 @SpringBootTest(
         classes = AutoConfigurationIntegrationTest.HostApplication.class,
         properties = {
-                // The host app has no DataSource, so storage and the replay cache
-                // must fall back to their single-process forms rather than fail.
+                // The host app has no DataSource, so storage must fall back to its
+                // single-process form rather than fail.
                 "dbsc.storage=memory",
                 "dbsc.secure=false",
         })
@@ -67,7 +67,6 @@ class AutoConfigurationIntegrationTest {
         assertNotNull(dbsc, "DbscService must be provided by the auto-configuration");
         assertNotNull(cookieScope, "CookieScope must be provided too");
         assertNotNull(storage, "a StorageAdapter must be provided even without a DataSource");
-        assertTrue(dbsc.properties().isBound(), "the bound protocol is on by default");
     }
 
     @Test

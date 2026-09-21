@@ -62,13 +62,9 @@ public class DbscException extends RuntimeException {
         return new DbscException(DbscErrorCode.JTI_MISMATCH, message);
     }
 
-    public static DbscException malformedProof(String message) {
-        return new DbscException(DbscErrorCode.MALFORMED_PROOF, message);
-    }
-
     /**
      * The request is missing a cookie or body field the protocol requires. This is
-     * the one bound-protocol failure that is not a 403.
+     * the one protocol failure that is not a 403.
      */
     public static DbscException badRequest(String message) {
         return new DbscException(DbscErrorCode.BAD_REQUEST, message);

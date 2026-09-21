@@ -1,7 +1,6 @@
 package click.yukio.dbsc.storage;
 
 import click.yukio.dbsc.core.BoundKey;
-import click.yukio.dbsc.core.BoundKeyKind;
 import click.yukio.dbsc.core.Challenge;
 import click.yukio.dbsc.core.Json;
 import click.yukio.dbsc.core.Session;
@@ -56,12 +55,10 @@ public class JdbcStorageAdapter implements StorageAdapter {
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS dbsc_sessions_user_idx ON dbsc_sessions (user_id)");
             statement.executeUpdate("""
                     CREATE TABLE IF NOT EXISTS dbsc_bound_keys (
-                        session_id VARCHAR(255) NOT NULL,
-                        kind       VARCHAR(16)  NOT NULL,
+                        session_id VARCHAR(255) PRIMARY KEY,
                         jwk_json   TEXT         NOT NULL,
                         algorithm  VARCHAR(16)  NOT NULL,
-                        created_at BIGINT       NOT NULL,
-                        PRIMARY KEY (session_id, kind)
+                        created_at BIGINT       NOT NULL
                     )
                     """);
             statement.executeUpdate("""
@@ -116,51 +113,35 @@ public class JdbcStorageAdapter implements StorageAdapter {
     // ---- Bound keys ----
 
     @Override
-    public Optional<BoundKey> getBoundKey(String sessionId, BoundKeyKind kind) {
-        if (kind != null) {
-            String sql = "SELECT session_id, kind, jwk_json, algorithm, created_at "
-                    + "FROM dbsc_bound_keys WHERE session_id = ? AND kind = ?";
-            return StorageSupport.optional(queryOne(
-                    sql,
-                    statement -> {
-                        statement.setString(1, sessionId);
-                        statement.setString(2, kind.wireValue());
-                    },
-                    this::readBoundKey));
-        }
-        // Without a kind, return "native" first and fall back to "bound".
-        Optional<BoundKey> nativeKey = getBoundKey(sessionId, BoundKeyKind.NATIVE);
-        return nativeKey.isPresent() ? nativeKey : getBoundKey(sessionId, BoundKeyKind.BOUND);
+    public Optional<BoundKey> getBoundKey(String sessionId) {
+        String sql = "SELECT session_id, jwk_json, algorithm, created_at "
+                + "FROM dbsc_bound_keys WHERE session_id = ?";
+        return StorageSupport.optional(queryOne(
+                sql,
+                statement -> statement.setString(1, sessionId),
+                this::readBoundKey));
     }
 
     @Override
     public void setBoundKey(BoundKey key) {
         String sql = """
                 MERGE INTO dbsc_bound_keys
-                    (session_id, kind, jwk_json, algorithm, created_at)
-                KEY (session_id, kind)
-                VALUES (?, ?, ?, ?, ?)
+                    (session_id, jwk_json, algorithm, created_at)
+                KEY (session_id)
+                VALUES (?, ?, ?, ?)
                 """;
         update(sql, statement -> {
             statement.setString(1, key.sessionId());
-            statement.setString(2, key.kind().wireValue());
-            statement.setString(3, Json.write(key.jwk()));
-            statement.setString(4, key.algorithm());
-            statement.setLong(5, key.createdAt());
+            statement.setString(2, Json.write(key.jwk()));
+            statement.setString(3, key.algorithm());
+            statement.setLong(4, key.createdAt());
         });
     }
 
     @Override
-    public void deleteBoundKey(String sessionId, BoundKeyKind kind) {
-        if (kind != null) {
-            update("DELETE FROM dbsc_bound_keys WHERE session_id = ? AND kind = ?", statement -> {
-                statement.setString(1, sessionId);
-                statement.setString(2, kind.wireValue());
-            });
-        } else {
-            update("DELETE FROM dbsc_bound_keys WHERE session_id = ?", statement ->
-                    statement.setString(1, sessionId));
-        }
+    public void deleteBoundKey(String sessionId) {
+        update("DELETE FROM dbsc_bound_keys WHERE session_id = ?", statement ->
+                statement.setString(1, sessionId));
     }
 
     // ---- Challenges ----
@@ -232,7 +213,6 @@ public class JdbcStorageAdapter implements StorageAdapter {
         Map<String, Object> jwk = jwkJson == null ? null : Json.tryParseObject(jwkJson);
         return new BoundKey(
                 sessionId,
-                BoundKeyKind.fromWire(rs.getString("kind")),
                 StorageSupport.requireJwk(jwk, sessionId),
                 rs.getString("algorithm"),
                 rs.getLong("created_at"));

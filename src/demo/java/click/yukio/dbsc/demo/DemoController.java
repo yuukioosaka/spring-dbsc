@@ -15,8 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * The application endpoints the demo exercises: a plain one a stolen cookie can
- * still reach, and a guarded one it cannot.
+ * The application endpoints the demo exercises.
  */
 @RestController
 @RequestMapping("/app")
@@ -29,10 +28,9 @@ class DemoController {
     }
 
     /**
-     * Unguarded, and deliberately so. It answers as long as the login cookie is
-     * valid — which is exactly the request a stolen cookie can replay. Compare it
-     * with {@link #payment}: the difference between the two is the whole value of
-     * DBSC.
+     * A route on the authenticated side, to compare against the protocol routes.
+     * It answers as long as the login cookie is valid — which is exactly the
+     * request a stolen cookie can replay.
      */
     @GetMapping(path = "/whoami", produces = MediaType.APPLICATION_JSON_VALUE)
     ResponseEntity<String> whoami(HttpServletRequest request) {
@@ -41,15 +39,13 @@ class DemoController {
     }
 
     /**
-     * Guarded by {@link DemoFormLoginConfig#paymentRoute()}. Reaching this method
-     * means the request carried a fresh proof signed by the device key, over a
-     * body hash matching the exact bytes posted.
+     * A POST route, so the CSRF mechanics of a JSON body can be exercised.
      */
     @PostMapping(path = "/payment", produces = MediaType.APPLICATION_JSON_VALUE)
     ResponseEntity<String> payment(@RequestBody(required = false) String rawBody) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("status", "authorized");
-        body.put("note", "the per-request proof verified against this session's bound key");
+        body.put("note", "the login session was valid; DBSC did not inspect this request");
         body.put("receivedBody", rawBody);
         return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(Json.write(body));
     }

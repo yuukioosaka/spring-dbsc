@@ -5,13 +5,15 @@ package click.yukio.dbsc.core;
  *
  * <ul>
  *   <li>{@code DBSC} - a native hardware-backed key is registered (02).</li>
- *   <li>{@code BOUND} - only a polyfill key is registered (03).</li>
  *   <li>{@code NONE} - nothing bound, or a refresh signature failed.</li>
  * </ul>
+ *
+ * <p>The toolkit's {@code bound} tier is not produced by this library. A stored
+ * {@code bound} value reads as {@code NONE}, so a session registered against an
+ * older release is demoted rather than trusted.
  */
 public enum ProtectionTier {
     DBSC("dbsc"),
-    BOUND("bound"),
     NONE("none");
 
     private final String wireValue;
@@ -30,7 +32,6 @@ public enum ProtectionTier {
         }
         return switch (value) {
             case "dbsc" -> DBSC;
-            case "bound" -> BOUND;
             default -> NONE;
         };
     }

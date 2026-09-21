@@ -2,7 +2,6 @@ package click.yukio.dbsc;
 
 import click.yukio.dbsc.config.DbscProperties;
 import click.yukio.dbsc.web.DbscFilter;
-import click.yukio.dbsc.web.DbscProofGuardFilter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -11,20 +10,17 @@ import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 
-import java.util.List;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The filters are not Spring Security components, and these tests pin that down.
  *
- * <p>The library declares no {@code SecurityFilterChain} — only the filters — so an
+ * <p>The library declares no {@code SecurityFilterChain} — only the filter — so an
  * application with its own security stack, or none at all, can drop
- * {@link DbscFilter} and {@link DbscProofGuardFilter} into a plain servlet chain.
- * If either filter starts depending on Security's request wrappers or context,
+ * {@link DbscFilter} into a plain servlet chain.
+ * If the filter starts depending on Security's request wrappers or context,
  * these tests fail.
  */
 class FilterStandaloneTest {
@@ -103,40 +99,5 @@ class FilterStandaloneTest {
 
         assertEquals(200, response.getStatus());
         assertTrue(response.getContentAsString().contains("registering_origins"));
-    }
-
-    @Test
-    @DisplayName("the proof guard ignores paths it does not guard")
-    void guardIgnoresUnguardedPaths() throws Exception {
-        DbscProofGuardFilter guard = new DbscProofGuardFilter(
-                dbsc, List.of("/api/transfer"), request -> true);
-
-        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/orders");
-        MockHttpServletResponse response = new MockHttpServletResponse();
-        MockFilterChain chain = new MockFilterChain();
-
-        guard.doFilter(request, response, chain);
-
-        assertEquals(200, response.getStatus());
-        assertTrue(chain.getRequest() != null, "the request must reach the handler");
-        Mockito.verifyNoInteractions(dbsc);
-    }
-
-    @Test
-    @DisplayName("the proof guard refuses an unguarded-by-proof request with 403")
-    void guardRefusesMissingSession() throws Exception {
-        DbscProofGuardFilter guard = new DbscProofGuardFilter(
-                dbsc, List.of("/api/transfer"), request -> true);
-
-        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/transfer");
-        MockHttpServletResponse response = new MockHttpServletResponse();
-        MockFilterChain chain = new MockFilterChain();
-
-        guard.doFilter(request, response, chain);
-
-        assertEquals(403, response.getStatus());
-        assertFalse(response.getContentAsString().isEmpty(),
-                "a refusal must be machine-readable, not an empty body");
-        assertNull(chain.getRequest(), "a refused request must not reach the handler");
     }
 }

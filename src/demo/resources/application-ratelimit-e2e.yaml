@@ -10,10 +10,12 @@
 # Run alongside the main demo:
 #
 #   mvn -Pdemo,ratelimit-e2e -Dmaven.repo.local=.m2repo spring-boot:run
-#   DBSC_RATE_LIMIT_FAILURES=5 python3 scripts/e2e.py
+#   DBSC_RATE_LIMIT_FAILURES=5 DBSC_RATE_LIMIT_WINDOW=90s python3 scripts/e2e.py
 #
-# The failure budget below is what DBSC_RATE_LIMIT_FAILURES must be set to; nothing
-# reads it from here, so change both together.
+# The failure budget below is what DBSC_RATE_LIMIT_FAILURES must be set to, and the
+# window is what DBSC_RATE_LIMIT_WINDOW must be set to; nothing reads them from
+# here, so change all three together. scripts/run-demos.sh passes both as
+# -Ddbsc.rate-limit.* so the two processes cannot drift apart.
 
 server:
   port: 9443
@@ -31,7 +33,11 @@ dbsc:
     # counter trips first and the failure counter is never consulted.
     capacity: 20
     failure-capacity: 5
-    window: 1m
+    # Deliberately short. A longer window makes the suite's RATE_LIMITED measurement
+    # depend on a previous run having finished more than that long ago, which is
+    # flaky on a slow machine. scripts/e2e.py uses DBSC_RATE_LIMIT_WINDOW to know how
+    # long to wait when a window is already spent.
+    window: 90s
 
 logging:
   level:

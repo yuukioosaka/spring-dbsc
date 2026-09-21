@@ -16,70 +16,65 @@
 <body>
 <h1>Signed in as <span th:text="${#authentication != null ? #authentication.name : 'anonymous'}">user</span></h1>
 
-<h2>1. Unguarded route</h2>
-<p class="hint">Answers with a valid login cookie alone — this is what a stolen cookie replays.</p>
+<h2>1. /app/whoami</h2>
+<p class="hint">
+    The live DBSC report. Answers on a bare login cookie alone, which is exactly
+    what a stolen cookie replays — DBSC does not change that, and this route is
+    here so the difference from a bound session is visible rather than assumed.
+</p>
 <button onclick="hit('/app/whoami', 'GET')">GET /app/whoami</button>
 <pre id="whoami"></pre>
 
-<h2>2. Guarded route</h2>
+<h2>2. /app/payment</h2>
 <p class="hint">
-    Requires a fresh per-request proof signed by the device key, bound to the body.
-    With no proof it is <code>403</code>, never <code>401</code> — Chromium treats 401 on
-    these paths as fatal.
+    An ordinary authenticated POST. Nothing per-request is verified here: the
+    library no longer ships a proof guard, so a valid login session and a CSRF
+    token are the whole requirement.
 </p>
-<button onclick="hit('/app/payment', 'POST')">POST /app/payment (no proof)</button>
+<button onclick="hit('/app/payment', 'POST')">POST /app/payment</button>
 <pre id="payment"></pre>
 
 <!-- The app chain keeps CSRF on, so the JS must echo the token. Without it every
-     POST is refused by CsrfFilter before DBSC ever sees it, and the 403 becomes
-     indistinguishable from the DBSC guard's own 403. -->
+     POST is refused by CsrfFilter with a 403 that is indistinguishable from any
+     other refusal. -->
 <meta name="csrf" th:content="${_csrf != null ? _csrf.token : ''}"/>
 <meta name="csrf-header" th:content="${_csrf != null ? _csrf.headerName : 'X-CSRF-TOKEN'}"/>
 
-<h2>3. Bound / polyfill client (spec 03)</h2>
+<h2>3. Native DBSC state</h2>
 <p class="hint">
-    The native path above needs no JavaScript. <code>bound</code> does: it is the
-    <a href="https://github.com/SulimanAbdulrazzaq/dbsc-toolkit">dbsc-toolkit</a>
-    Web Crypto polyfill, loaded here from <code>/dbsc-client/index.js</code>. Its key
-    lives in IndexedDB, so it is <strong>readable by page script</strong> — weaker than
-    a native key, see the README's "Native vs. polyfill" section.
+    DBSC is driven by the browser, not by this page: there is no client script
+    involved. On <strong>Chromium 145+</strong> the browser POSTs
+    <code>/dbsc/registration</code> on its own after login, using a
+    hardware-backed non-extractable key (TPM / Secure Enclave), then keeps it
+    alive with <code>/dbsc/refresh</code>.
 </p>
 <p class="hint">
-    <code>initBoundDbsc()</code> reads <code>/dbsc-bound/state</code> and, if the server
-    asks for it, registers a polyfill key. <code>wrapFetch()</code> then signs
-    individual requests with <code>X-Dbsc-Bound-Proof</code>, which is what the
-    guarded route below accepts.
+    The <code>tier</code> in the report above is what the server enforces right
+    now: <code>none</code> until the browser registers, then <code>dbsc</code>. A
+    refresh that the server refuses drops it back to <code>none</code> rather
+    than leaving a stale key in place — press <code>GET /app/whoami</code> after
+    a failed refresh to watch the demotion.
 </p>
-<button onclick="runBound()">Run initBoundDbsc()</button>
-<button onclick="hitGuardedWithProof()">POST /app/payment (with proof)</button>
-<pre id="bound">Not run yet.</pre>
-
-<h2>4. Browser state</h2>
 <p class="hint">
-    For full detail open <code>/app/whoami</code> directly, or watch the server log —
-    every DBSC decision is logged with its reason.
+    Watch both requests in the DevTools network tab — they are the whole
+    protocol surface, and no JavaScript on this page issues them.
 </p>
-    <pre id="browser">Open /app/whoami in a new tab to see the live DBSC report.</pre>
 
-<script type="module">
-    // Loaded as a module so the polyfill stays in its own scope: its exports are
-    // assigned to window deliberately, rather than leaking as globals by accident.
-    import { initBoundDbsc, wrapFetch, clearBoundKey, stopBoundDbsc }
-        from '/dbsc-client/index.js';
-
-    window.initBoundDbsc = initBoundDbsc;
-    window.wrapFetch = wrapFetch;
-    window.clearBoundKey = clearBoundKey;
-    window.stopBoundDbsc = stopBoundDbsc;
-</script>
+<h2>4. Logging out</h2>
+<p class="hint">
+    Logout calls <code>dbsc.terminate()</code> before ending the login session,
+    so the server tells the browser to forget the binding and clears the binding
+    cookie. Without that the device key would outlive the login: the browser
+    would keep refreshing a session the app had already ended, and the next login
+    would re-couple to a stale key instead of registering a fresh one.
+</p>
+<form method="post" th:action="@{/logout}">
+    <button type="submit">Sign out</button>
+</form>
 
 <script>
     const csrfToken = document.querySelector('meta[name="csrf"]').content;
     const csrfHeader = document.querySelector('meta[name="csrf-header"]').content;
-
-    function write(id, text) {
-        document.getElementById(id).textContent = text;
-    }
 
     async function hit(path, method) {
         const out = document.getElementById(path.includes('payment') ? 'payment' : 'whoami');
@@ -97,56 +92,6 @@
                 body: method === 'GET' ? undefined : JSON.stringify({ amount: 1000, currency: 'usd' })
             });
             out.textContent = res.status + ' ' + res.statusText + '\n\n' + await res.text();
-        } catch (e) {
-            out.textContent = 'request failed: ' + e;
-        }
-    }
-
-    // The polyfill's own entry point. The returned outcome says what happened:
-    // native-dbsc, polyfill-bound, unbound or error, each with a skipReason when
-    // the browser refused a step. This demo runs on Chromium, so on a browser with
-    // native DBSC the outcome is usually native-dbsc and the polyfill key is
-    // co-registered only so that per-request proofs have something to sign with.
-    async function runBound() {
-        const out = document.getElementById('bound');
-        out.textContent = 'calling initBoundDbsc()…';
-        try {
-            // A short probe window: this is a demo page, not a production load.
-            const outcome = await window.initBoundDbsc({ nativeProbeWindowMs: 1500 });
-            out.textContent = 'initBoundDbsc() ->\n\n' + JSON.stringify(outcome, null, 2);
-        } catch (e) {
-            out.textContent = 'initBoundDbsc() threw: ' + (e && e.message ? e.message : e);
-        }
-    }
-
-    // The proof-bearing request. This is the one the guard actually inspects: it
-    // verifies X-Dbsc-Bound-Proof against the polyfill key, over the exact body
-    // bytes, and refuses with 403 if anything is off. If the polyfill never
-    // registered this returns the guard's own MISSING_PROOF/KEY_NOT_FOUND_BOUND.
-    async function hitGuardedWithProof() {
-        const out = document.getElementById('bound');
-        out.textContent = '…';
-        const body = JSON.stringify({ amount: 1000, currency: 'usd' });
-        try {
-            // wrapFetch never touches globalThis.fetch — it is per-call, so only the
-            // request(s) you pass through it are signed. CSRF still applies: the
-            // token is a header, and wrapFetch preserves the init it is given.
-            const signedFetch = window.wrapFetch();
-            const res = await signedFetch('/app/payment', {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: { 'Content-Type': 'application/json', [csrfHeader]: csrfToken },
-                body
-            });
-            const text = await res.text();
-            out.textContent = res.status + ' ' + res.statusText + '\n\n' + text;
-
-            // A 403 here is the interesting failure: it means the proof was absent or
-            // did not verify. The server logs the specific code (MISSING_PROOF,
-            // KEY_NOT_FOUND_BOUND, SIGNATURE_INVALID, REPLAY_DETECTED, ...).
-            if (res.status === 403) {
-                out.textContent += '\n\n(guarded request refused — check the server log for the DBSC code) ';
-            }
         } catch (e) {
             out.textContent = 'request failed: ' + e;
         }

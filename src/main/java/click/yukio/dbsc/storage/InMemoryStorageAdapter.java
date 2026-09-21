@@ -1,7 +1,6 @@
 package click.yukio.dbsc.storage;
 
 import click.yukio.dbsc.core.BoundKey;
-import click.yukio.dbsc.core.BoundKeyKind;
 import click.yukio.dbsc.core.Challenge;
 import click.yukio.dbsc.core.Session;
 import click.yukio.dbsc.core.StorageAdapter;
@@ -47,26 +46,18 @@ public class InMemoryStorageAdapter implements StorageAdapter {
     }
 
     @Override
-    public Optional<BoundKey> getBoundKey(String sessionId, BoundKeyKind kind) {
-        if (kind != null) {
-            return Optional.ofNullable(boundKeys.get(new KeyId(sessionId, kind)));
-        }
-        Optional<BoundKey> nativeKey = getBoundKey(sessionId, BoundKeyKind.NATIVE);
-        return nativeKey.isPresent() ? nativeKey : getBoundKey(sessionId, BoundKeyKind.BOUND);
+    public Optional<BoundKey> getBoundKey(String sessionId) {
+        return Optional.ofNullable(boundKeys.get(new KeyId(sessionId)));
     }
 
     @Override
     public void setBoundKey(BoundKey key) {
-        boundKeys.put(new KeyId(key.sessionId(), key.kind()), key);
+        boundKeys.put(new KeyId(key.sessionId()), key);
     }
 
     @Override
-    public void deleteBoundKey(String sessionId, BoundKeyKind kind) {
-        if (kind != null) {
-            boundKeys.remove(new KeyId(sessionId, kind));
-        } else {
-            boundKeys.keySet().removeIf(key -> key.sessionId().equals(sessionId));
-        }
+    public void deleteBoundKey(String sessionId) {
+        boundKeys.remove(new KeyId(sessionId));
     }
 
     @Override
@@ -104,6 +95,6 @@ public class InMemoryStorageAdapter implements StorageAdapter {
         return challenges.size();
     }
 
-    private record KeyId(String sessionId, BoundKeyKind kind) {
+    private record KeyId(String sessionId) {
     }
 }

@@ -1,7 +1,6 @@
 package click.yukio.dbsc;
 
 import click.yukio.dbsc.config.DbscProperties;
-import click.yukio.dbsc.core.BoundKeyKind;
 import click.yukio.dbsc.core.Challenge;
 import click.yukio.dbsc.core.DbscErrorCode;
 import click.yukio.dbsc.core.DbscException;
@@ -16,7 +15,6 @@ import click.yukio.dbsc.protocol.DbscHeaders;
 import click.yukio.dbsc.protocol.DbscProtocolEngine;
 import click.yukio.dbsc.protocol.SessionConfig;
 import click.yukio.dbsc.ratelimit.RateLimiter;
-import click.yukio.dbsc.replay.ProofReplayCache;
 import click.yukio.dbsc.web.OriginResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,9 +33,9 @@ import java.util.Optional;
  * <p>Controllers stay thin by delegating here; this class owns the mapping from
  * protocol outcomes to status codes, headers, cookies, and JSON bodies. The
  * status rules are strict and load-bearing: the native refresh route MUST answer
- * 403 (never 401) when proof is missing or invalid, and a success MUST carry the
- * JSON session config (a bodyless 200 is read as an opt-out and kills the
- * session).
+ * 403 (never 401) when the signature is missing or invalid, and a success MUST
+ * carry the JSON session config (a bodyless 200 is read as an opt-out and kills
+ * the session).
  */
 public class DbscService {
 
@@ -49,7 +47,6 @@ public class DbscService {
     private final DbscProtocolEngine engine;
     private final CookieScope cookieScope;
     private final RateLimiter rateLimiter;
-    private final ProofReplayCache replayCache;
     private final Clock clock;
     private final boolean trustForwardedHeaders;
 
@@ -60,7 +57,6 @@ public class DbscService {
             DbscProtocolEngine engine,
             CookieScope cookieScope,
             RateLimiter rateLimiter,
-            ProofReplayCache replayCache,
             Clock clock,
             boolean trustForwardedHeaders) {
         this.properties = properties;
@@ -69,7 +65,6 @@ public class DbscService {
         this.engine = engine;
         this.cookieScope = cookieScope;
         this.rateLimiter = rateLimiter;
-        this.replayCache = replayCache;
         this.clock = clock;
         this.trustForwardedHeaders = trustForwardedHeaders;
     }
@@ -239,176 +234,11 @@ public class DbscService {
     }
 
     // ------------------------------------------------------------------
-    // Bound protocol (spec 03)
-    // ------------------------------------------------------------------
-
-    /** {@code GET /dbsc-bound/state} always answers 200 (spec 03). */
-    public BoundStateResult boundState(HttpServletRequest request) {
-        String sessionId = resolveBinderSession(request).orElse(null);
-        Session session = sessionId == null ? null : storage.getSession(sessionId).orElse(null);
-
-        if (session == null) {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("phase", "unbound");
-            body.put("sessionId", null);
-            addSkipped(body, parseSkipped(request));
-            return new BoundStateResult(body, null);
-        }
-
-        boolean hasNative = storage.getBoundKey(session.id(), BoundKeyKind.NATIVE).isPresent();
-        boolean hasBound = storage.getBoundKey(session.id(), BoundKeyKind.BOUND).isPresent();
-
-        Map<String, Object> body = new LinkedHashMap<>();
-        Challenge challenge = null;
-        if (hasBound) {
-            body.put("phase", "bound");
-            body.put("sessionId", session.id());
-            body.put("tier", hasNative ? ProtectionTier.DBSC.wireValue() : ProtectionTier.BOUND.wireValue());
-            body.put("refreshIntervalMs", properties.boundRefreshIntervalMs());
-        } else if (hasNative) {
-            // A Chromium session that has done native registration but has no
-            // per-request key yet. The tier stays "dbsc".
-            challenge = challenges.issue(session.id());
-            body.put("phase", "needs-bound-registration");
-            body.put("sessionId", session.id());
-            body.put("tier", ProtectionTier.DBSC.wireValue());
-            body.put("challenge", challenge.jti());
-            body.put("refreshIntervalMs", properties.boundRefreshIntervalMs());
-        } else {
-            challenge = challenges.issue(session.id());
-            body.put("phase", "needs-registration");
-            body.put("sessionId", session.id());
-            body.put("challenge", challenge.jti());
-        }
-
-        addSkipped(body, parseSkipped(request));
-        return new BoundStateResult(body, challenge);
-    }
-
-    /**
-     * The state route's response plus the challenge it issued, so the controller
-     * can mirror it into a cookie. The bound registration endpoint identifies the
-     * session by cookie and validates the challenge it finds there.
-     *
-     * @param body      the JSON body to render
-     * @param challenge the challenge to set as a cookie, or {@code null}
-     */
-    public record BoundStateResult(Map<String, Object> body, Challenge challenge) {
-    }
-
-    /**
-     * {@code GET /dbsc-bound/challenge}: 403 when the request carries no session
-     * identifier.
-     *
-     * <p>The sessionless case is not an exception: spec 03 pins the exact body
-     * {@code {"error":"no session"}}, so it is returned here for the controller to
-     * render alongside the 403 status.
-     *
-     * <p>A cookie naming a session with no record is treated the same as no cookie:
-     * registration is lazy, so "not registered yet" is the normal first state of
-     * every session and must not be an error. The challenge issued here is bound to
-     * the session identifier, and registration re-validates it.
-     */
-    public BoundChallengeResult boundChallenge(HttpServletRequest request, HttpServletResponse response) {
-        // Registration is lazy: the browser may not have registered yet, so a
-        // cookie naming a session the server has no record of just means "not
-        // registered". Both cases answer the same way, and the caller decides how
-        // to render them.
-        Optional<String> sessionId = resolveBinderSession(request);
-        if (sessionId.isEmpty()) {
-            return new BoundChallengeResult(Map.of("error", "no session"), false);
-        }
-
-        // The JTI goes in the body only, never in the challenge cookie: that
-        // cookie is the native routes' channel and overwriting it here would
-        // invalidate a native registration in flight.
-        Challenge challenge = challenges.issue(sessionId.get());
-        return new BoundChallengeResult(Map.of("challenge", challenge.jti()), true);
-    }
-
-    /**
-     * The challenge body plus whether the request was authenticated, so the
-     * controller knows which status to use.
-     *
-     * @param body     the JSON body to render
-     * @param hasSession whether a session was found; {@code false} means 403
-     */
-    public record BoundChallengeResult(Map<String, Object> body, boolean hasSession) {
-    }
-
-    /** {@code POST /dbsc-bound/registration}. */
-    public Map<String, Object> boundRegistration(
-            HttpServletRequest request, Map<String, Object> publicKey, String signature, String challengeJti) {
-        requireBoundEnabled();
-        checkRegistrationRateLimit(request);
-
-        // Missing cookie or field is 400 here (spec 03/08), unlike every other
-        // DBSC failure: it is a client bug, not a rejected proof.
-        // The browser may be registering for the first time, so the record is
-        // deliberately not required to exist yet: registration is what creates it.
-        String sessionId = requireBinderSession(request, true);
-        if (publicKey == null || signature == null || signature.isEmpty()
-                || challengeJti == null || challengeJti.isEmpty()) {
-            throw DbscException.badRequest(
-                    "bound registration requires publicKey, signature and challenge");
-        }
-        engine.handleBoundRegistration(sessionId, publicKey, signature, challengeJti);
-
-        ProtectionTier tier = engine.currentTier(sessionId);
-        String refreshUrl = properties.getBoundPath() + "/refresh";
-        return SessionConfig.boundResponse(sessionId, refreshUrl, tier.wireValue());
-    }
-
-    /** {@code POST /dbsc-bound/refresh}. */
-    public Map<String, Object> boundRefresh(
-            HttpServletRequest request, HttpServletResponse response,
-            String signature, String challengeJti, Long timestamp) {
-        requireBoundEnabled();
-        checkRefreshRateLimit(request);
-
-        // A refresh carries a signature over a challenge this server issued, so an
-        // unknown session is a forged cookie: a rejected proof (403), not a client
-        // bug.
-        String sessionId = requireRegisteredSession(request, false);
-        if (signature == null || signature.isEmpty() || challengeJti == null || challengeJti.isEmpty()
-                || timestamp == null) {
-            throw DbscException.badRequest("bound refresh requires challenge, signature and timestamp");
-        }
-        engine.handleBoundRefresh(sessionId, signature, challengeJti, timestamp);
-
-        // Only the binding cookie is touched. Clearing the challenge cookie here
-        // would delete a native challenge that is still in flight; the bound
-        // protocol keeps its JTI in the body, so it has nothing to clear.
-        setCookie(response, cookieScope.bindingCookieName(), sessionId, properties.boundCookieTtlMs());
-
-        ProtectionTier tier = engine.currentTier(sessionId);
-        String refreshUrl = properties.getBoundPath() + "/refresh";
-        return SessionConfig.boundResponse(sessionId, refreshUrl, tier.wireValue());
-    }
-
-    // ------------------------------------------------------------------
-    // Per-request proof guard (spec 04)
-    // ------------------------------------------------------------------
-
-    /**
-     * Verifies a per-request proof for a guarded route.
-     *
-     * @param signBody whether the route binds the request body into the proof
-     */
-    public void requireProof(
-            HttpServletRequest request, String sessionId, String path, byte[] bodyBytes, boolean signBody) {
-        String proofHeader = request.getHeader(DbscHeaders.BOUND_PROOF);
-        engine.verifyBoundProof(
-                sessionId, proofHeader, request.getMethod(), path, bodyBytes, signBody, replayCache);
-    }
-
-    // ------------------------------------------------------------------
     // Session resolution
     // ------------------------------------------------------------------
 
     /**
-     * Resolves the session identifier from the binding cookie, falling back to the
-     * registration cookie for the bound protocol's pre-binding requests.
+     * Resolves the session identifier from the binding cookie.
      *
      * <p>A cookie proves nothing: it is attacker-supplied on any unauthenticated
      * request, so this only names a candidate session. The caller's proof check is
@@ -437,27 +267,6 @@ public class DbscService {
                         ? DbscException.badRequest("no DBSC session cookie on the request")
                         : new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
                                 "no DBSC session cookie on the request"));
-    }
-
-    /**
-     * Like {@link #requireBinderSession(HttpServletRequest, boolean)}, but also
-     * refuses a cookie whose value was never issued a record.
-     *
-     * <p>Used where the request carries a proof to verify: there, an unknown
-     * session is indistinguishable from a forged cookie, so it is a rejected proof
-     * (403) rather than a client bug (400). Registration is deliberately excluded —
-     * whether the browser has registered is unknowable up front, so routes that
-     * lead to a registration must not require a record to exist yet.
-     */
-    private String requireRegisteredSession(HttpServletRequest request, boolean clientError) {
-        String sessionId = requireBinderSession(request, clientError);
-        if (storage.getSession(sessionId).isEmpty()) {
-            throw clientError
-                    ? DbscException.badRequest("no such DBSC session")
-                    : new DbscException(DbscErrorCode.SESSION_NOT_REGISTERED,
-                            "no such DBSC session");
-        }
-        return sessionId;
     }
 
     /** The session's tier as reported to the application. */
@@ -539,13 +348,6 @@ public class DbscService {
      */
     private void setCookie(HttpServletResponse response, String name, String value, long maxAgeMs) {
         response.addHeader("Set-Cookie", cookieScope.setCookieValue(name, value, maxAgeMs));
-    }
-
-    private void requireBoundEnabled() {
-        if (!properties.isBound()) {
-            throw new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
-                    "the bound protocol is disabled");
-        }
     }
 
     private void checkRegistrationRateLimit(HttpServletRequest request) {
@@ -640,11 +442,6 @@ public class DbscService {
 
     /** Whether the session holds a native (hardware) key. */
     public boolean hasNativeKey(String sessionId) {
-        return storage.getBoundKey(sessionId, BoundKeyKind.NATIVE).isPresent();
-    }
-
-    /** Whether the session holds a bound (polyfill) key. */
-    public boolean hasBoundKey(String sessionId) {
-        return storage.getBoundKey(sessionId, BoundKeyKind.BOUND).isPresent();
+        return storage.getBoundKey(sessionId).isPresent();
     }
 }

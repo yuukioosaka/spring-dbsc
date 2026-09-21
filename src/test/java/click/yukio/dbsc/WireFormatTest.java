@@ -1,32 +1,26 @@
 package click.yukio.dbsc;
 
-import click.yukio.dbsc.core.DbscErrorCode;
-import click.yukio.dbsc.core.DbscException;
 import click.yukio.dbsc.core.SkippedEntry;
 import click.yukio.dbsc.core.SkippedReason;
-import click.yukio.dbsc.protocol.BoundProofHeader;
 import click.yukio.dbsc.protocol.CookieScope;
 import click.yukio.dbsc.protocol.DbscHeaderCodec;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Wire-format tests for cookies, headers and the proof header.
+ * Wire-format tests for cookies and headers.
  *
  * <p>These rules are security-critical and byte-exact: a single wrong character
- * makes Chromium silently drop the binding, or lets a malformed proof through.
+ * makes Chromium silently drop the binding.
  */
 class WireFormatTest {
 
@@ -172,129 +166,6 @@ class WireFormatTest {
             assertTrue(DbscHeaderCodec.parseSkippedHeader(null).isEmpty());
             assertTrue(DbscHeaderCodec.parseSkippedHeader("").isEmpty());
             assertTrue(DbscHeaderCodec.parseSkippedHeader("   ").isEmpty());
-        }
-    }
-
-    @Nested
-    class ProofHeaderParsing {
-
-        @Test
-        @DisplayName("a well-formed header parses, with and without bh")
-        void wellFormed() {
-            BoundProofHeader.Parsed bare = BoundProofHeader.parse("ts=1700000000000;sig=abc");
-            assertEquals(1_700_000_000_000L, bare.timestamp());
-            assertEquals("abc", bare.signature());
-            assertNull(bare.bodyHash());
-
-            BoundProofHeader.Parsed withBody =
-                    BoundProofHeader.parse("ts=1700000000000;sig=abc;bh=deadbeef");
-            assertEquals("deadbeef", withBody.bodyHash());
-        }
-
-        @Test
-        @DisplayName("segment order is not significant")
-        void orderInsignificant() {
-            BoundProofHeader.Parsed parsed = BoundProofHeader.parse("sig=abc;bh=beef;ts=1700000000000");
-            assertEquals(1_700_000_000_000L, parsed.timestamp());
-            assertEquals("abc", parsed.signature());
-            assertEquals("beef", parsed.bodyHash());
-        }
-
-        @Test
-        @DisplayName("rejects a header over 8192 bytes")
-        void tooLong() {
-            String huge = "ts=1700000000000;sig=" + "a".repeat(9000);
-            DbscException failure = assertThrows(DbscException.class,
-                    () -> BoundProofHeader.parse(huge));
-            assertEquals(DbscErrorCode.MALFORMED_PROOF, failure.code());
-        }
-
-        @Test
-        @DisplayName("rejects more than 8 segments")
-        void tooManySegments() {
-            String many = "ts=1;sig=a;a=1;b=2;c=3;d=4;e=5;f=6;g=7";
-            DbscException failure = assertThrows(DbscException.class,
-                    () -> BoundProofHeader.parse(many));
-            assertEquals(DbscErrorCode.MALFORMED_PROOF, failure.code());
-        }
-
-        @Test
-        @DisplayName("rejects a duplicate key")
-        void duplicateKey() {
-            DbscException failure = assertThrows(DbscException.class,
-                    () -> BoundProofHeader.parse("ts=1;sig=a;ts=2"));
-            assertEquals(DbscErrorCode.MALFORMED_PROOF, failure.code());
-        }
-
-        @ParameterizedTest
-        @DisplayName("rejects a segment with an empty value or no '='")
-        @ValueSource(strings = {
-                "ts=1;sig=",
-                "ts=1;sig",
-                "ts=;sig=abc",
-        })
-        void emptyValueOrNoEquals(String header) {
-            assertThrows(DbscException.class, () -> BoundProofHeader.parse(header));
-        }
-
-        @Test
-        @DisplayName("an empty segment is skipped, matching the reference parser")
-        void emptySegmentSkipped() {
-            BoundProofHeader.Parsed parsed = BoundProofHeader.parse("ts=1;;sig=abc");
-            assertEquals(1L, parsed.timestamp());
-            assertEquals("abc", parsed.signature());
-        }
-
-        @ParameterizedTest
-        @DisplayName("rejects a non-finite ts")
-        @ValueSource(strings = {
-                "ts=NaN;sig=abc",
-                "ts=Infinity;sig=abc",
-                "ts=-Infinity;sig=abc",
-                "ts=notanumber;sig=abc",
-                "ts=1.5;sig=abc",
-        })
-        void nonFiniteTimestamp(String header) {
-            assertThrows(DbscException.class, () -> BoundProofHeader.parse(header));
-        }
-
-        @ParameterizedTest
-        @DisplayName("rejects a missing ts or sig")
-        @ValueSource(strings = {"sig=abc", "ts=1", "bh=beef"})
-        void missingRequiredFields(String header) {
-            assertThrows(DbscException.class, () -> BoundProofHeader.parse(header));
-        }
-
-        @Test
-        @DisplayName("the replay key uses the first 43 characters of the signature")
-        void replayKeyPrefix() {
-            String signature = "A".repeat(43) + "BBBBBBBB";
-            BoundProofHeader.Parsed parsed =
-                    BoundProofHeader.parse("ts=1700000000000;sig=" + signature);
-            assertEquals(
-                    "sess_1.1700000000000." + "A".repeat(43),
-                    parsed.replayKey("sess_1"));
-        }
-    }
-
-    @Nested
-    class SignedMessage {
-
-        @Test
-        @DisplayName("the method is uppercased and fields join with single dots")
-        void methodUppercased() {
-            assertEquals(
-                    "sess_1.POST./api/payment.1700000000000",
-                    BoundProofHeader.signedMessage("sess_1", "post", "/api/payment", 1_700_000_000_000L, null));
-        }
-
-        @Test
-        @DisplayName("body signing appends the body hash as a fifth field")
-        void withBodyHash() {
-            assertEquals(
-                    "sess_1.POST./api/payment.1700000000000.abc",
-                    BoundProofHeader.signedMessage(
-                            "sess_1", "POST", "/api/payment", 1_700_000_000_000L, "abc"));
         }
     }
 

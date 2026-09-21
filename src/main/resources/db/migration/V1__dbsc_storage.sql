@@ -24,12 +24,10 @@ CREATE TABLE IF NOT EXISTS dbsc_sessions (
 CREATE INDEX IF NOT EXISTS dbsc_sessions_user_idx ON dbsc_sessions (user_id);
 
 CREATE TABLE IF NOT EXISTS dbsc_bound_keys (
-    session_id VARCHAR(255) NOT NULL,
-    kind       VARCHAR(16)  NOT NULL,
+    session_id VARCHAR(255) PRIMARY KEY,
     jwk_json   TEXT         NOT NULL,
     algorithm  VARCHAR(16)  NOT NULL,
-    created_at BIGINT       NOT NULL,
-    PRIMARY KEY (session_id, kind)
+    created_at BIGINT       NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS dbsc_challenges (

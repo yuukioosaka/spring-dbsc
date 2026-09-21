@@ -5,8 +5,6 @@ import click.yukio.dbsc.core.Json;
 import click.yukio.dbsc.core.ProtectionTier;
 import click.yukio.dbsc.core.Session;
 import click.yukio.dbsc.web.DbscFilter;
-import click.yukio.dbsc.web.DbscProofGuardFilter;
-import click.yukio.dbsc.web.DbscFilterConfiguration.GuardedRoute;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -20,7 +18,6 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.csrf.CsrfFilter;
 import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.security.web.util.matcher.OrRequestMatcher;
@@ -84,7 +81,6 @@ public class DbscTestHostApplication {
                     // chain, which answers 403 before DbscFilter runs.
                     .securityMatcher(new OrRequestMatcher(
                             new AntPathRequestMatcher("/dbsc/**"),
-                            new AntPathRequestMatcher("/dbsc-bound/**"),
                             new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
                     .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                     .sessionManagement(session -> session
@@ -96,32 +92,14 @@ public class DbscTestHostApplication {
 
         @Bean
         @Order(1)
-        SecurityFilterChain hostApplicationChain(
-                HttpSecurity http, DbscProofGuardFilter guardFilter) throws Exception {
+        SecurityFilterChain hostApplicationChain(HttpSecurity http) throws Exception {
             http
                     .securityMatcher(new AntPathRequestMatcher("/**"))
                     .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                     .sessionManagement(session -> session
                             .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                    .csrf(csrf -> csrf.disable())
-                    .addFilterBefore(guardFilter, UsernamePasswordAuthenticationFilter.class);
+                    .csrf(csrf -> csrf.disable());
             return http.build();
-        }
-    }
-
-    /**
-     * An application opts into per-request proofs by declaring guarded routes.
-     * Nothing is guarded by default, so adopting DBSC never silently changes the
-     * behaviour of existing endpoints.
-     */
-    @Configuration(proxyBeanMethods = false)
-    static class GuardedRoutes {
-
-        @Bean
-        GuardedRoute paymentRoute() {
-            // The body is bound into the proof: a captured proof cannot be replayed
-            // against a modified transfer amount.
-            return GuardedRoute.withBody("/host/payment");
         }
     }
 
@@ -168,14 +146,12 @@ public class DbscTestHostApplication {
             body.put("tier", dbsc.tierFor(sessionId).wireValue());
             body.put("sessionId", sessionId);
             body.put("nativeKey", dbsc.hasNativeKey(sessionId));
-            body.put("boundKey", dbsc.hasBoundKey(sessionId));
             return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(Json.write(body));
         }
 
         /**
-         * A guarded route. It requires a bound key and a per-request proof whose
-         * signed message binds the request body. This handler only ever sees
-         * requests that already passed verification.
+         * A POST route, present so the CSRF and body-handling mechanics of a
+         * JSON request can be exercised end to end.
          */
         @PostMapping(path = "/payment", produces = MediaType.APPLICATION_JSON_VALUE)
         ResponseEntity<String> payment(@RequestBody(required = false) String rawBody) {

@@ -39,12 +39,34 @@ about a second, with a freshly generated key. No client code is involved. On
 success it receives the third cookie, `__Host-dbsc-session` (the binding), and the
 session tier becomes `dbsc`.
 
-| Route | Guarded | What it shows |
-|---|---|---|
-| `GET /app/whoami` | no | answers on a bare login cookie — this is what a stolen cookie replays |
-| `POST /app/payment` | yes | `403` without a proof; `200` only with a valid body-bound proof |
+`GET /app` serves the demo page, and `GET /app/whoami` reports the live state as JSON:
 
-The difference between those two rows is the whole feature.
+```json
+{"httpSessionId":"…","dbscSessionId":"…","userId":"demo",
+ "tier":"none","nativeKey":false,"skippedReason":null,"coupled":true}
+```
+
+`httpSessionId` and `dbscSessionId` are expected to be equal: that equality is the
+whole point of passing the application's own session id to `bind()`. `coupled` is
+that comparison, pre-computed for you.
+
+### What to look at in the browser DevTools network tab
+
+DBSC is driven by the browser, not by the page, so the network tab is the only
+place the protocol is visible. You should see two requests, neither of them
+written by any JavaScript in this demo:
+
+| Request | When | What to check |
+|---|---|---|
+| `POST /dbsc/registration` | about a second after the login response, once, automatically | it carries `Sec-Session-Response` (a JWS signed by the new hardware key) and the `__Host-dbsc-reg` / `__Host-dbsc-challenge` cookies; the response sets `__Host-dbsc-session` — the binding |
+| `POST /dbsc/refresh` | on the binding cookie's cadence (`bound-cookie-ttl`, 10 min by default) | the same header, plus `Sec-Session-Id` naming the existing session; a successful refresh pushes the cookie's expiry out |
+
+`GET /.well-known/device-bound-sessions` is **not** in the network tab: Chromium
+sends that request itself from its own network stack, and it does not appear there.
+Read it by hand instead — logged in, it returns the server's session config.
+
+A refresh can also be triggered on demand from the browser's own session UI, which
+is the convenient way to watch one without waiting out the TTL.
 
 ### What to look at when it does not bind
 
@@ -53,52 +75,28 @@ The difference between those two rows is the whole feature.
 | No `Secure-Session-Registration` in the login response | `bind()` was not called — check the success handler ran, and that the request was not cross-site (see the OIDC caveat) |
 | Header present but no registration POST | browser older than Chromium 145, or the page was loaded over HTTP so the `__Host-` cookies were dropped |
 | Registration POST returns `403` | challenge expired (5 min) or was already consumed; sign in again |
-| `/app/payment` always `403` | no `bound` key: the tier is `none` or `dbsc`. Per-request proofs need the **polyfill** key, not the native one — run `initBoundDbsc()` from section 3 of `/app` (below) |
 | Refresh loops forever after a server restart | in-memory storage. The demo is configured for file-backed H2 precisely to avoid this |
 
 `Sec-Session-Skipped` on a request tells you the browser declined deliberately —
 an unsupported platform, or a profile without the hardware key facility. That is
-different from a failure, and `GET /app/whoami` reports it.
+different from a failure, and `GET /app/whoami` reports it as `skippedReason`.
 
-## 3a. Driving the `bound` (polyfill) client from the page
+### The tier, and why it can go back down
 
-The native path needs no JavaScript at all, which is why the demo could be run
-with none. The `bound` path cannot: it is the
-[`dbsc-toolkit`](https://github.com/SulimanAbdulrazzaq/dbsc-toolkit) **Web Crypto
-polyfill**, and the page has to run it.
+The demo only ever produces two tiers:
 
-`/app` therefore loads `/dbsc-client/index.js` — a bundle of the toolkit's client
-— and exposes a third section:
-
-| Button | What it calls | What to watch |
-|---|---|---|
-| **Run initBoundDbsc()** | `initBoundDbsc({nativeProbeWindowMs: 1500})` | the returned outcome, and the `/dbsc-bound/*` requests in the network tab |
-| **POST /app/payment (with proof)** | `wrapFetch()` then `POST /app/payment` | `200` with a body-bound proof, where the button above gives `403` |
-
-The outcome is one of four shapes, and it is worth knowing which one you got:
-
-| `phase` | Meaning |
+| Tier | Meaning |
 |---|---|
-| `native-dbsc` | a native key is registered; the polyfill key was co-registered if it was missing, so per-request proofs work |
-| `polyfill-bound` | only the polyfill registered — the usual outcome on a browser without native DBSC, or where Chrome refused it |
-| `unbound` | no session on the server — you are logged out, or the binding cookie points at a dead record |
-| `error` | something threw; the message in the outcome is only the summary, the console has the object |
+| `none` | no usable DBSC session — the state before the browser registers, and the state a failed refresh puts you back into |
+| `dbsc` | the browser registered a native, hardware-backed key and the server holds it |
 
-`skipReason` is populated when Chrome *declined* rather than failed (for example
-`quota_exceeded`), and `polyfill-co-registration-failed` specifically means the
-native tier is live but guarded routes will `403` until the next attempt.
-
-**Why the polyfill exists, and its cost.** Native DBSC keys are non-extractable
-and hardware-backed. The polyfill key is a P-256 key in **IndexedDB, readable by
-page script**, so any XSS on the origin is a signing oracle and theft resistance
-is much weaker. That is why the two are separate tiers and why the server keeps
-them apart — see the main README's "Native vs. polyfill" section. This demo page
-exists partly so that difference can be *seen* rather than taken on trust.
-
-**Provenance.** `/dbsc-client/index.js` is generated, not hand-written, and the
-toolkit is **Apache-2.0** — a different license from this repository's MIT.
-`src/demo/resources/static/dbsc-client/README.md` records how to regenerate the
-bundle and which wire contracts to re-check when the toolkit is upgraded.
+The interesting half is the demotion. `none` → `dbsc` happens by itself on
+Chromium 145+, but the reverse is not an error path: if a refresh is refused — the
+server restarted without the key, or the binding was terminated — the session
+drops back to `none` rather than staying `dbsc` on a stale key. Refresh the
+`/app/whoami` output after the browser's next refresh attempt and you can watch
+the tier fall. The point of seeing it fall is that the tier is what the server
+enforces *right now*, not a label granted once at registration.
 
 ## OIDC variant
 
@@ -184,8 +182,8 @@ server still fails against the same browser profile. To start clean:
 
 The browser flow above is the manual check. For a repeatable one, run the suite in
 `scripts/e2e.py` against a running demo — it drives the same paths over TLS as a
-browser would, plus the ones a browser will not reach on demand (stale proofs,
-replayed challenges, malformed headers, the bound protocol).
+browser would, plus the ones a browser will not reach on demand (replayed
+challenges, malformed headers, expired challenges).
 
 The one-command form, which starts both instances the suite needs and then runs it:
 
@@ -249,8 +247,9 @@ of or work around here:
 - `@Order(0)` — `securityMatcher` on the DBSC paths, with `DbscFilter`, stateless,
   CSRF disabled. Chromium drives these routes before any user session exists and
   posts no CSRF token with them.
-- `@Order(1)` — the application chain: form login, the payment route, and
-  `DbscProofGuardFilter`.
+- `@Order(1)` — the application chain: form login, logout, the `/app` routes
+  (`/app/payment` is an ordinary authenticated POST — nothing per-request is
+  verified, because the library no longer ships a proof guard).
 
 `bind()` is called from an `AuthenticationSuccessHandler` rather than a
 controller, because form login never reaches a handler method on the way in. A
@@ -269,18 +268,28 @@ something else.
 
 ### `securityMatcher` is a setter, not an accumulator
 
+The matcher must cover **every** protocol route, not just the obvious one. The
+protocol routes have to be reachable unauthenticated — Chromium drives them before
+any user session exists, and a `401` from Security's entry point is fatal to the
+binding rather than a recoverable error. Leave one out and it falls through to the
+application chain, which answers `403` before `DbscFilter` ever runs.
+
 ```java
 // Wrong: only the LAST matcher survives. /dbsc/** falls through to the app
 // chain, which answers Spring's 403 before DbscFilter ever runs.
 .securityMatcher(new AntPathRequestMatcher("/dbsc/**"))
-.securityMatcher(new AntPathRequestMatcher("/dbsc-bound/**"))
+.securityMatcher(new AntPathRequestMatcher("/.well-known/device-bound-sessions"))
 
-// Right:
+// Right: one matcher covering both routes.
 .securityMatcher(new OrRequestMatcher(
         new AntPathRequestMatcher("/dbsc/**"),
-        new AntPathRequestMatcher("/dbsc-bound/**"),
         new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
 ```
+
+`securityMatcher(...)` is a **setter, not an accumulator** — that is the pitfall,
+and it is independent of how many routes there are. Chaining two calls to it
+silently keeps only the last, which is why the demo builds one `OrRequestMatcher`
+in a single call.
 
 ### Anchor the DBSC filter on `CsrfFilter`, not `UsernamePasswordAuthenticationFilter`
 
@@ -323,10 +332,11 @@ Without a `LogoutHandler` that calls `dbsc.terminate()`, the device key outlives
 login session: the browser keeps refreshing a session the app has already ended, and
 a later login re-couples to a stale key instead of registering fresh.
 
-### Tomcat's header limit vs. the proof limit
+### Tomcat's header limit vs. the DBSC header limit
 
 Tomcat defaults to an 8 KB *aggregate* header limit, which is smaller than the
-8192-byte single-header limit DBSC enforces for `X-Dbsc-Bound-Proof`. Left alone, an
-oversized proof is rejected by Tomcat with a 400 HTML page before any DBSC filter
-runs, so spec 04's `MALFORMED_PROOF` branch is unreachable. `application-demo.yaml`
-raises `server.max-http-request-header-size` so the protocol layer gets to judge it.
+8192-byte single-header limit DBSC enforces for `Sec-Session-Response` (the
+registration JWS). Left alone, an oversized JWS is rejected by Tomcat with a 400
+HTML page before any DBSC filter runs, so the spec's `MALFORMED_JWS` branch is
+unreachable. `application-demo.yaml` raises `server.max-http-request-header-size`
+so the protocol layer gets to judge it.

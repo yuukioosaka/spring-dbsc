@@ -5,12 +5,10 @@ import click.yukio.dbsc.crypto.DbscAlgorithm;
 import click.yukio.dbsc.crypto.DbscJws;
 import click.yukio.dbsc.crypto.Jwk;
 import click.yukio.dbsc.crypto.SignatureVerifier;
-import click.yukio.dbsc.protocol.BoundProofHeader;
 import click.yukio.dbsc.protocol.DbscHeaderCodec;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -86,7 +84,6 @@ class ConformanceVectorTest {
         Map<String, Object> expectedBoundKey = TestVectors.object(vector, "expectedStoredBoundKey");
         assertEquals(TestVectors.string(expectedBoundKey, "sessionId"),
                 TestVectors.string(vector, "sessionId"));
-        assertEquals("native", TestVectors.string(expectedBoundKey, "kind"));
         assertEquals("ES256", TestVectors.string(expectedBoundKey, "algorithm"));
 
         Map<String, Object> expectedSession = TestVectors.object(vector, "expectedSessionAfter");
@@ -129,109 +126,6 @@ class ConformanceVectorTest {
                 () -> DbscJws.verifyRefresh(registrationJws, storedJwk,
                         TestVectors.string(vector, "challenge")));
         assertEquals(click.yukio.dbsc.core.DbscErrorCode.MALFORMED_JWS, failure.code());
-    }
-
-    @Test
-    @DisplayName("bound-registration.json: the signed message is exactly the bare JTI")
-    void boundRegistrationVector() {
-        Map<String, Object> vector = TestVectors.load("bound-registration");
-        Map<String, Object> body = TestVectors.object(vector, "requestBody");
-        Map<String, Object> publicJwk = TestVectors.object(vector, "publicKeyJwk");
-
-        String challenge = TestVectors.string(body, "challenge");
-        String signature = TestVectors.string(body, "signature");
-
-        // The signed message is the bare JTI: nothing prepended or appended.
-        assertEquals(TestVectors.string(vector, "signedMessage"), challenge,
-                "the bound registration signed message must be the bare challenge JTI");
-        assertTrue(TestVectors.bool(vector, "signatureVerifies"));
-
-        assertTrue(SignatureVerifier.verifyP256(publicJwk, signature, challenge),
-                "the vector's bound registration signature must verify against the bare JTI");
-
-        // The request body's publicKey must be the same key as publicKeyJwk.
-        Map<String, Object> requestKey = TestVectors.object(body, "publicKey");
-        assertEquals(TestVectors.string(publicJwk, "x"), TestVectors.string(requestKey, "x"));
-        assertEquals(TestVectors.string(publicJwk, "y"), TestVectors.string(requestKey, "y"));
-
-        Map<String, Object> expectedResponse = TestVectors.object(vector, "expectedResponse");
-        assertEquals("/dbsc-bound/refresh", TestVectors.string(expectedResponse, "refresh_url"));
-        assertEquals("bound", TestVectors.string(expectedResponse, "tier"));
-    }
-
-    @Test
-    @DisplayName("bound-refresh.json: the signed message is <jti>.<timestamp>")
-    void boundRefreshVector() {
-        Map<String, Object> vector = TestVectors.load("bound-refresh");
-        Map<String, Object> body = TestVectors.object(vector, "requestBody");
-        Map<String, Object> publicJwk = TestVectors.object(vector, "publicKeyJwk");
-
-        String challenge = TestVectors.string(body, "challenge");
-        String signature = TestVectors.string(body, "signature");
-        long timestamp = TestVectors.longValue(body, "timestamp");
-
-        String message = challenge + "." + timestamp;
-        assertEquals(TestVectors.string(vector, "signedMessage"), message,
-                "the bound refresh signed message must be <jti>.<timestamp>");
-        assertTrue(TestVectors.bool(vector, "signatureVerifies"));
-        assertTrue(SignatureVerifier.verifyP256(publicJwk, signature, message),
-                "the vector's bound refresh signature must verify");
-
-        assertEquals("/dbsc-bound/refresh",
-                TestVectors.string(TestVectors.object(vector, "expectedResponse"), "refresh_url"));
-    }
-
-    @Test
-    @DisplayName("per-request-proof.json: signed messages and signatures, with and without a body")
-    void perRequestProofVector() {
-        Map<String, Object> vector = TestVectors.load("per-request-proof");
-        Map<String, Object> publicJwk = TestVectors.object(vector, "publicKeyJwk");
-        String sessionId = TestVectors.string(vector, "sessionId");
-
-        // --- without body ---
-        Map<String, Object> withoutBody = TestVectors.object(vector, "withoutBody");
-        String method = TestVectors.string(withoutBody, "method");
-        String path = TestVectors.string(withoutBody, "path");
-        long timestamp = TestVectors.longValue(withoutBody, "timestamp");
-
-        String message = BoundProofHeader.signedMessage(sessionId, method, path, timestamp, null);
-        assertEquals(TestVectors.string(withoutBody, "signedMessage"), message,
-                "the proof signed message must match byte-for-byte");
-
-        BoundProofHeader.Parsed parsedWithout = BoundProofHeader.parse(
-                TestVectors.string(withoutBody, "header"));
-        assertEquals(timestamp, parsedWithout.timestamp());
-        assertEquals(null, parsedWithout.bodyHash());
-        assertTrue(TestVectors.bool(withoutBody, "signatureVerifies"));
-        assertTrue(SignatureVerifier.verifyP256(
-                        publicJwk, parsedWithout.signature(), message),
-                "the vector's bodyless proof signature must verify");
-
-        // --- with body ---
-        Map<String, Object> withBody = TestVectors.object(vector, "withBody");
-        String bodyText = TestVectors.string(withBody, "body");
-        String expectedBodyHash = TestVectors.string(withBody, "bodyHash");
-
-        // The body hash must be computed from the exact bytes, so reconstruct the
-        // message from the raw body rather than trusting the vector's bh.
-        String computedBodyHash = Base64Url.sha256Base64Url(bodyText.getBytes(StandardCharsets.UTF_8));
-        assertEquals(expectedBodyHash, computedBodyHash,
-                "base64url(sha256(body)) must equal the vector's bodyHash");
-
-        BoundProofHeader.Parsed parsedWith = BoundProofHeader.parse(
-                TestVectors.string(withBody, "header"));
-        assertEquals(expectedBodyHash, parsedWith.bodyHash());
-
-        String bodyMessage = BoundProofHeader.signedMessage(
-                sessionId,
-                TestVectors.string(withBody, "method"),
-                TestVectors.string(withBody, "path"),
-                TestVectors.longValue(withBody, "timestamp"),
-                computedBodyHash);
-        assertEquals(TestVectors.string(withBody, "signedMessage"), bodyMessage);
-        assertTrue(TestVectors.bool(withBody, "signatureVerifies"));
-        assertTrue(SignatureVerifier.verifyP256(publicJwk, parsedWith.signature(), bodyMessage),
-                "the vector's body-bound proof signature must verify");
     }
 
     @Test

@@ -16,7 +16,7 @@ import click.yukio.dbsc.core.ProtectionTier;
 public sealed interface DbscTelemetryEvent
         permits DbscTelemetryEvent.Registration, DbscTelemetryEvent.Refresh,
                 DbscTelemetryEvent.VerificationFailure, DbscTelemetryEvent.SessionStolen,
-                DbscTelemetryEvent.TierChange, DbscTelemetryEvent.PolyfillMissing {
+                DbscTelemetryEvent.TierChange {
 
     String sessionId();
 
@@ -84,20 +84,6 @@ public sealed interface DbscTelemetryEvent
         @Override
         public String type() {
             return "tier_change";
-        }
-    }
-
-    /**
-     * A Chromium session holds a {@code native} key but never co-registered its
-     * {@code bound} key, so per-request proofs cannot succeed. The tier reads
-     * {@code dbsc} but guarded routes will reject. Degraded state worth alerting
-     * on.
-     */
-    record PolyfillMissing(String sessionId, ProtectionTier tier, long timestamp, String ip)
-            implements DbscTelemetryEvent {
-        @Override
-        public String type() {
-            return "polyfill_missing";
         }
     }
 }

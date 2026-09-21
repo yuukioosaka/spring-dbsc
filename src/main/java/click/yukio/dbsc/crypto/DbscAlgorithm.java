@@ -1,8 +1,7 @@
 package click.yukio.dbsc.crypto;
 
 /**
- * The two algorithms DBSC supports (spec 05). {@code RS256} is native-only;
- * the bound protocol permits {@code ES256} exclusively.
+ * The two algorithms DBSC supports (spec 05).
  */
 public enum DbscAlgorithm {
     ES256("ES256"),

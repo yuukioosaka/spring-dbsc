@@ -9,16 +9,25 @@
 #
 # Usage:
 #   sh scripts/run-demos.sh                       # in one shell
-#   DBSC_CHALLENGE_TTL=2 DBSC_RATE_LIMIT_FAILURES=5 python3 scripts/e2e.py
+#   DBSC_CHALLENGE_TTL=2 DBSC_RATE_LIMIT_FAILURES=5 \
+#       DBSC_RATE_LIMIT_WINDOW=90s python3 scripts/e2e.py
 #
 # The 2-second challenge TTL is what makes CHALLENGE_EXPIRED observable at test
 # speed; the suite reports those checks as skipped rather than failed without it.
+# DBSC_RATE_LIMIT_WINDOW must match the low-budget instance's
+# dbsc.rate-limit.window below, so start it with an explicit window rather than
+# relying on the default.
 
 set -e
 cd "$(dirname "$0")/.."
 
 MVN="mvn -B --no-transfer-progress -Dmaven.repo.local=.m2repo"
 TTL="-Ddbsc.challenge-ttl=2s"
+# The low-budget instance's rate-limit window. Small on purpose: the limiter holds
+# its counters for a whole window against a key derived from the client IP, so a
+# window longer than the suite's patience makes RATE_LIMITED flaky across runs.
+# scripts/e2e.py needs the same value in DBSC_RATE_LIMIT_WINDOW.
+RATE_WINDOW="-Ddbsc.rate-limit.window=90s"
 
 rm -f /tmp/demo.log /tmp/demo-ratelimit.log
 
@@ -27,7 +36,7 @@ nohup $MVN -Pdemo \
   spring-boot:run > /tmp/demo.log 2>&1 &
 
 nohup $MVN -Pdemo,ratelimit-e2e \
-  -Dspring-boot.run.jvmArguments="$TTL" \
+  -Dspring-boot.run.jvmArguments="$TTL $RATE_WINDOW" \
   spring-boot:run > /tmp/demo-ratelimit.log 2>&1 &
 
 wait_for() {

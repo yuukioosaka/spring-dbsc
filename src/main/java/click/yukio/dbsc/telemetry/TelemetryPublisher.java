@@ -43,11 +43,6 @@ public class TelemetryPublisher {
             log.warn(
                     "DBSC verification_failure: sessionId={} tier={} reason={} ip={}",
                     failure.sessionId(), failure.tier().wireValue(), failure.reason(), failure.ip());
-        } else if (event instanceof DbscTelemetryEvent.PolyfillMissing missing) {
-            log.warn(
-                    "DBSC polyfill_missing: sessionId={} tier={} ip={} — native key present but no "
-                            + "bound key, so per-request proofs will fail",
-                    missing.sessionId(), missing.tier().wireValue(), missing.ip());
         } else {
             log.debug(
                     "DBSC {}: sessionId={} tier={}",

@@ -17,9 +17,8 @@ import java.util.Optional;
  * <ul>
  *   <li>{@code tier} — what the server enforces <em>right now</em>. This is the
  *       one that decides whether guarded routes open.</li>
- *   <li>{@code nativeKey} / {@code boundKey} — which key the browser actually
- *       registered: {@code native} on Chromium 145+, {@code bound} via the
- *       polyfill SDK, or neither.</li>
+ *   <li>{@code nativeKey} — whether the browser registered a hardware-backed key
+ *       (Chromium 145+ on a platform with a TPM/Secure Enclave).</li>
  *   <li>{@code skippedReason} — why the browser declined, e.g. an unsupported
  *       platform or a profile without the hardware key facility. It arrives in
  *       the {@code Sec-Session-Skipped} header, and it is the difference between
@@ -37,7 +36,6 @@ record WhoamiReport(
         String userId,
         String tier,
         boolean nativeKey,
-        boolean boundKey,
         String skippedReason) {
 
     /** Builds the report for a request; never returns {@code null}. */
@@ -48,7 +46,7 @@ record WhoamiReport(
         Optional<Session> found = dbsc.sessionFor(request);
         if (found.isEmpty()) {
             return new WhoamiReport(
-                    httpSessionId, null, null, "none", false, false, skippedReason(request));
+                    httpSessionId, null, null, "none", false, skippedReason(request));
         }
 
         Session session = found.get();
@@ -58,7 +56,6 @@ record WhoamiReport(
                 session.userId(),
                 dbsc.tierFor(session.id()).wireValue(),
                 dbsc.hasNativeKey(session.id()),
-                dbsc.hasBoundKey(session.id()),
                 skippedReason(request));
     }
 
@@ -70,7 +67,6 @@ record WhoamiReport(
         map.put("userId", userId);
         map.put("tier", tier);
         map.put("nativeKey", nativeKey);
-        map.put("boundKey", boundKey);
         map.put("skippedReason", skippedReason);
         map.put("coupled", java.util.Objects.equals(httpSessionId, dbscSessionId));
         return map;

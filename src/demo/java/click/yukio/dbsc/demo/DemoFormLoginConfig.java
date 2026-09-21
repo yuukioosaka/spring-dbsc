@@ -1,8 +1,6 @@
 package click.yukio.dbsc.demo;
 
 import click.yukio.dbsc.DbscService;
-import click.yukio.dbsc.web.DbscProofGuardFilter;
-import click.yukio.dbsc.web.DbscFilterConfiguration.GuardedRoute;
 import click.yukio.dbsc.web.DbscFilter;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
@@ -31,25 +29,18 @@ import org.springframework.security.web.util.matcher.OrRequestMatcher;
 /**
  * The application's own security chains, with the DBSC filters inside them.
  *
- * <p>This is the shape of every real adopter: the library ships the two filters, the
- * application decides where they sit. Nothing has to be opted out of or worked
+ * <p>This is the shape of every real adopter: the library ships the filter, the
+ * application decides where it sits. Nothing has to be opted out of or worked
  * around, because the library declares no chain of its own.
  *
  * <p>Two chains, in order. The protocol chain exists because these routes must be
  * reachable <em>unauthenticated</em>, must not have CSRF applied to them, and must
  * reach {@code DbscFilter} rather than Security's entry point — a 401 there is fatal
- * to Chromium. Everything else is the application's, with the proof guard layered on
- * top of authentication.
+ * to Chromium. Everything else is the application's.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableWebSecurity
 public class DemoFormLoginConfig {
-
-    /** Guards the payment route, binding the request body into the proof. */
-    @Bean
-    GuardedRoute paymentRoute() {
-        return GuardedRoute.withBody("/app/payment");
-    }
 
     /**
      * The one DBSC call an application has to make. It runs after Spring Security
@@ -87,7 +78,6 @@ public class DemoFormLoginConfig {
                     // last path and the other routes fall through to the app chain.
                     .securityMatcher(new OrRequestMatcher(
                             new AntPathRequestMatcher("/dbsc/**"),
-                            new AntPathRequestMatcher("/dbsc-bound/**"),
                             new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
                     .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                     // Chromium drives these routes before any user session exists and
@@ -105,25 +95,19 @@ public class DemoFormLoginConfig {
         }
 
         /**
-         * The application chain: form login, authorization, and the proof guard.
-         *
-         * <p>The guard runs before authorization, so a request without a valid proof
-         * is refused with DBSC's 403 before any application logic or session lookup
-         * happens. It layers <em>on top of</em> authentication: a valid proof is never
-         * a substitute for logging in.
+         * The application chain: form login, authorization and logout.
          */
         @Bean
         @Order(1)
         SecurityFilterChain appChain(
                 HttpSecurity http,
-                @Qualifier("dbscProofGuardFilter") DbscProofGuardFilter guardFilter,
                 DemoLoginSuccessHandler successHandler,
                 DbscService dbsc) throws Exception {
 
             http
                     .securityMatcher(new AntPathRequestMatcher("/**"))
                     .authorizeHttpRequests(auth -> auth
-                            .requestMatchers("/login", "/css/**", "/dbsc-client/**", "/favicon.ico").permitAll()
+                            .requestMatchers("/login", "/css/**", "/favicon.ico").permitAll()
                             .requestMatchers("/app/payment").authenticated()
                             .anyRequest().authenticated())
                     .formLogin(form -> form
@@ -141,8 +125,7 @@ public class DemoFormLoginConfig {
                     .logout(logout -> logout
                             .logoutUrl("/logout")
                             .addLogoutHandler(demoLogoutHandler(dbsc))
-                            .logoutSuccessUrl("/login?loggedout"))
-                    .addFilterBefore(guardFilter, UsernamePasswordAuthenticationFilter.class);
+                            .logoutSuccessUrl("/login?loggedout"));
             return http.build();
         }
     }
@@ -167,22 +150,13 @@ public class DemoFormLoginConfig {
 
     /**
      * Boot auto-registers every {@code Filter} bean as a plain servlet filter,
-     * outside the security chain — which would run both DBSC filters a second time,
-     * before authentication and on every path. Disabling the registrations keeps
-     * them in the chains only.
+     * outside the security chain — which would run the filter a second time,
+     * before authentication and on every path. Disabling the registration keeps
+     * it in the chain only.
      */
     @Bean
     FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
         FilterRegistrationBean<DbscFilter> registration = new FilterRegistrationBean<>(filter);
-        registration.setEnabled(false);
-        return registration;
-    }
-
-    @Bean
-    FilterRegistrationBean<DbscProofGuardFilter> dbscProofGuardFilterRegistration(
-            DbscProofGuardFilter filter) {
-        FilterRegistrationBean<DbscProofGuardFilter> registration =
-                new FilterRegistrationBean<>(filter);
         registration.setEnabled(false);
         return registration;
     }
