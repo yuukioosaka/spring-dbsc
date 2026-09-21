@@ -36,16 +36,50 @@
 <meta name="csrf" th:content="${_csrf != null ? _csrf.token : ''}"/>
 <meta name="csrf-header" th:content="${_csrf != null ? _csrf.headerName : 'X-CSRF-TOKEN'}"/>
 
-<h2>3. Browser state</h2>
+<h2>3. Bound / polyfill client (spec 03)</h2>
+<p class="hint">
+    The native path above needs no JavaScript. <code>bound</code> does: it is the
+    <a href="https://github.com/SulimanAbdulrazzaq/dbsc-toolkit">dbsc-toolkit</a>
+    Web Crypto polyfill, loaded here from <code>/dbsc-client/index.js</code>. Its key
+    lives in IndexedDB, so it is <strong>readable by page script</strong> — weaker than
+    a native key, see the README's "Native vs. polyfill" section.
+</p>
+<p class="hint">
+    <code>initBoundDbsc()</code> reads <code>/dbsc-bound/state</code> and, if the server
+    asks for it, registers a polyfill key. <code>wrapFetch()</code> then signs
+    individual requests with <code>X-Dbsc-Bound-Proof</code>, which is what the
+    guarded route below accepts.
+</p>
+<button onclick="runBound()">Run initBoundDbsc()</button>
+<button onclick="hitGuardedWithProof()">POST /app/payment (with proof)</button>
+<pre id="bound">Not run yet.</pre>
+
+<h2>4. Browser state</h2>
 <p class="hint">
     For full detail open <code>/app/whoami</code> directly, or watch the server log —
     every DBSC decision is logged with its reason.
 </p>
     <pre id="browser">Open /app/whoami in a new tab to see the live DBSC report.</pre>
 
+<script type="module">
+    // Loaded as a module so the polyfill stays in its own scope: its exports are
+    // assigned to window deliberately, rather than leaking as globals by accident.
+    import { initBoundDbsc, wrapFetch, clearBoundKey, stopBoundDbsc }
+        from '/dbsc-client/index.js';
+
+    window.initBoundDbsc = initBoundDbsc;
+    window.wrapFetch = wrapFetch;
+    window.clearBoundKey = clearBoundKey;
+    window.stopBoundDbsc = stopBoundDbsc;
+</script>
+
 <script>
     const csrfToken = document.querySelector('meta[name="csrf"]').content;
     const csrfHeader = document.querySelector('meta[name="csrf-header"]').content;
+
+    function write(id, text) {
+        document.getElementById(id).textContent = text;
+    }
 
     async function hit(path, method) {
         const out = document.getElementById(path.includes('payment') ? 'payment' : 'whoami');
@@ -63,6 +97,56 @@
                 body: method === 'GET' ? undefined : JSON.stringify({ amount: 1000, currency: 'usd' })
             });
             out.textContent = res.status + ' ' + res.statusText + '\n\n' + await res.text();
+        } catch (e) {
+            out.textContent = 'request failed: ' + e;
+        }
+    }
+
+    // The polyfill's own entry point. The returned outcome says what happened:
+    // native-dbsc, polyfill-bound, unbound or error, each with a skipReason when
+    // the browser refused a step. This demo runs on Chromium, so on a browser with
+    // native DBSC the outcome is usually native-dbsc and the polyfill key is
+    // co-registered only so that per-request proofs have something to sign with.
+    async function runBound() {
+        const out = document.getElementById('bound');
+        out.textContent = 'calling initBoundDbsc()…';
+        try {
+            // A short probe window: this is a demo page, not a production load.
+            const outcome = await window.initBoundDbsc({ nativeProbeWindowMs: 1500 });
+            out.textContent = 'initBoundDbsc() ->\n\n' + JSON.stringify(outcome, null, 2);
+        } catch (e) {
+            out.textContent = 'initBoundDbsc() threw: ' + (e && e.message ? e.message : e);
+        }
+    }
+
+    // The proof-bearing request. This is the one the guard actually inspects: it
+    // verifies X-Dbsc-Bound-Proof against the polyfill key, over the exact body
+    // bytes, and refuses with 403 if anything is off. If the polyfill never
+    // registered this returns the guard's own MISSING_PROOF/KEY_NOT_FOUND_BOUND.
+    async function hitGuardedWithProof() {
+        const out = document.getElementById('bound');
+        out.textContent = '…';
+        const body = JSON.stringify({ amount: 1000, currency: 'usd' });
+        try {
+            // wrapFetch never touches globalThis.fetch — it is per-call, so only the
+            // request(s) you pass through it are signed. CSRF still applies: the
+            // token is a header, and wrapFetch preserves the init it is given.
+            const signedFetch = window.wrapFetch();
+            const res = await signedFetch('/app/payment', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', [csrfHeader]: csrfToken },
+                body
+            });
+            const text = await res.text();
+            out.textContent = res.status + ' ' + res.statusText + '\n\n' + text;
+
+            // A 403 here is the interesting failure: it means the proof was absent or
+            // did not verify. The server logs the specific code (MISSING_PROOF,
+            // KEY_NOT_FOUND_BOUND, SIGNATURE_INVALID, REPLAY_DETECTED, ...).
+            if (res.status === 403) {
+                out.textContent += '\n\n(guarded request refused — check the server log for the DBSC code) ';
+            }
         } catch (e) {
             out.textContent = 'request failed: ' + e;
         }

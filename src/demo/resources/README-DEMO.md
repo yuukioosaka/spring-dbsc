@@ -53,12 +53,52 @@ The difference between those two rows is the whole feature.
 | No `Secure-Session-Registration` in the login response | `dbsc.enabled=false`, or `bind()` was not called — check the success handler ran |
 | Header present but no registration POST | browser older than Chromium 145, or the page was loaded over HTTP so the `__Host-` cookies were dropped |
 | Registration POST returns `403` | challenge expired (5 min) or was already consumed; sign in again |
-| `/app/payment` always `403` | no `bound` key: the tier is `none` or `dbsc`. Per-request proofs need the **polyfill** key, not the native one |
+| `/app/payment` always `403` | no `bound` key: the tier is `none` or `dbsc`. Per-request proofs need the **polyfill** key, not the native one — run `initBoundDbsc()` from section 3 of `/app` (below) |
 | Refresh loops forever after a server restart | in-memory storage. The demo is configured for file-backed H2 precisely to avoid this |
 
 `Sec-Session-Skipped` on a request tells you the browser declined deliberately —
 an unsupported platform, or a profile without the hardware key facility. That is
 different from a failure, and `GET /app/whoami` reports it.
+
+## 3a. Driving the `bound` (polyfill) client from the page
+
+The native path needs no JavaScript at all, which is why the demo could be run
+with none. The `bound` path cannot: it is the
+[`dbsc-toolkit`](https://github.com/SulimanAbdulrazzaq/dbsc-toolkit) **Web Crypto
+polyfill**, and the page has to run it.
+
+`/app` therefore loads `/dbsc-client/index.js` — a bundle of the toolkit's client
+— and exposes a third section:
+
+| Button | What it calls | What to watch |
+|---|---|---|
+| **Run initBoundDbsc()** | `initBoundDbsc({nativeProbeWindowMs: 1500})` | the returned outcome, and the `/dbsc-bound/*` requests in the network tab |
+| **POST /app/payment (with proof)** | `wrapFetch()` then `POST /app/payment` | `200` with a body-bound proof, where the button above gives `403` |
+
+The outcome is one of four shapes, and it is worth knowing which one you got:
+
+| `phase` | Meaning |
+|---|---|
+| `native-dbsc` | a native key is registered; the polyfill key was co-registered if it was missing, so per-request proofs work |
+| `polyfill-bound` | only the polyfill registered — the usual outcome on a browser without native DBSC, or where Chrome refused it |
+| `unbound` | no session on the server — you are logged out, or the binding cookie points at a dead record |
+| `error` | something threw; the message in the outcome is only the summary, the console has the object |
+
+`skipReason` is populated when Chrome *declined* rather than failed (for example
+`quota_exceeded`), and `polyfill-co-registration-failed` specifically means the
+native tier is live but guarded routes will `403` until the next attempt.
+
+**Why the polyfill exists, and its cost.** Native DBSC keys are non-extractable
+and hardware-backed. The polyfill key is a P-256 key in **IndexedDB, readable by
+page script**, so any XSS on the origin is a signing oracle and theft resistance
+is much weaker. That is why the two are separate tiers and why the server keeps
+them apart — see the main README's "Native vs. polyfill" section. This demo page
+exists partly so that difference can be *seen* rather than taken on trust.
+
+**Provenance.** `/dbsc-client/index.js` is generated, not hand-written, and the
+toolkit is **Apache-2.0** — a different license from this repository's MIT.
+`src/demo/resources/static/dbsc-client/README.md` records how to regenerate the
+bundle and which wire contracts to re-check when the toolkit is upgraded.
 
 ## OIDC variant
 

@@ -123,7 +123,7 @@ public class DemoFormLoginConfig {
             http
                     .securityMatcher(new AntPathRequestMatcher("/**"))
                     .authorizeHttpRequests(auth -> auth
-                            .requestMatchers("/login", "/css/**", "/favicon.ico").permitAll()
+                            .requestMatchers("/login", "/css/**", "/dbsc-client/**", "/favicon.ico").permitAll()
                             .requestMatchers("/app/payment").authenticated()
                             .anyRequest().authenticated())
                     .formLogin(form -> form
