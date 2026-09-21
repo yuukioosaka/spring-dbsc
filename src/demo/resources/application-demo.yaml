@@ -23,10 +23,10 @@ server:
   max-http-request-header-size: 32KB
 
 dbsc:
-  # secure: true is the default, and it is what you want here: __Host- cookies,
-  # the Secure flag, and the stricter origin checks. The demo defaults in
-  # src/main/resources/application.yaml set it to false for local HTTP, so it is
-  # overridden explicitly.
+  # secure: true matches the library default, but it is restated here because it is
+  # load-bearing for this profile: __Host- cookies, the Secure flag, and the stricter
+  # origin checks, all of which the demo relies on. Any host serving HTTP instead of
+  # HTTPS has to set dbsc.secure: false explicitly.
   secure: true
   storage: jdbc
   # The library default is 30 requests / 15 failures per minute, which is right for

@@ -5,12 +5,12 @@
 # a library, so nothing in this file is meant to be edited; it exists so the
 # defaults are visible in one place.
 #
-# secure: false keeps local development runnable over plain HTTP. A production
-# deployment MUST run over HTTPS with secure: true, or the binding cookie travels
-# in cleartext and the __Host- prefix is unavailable.
+# secure: true is the safe default: __Host- cookies, Secure, and no cleartext
+# binding cookie. Local development over plain HTTP must opt out explicitly
+# (dbsc.secure: false) in the host's own configuration.
 
 dbsc:
-  secure: false
+  secure: true
   # jdbc when the host has a DataSource and the state must survive a restart;
   # memory otherwise. An in-memory store breaks live sessions across a restart.
   storage: jdbc
