@@ -43,6 +43,56 @@ Boot 3.5 supports, and it is the CI baseline.
 
 Spring Boot 3.5.x and Spring Security 6.5.x are the tested versions.
 
+### Spring Boot 4.0
+
+**Spring Boot 4.0 works, and no application code has to change** — the DBSC
+protocol layer and filters are unaffected by the Framework 7 upgrade. It was
+verified end to end: all 112 unit/integration tests and all 109 live-HTTPS E2E
+scenarios pass on Boot 4.0.0 and 4.1.1, on Java 17 (Boot 4 still targets 17, so
+the Java floor does not move).
+
+Two things change on the **host application's** side, both in *your* security
+configuration rather than in this library:
+
+1. **`AntPathRequestMatcher` is gone.** It was deprecated in Security 6.5 and
+   removed in 7.0. Use `PathPatternRequestMatcher` instead:
+
+   ```java
+   // Spring Boot 3
+   .securityMatcher(new AntPathRequestMatcher("/dbsc/**"))
+
+   // Spring Boot 4
+   .securityMatcher(PathPatternRequestMatcher.withDefaults().matcher("/dbsc/**"))
+   ```
+
+   Prefer `withDefaults().matcher(pattern)` over the static `pathPattern(pattern)`
+   factory: the latter only exists from Security 7.0, while the builder form is
+   identical in 6.5 and 7.0. That way the same configuration compiles on both.
+
+2. **MockMvc test support moved.** Boot 4 split the test auto-configurations
+   into modules, so `@AutoConfigureMockMvc` changed package and its artifact is
+   no longer pulled in transitively:
+
+   ```java
+   // Spring Boot 3
+   import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+
+   // Spring Boot 4
+   import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+   ```
+
+   ```xml
+   <!-- plus, under Boot 4 only -->
+   <dependency>
+     <groupId>org.springframework.boot</groupId>
+     <artifactId>spring-boot-starter-webmvc-test</artifactId>
+     <scope>test</scope>
+   </dependency>
+   ```
+
+Note that this library's own sources reference neither matcher nor MockMvc, so
+the dependency itself is version-agnostic.
+
 ## Getting Started
 
 ### 1. Add the dependency
