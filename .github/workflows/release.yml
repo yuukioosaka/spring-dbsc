@@ -47,14 +47,27 @@ jobs:
       # The whole release rests on the POM version matching what the operator
       # typed. A mismatch would either publish the wrong version or fail deep in
       # the upload, so it is checked before anything is signed.
+      #
+      # Two details that make this fragile if written naively:
+      #   - help:evaluate writes the version to stdout with NO trailing newline,
+      #     so `$(...)` needs no trimming but `wc`-style parsing would break.
+      #   - the JVM emits Unsafe deprecation warnings on stderr, which must not be
+      #     captured into the comparison. stdout and stderr are redirected
+      #     separately; using 2>&1 here would corrupt the value.
       - name: Verify the requested version matches pom.xml
         run: |
           pom_version=$(mvn -B --no-transfer-progress help:evaluate \
-            -Dexpression=project.version -q -DforceStdout)
-          echo "pom.xml version: ${pom_version}"
-          echo "requested version: ${{ inputs.version }}"
-          if [ "${pom_version}" != "${{ inputs.version }}" ]; then
-            echo "::error::pom.xml is at ${pom_version} but the release requested ${{ inputs.version }}"
+            -Dexpression=project.version -q -DforceStdout 2>/dev/null)
+          requested='${{ inputs.version }}'
+          echo "pom.xml version  : '${pom_version}'"
+          echo "requested version: '${requested}'"
+
+          if [ -z "${pom_version}" ]; then
+            echo "::error::could not read <version> from pom.xml"
+            exit 1
+          fi
+          if [ "${pom_version}" != "${requested}" ]; then
+            echo "::error::pom.xml is at ${pom_version} but the release requested ${requested}"
             exit 1
           fi
           case "${pom_version}" in
@@ -63,6 +76,7 @@ jobs:
               exit 1
               ;;
           esac
+          echo "version check passed"
 
       # A release that does not pass its own tests has no business being
       # published, and release versions cannot be withdrawn.
