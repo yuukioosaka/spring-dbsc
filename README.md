@@ -239,12 +239,6 @@ public void bind(Authentication auth, HttpServletRequest request,
 }
 ```
 
-This is the flow used by the runnable OIDC demo (`src/demo/java-oidc`,
-activated by the `oidc` Maven profile); see `src/demo/resources-oidc/application-oidc.yaml`
-for the Entra ID settings and `README-DEMO.md` for how to run it. Form login is **not**
-affected: it binds from a `POST` that the browser made to your own origin, so the
-initiator is already same-site and the plain success-handler form is correct there.
-
 If your app is **stateless** and has no `HttpSession`, do not invent one just for this —
 bind to whatever opaque id you already mint per client, as in the stateless example
 below. What matters is that the id is **per browser session** and **reused across every
