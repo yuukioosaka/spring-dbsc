@@ -188,12 +188,62 @@ public class OidcSecurityConfig {
 }
 ```
 
-Because OIDC already redirects after login, `bind()` in the success handler is enough —
-there is no separate login route to decorate, unlike the password example below.
-
 `request.getSession().getId()` is the right answer whenever the app keeps an
 `HttpSession`. Note the ordering: `bind()` reads the session, so the session must already
 exist at that point. In a success handler it does, because authentication created it.
+
+##### Caveat: call `bind()` from a same-site page, not from the callback
+
+The snippet above looks correct and will still fail on Chromium, with the browser
+reporting:
+
+```
+Registration returned challenge error response code
+POST /dbsc/registration -> 403
+```
+
+and the server logging `SESSION_NOT_FOUND -> 403: no DBSC session cookie on the request`
+from `bind()`. The cause is a DBSC-specific rule, not a Spring bug:
+
+> Chromium makes DBSC requests inherit the **initiator** of the request that caused
+> them, and DBSC cookies are subject to `SameSite`. The OIDC callback response is
+> produced in a request whose initiator is the identity provider
+> (`login.microsoftonline.com`), so the registration POST that Chrome issues in
+> response to the `Secure-Session-Registration` header counts as **cross-site**, and
+> the `SameSite=Lax` session cookie is withheld.
+
+A server-side redirect (`302`/`303`) does **not** reset the initiator — the new response
+still inherits it. Only a **client-side navigation** does. So the fix is to defer the
+binding by one browser-initiated hop:
+
+```java
+// 1. Success handler: redirect to an HTML page, do NOT bind here.
+.oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) ->
+        response.sendRedirect("/oidc")))
+```
+
+```html
+<!-- 2. /oidc is served as text/html. The navigation is issued by the page, so the
+     next request is same-site and carries the session cookie. -->
+<script>location.replace('/oidc/bind');</script>
+```
+
+```java
+// 3. Same-site, authenticated GET: now bind, then hand over to the app.
+@GetMapping("/oidc/bind")
+public void bind(Authentication auth, HttpServletRequest request,
+                 HttpServletResponse response) throws IOException {
+    dbsc.bind(request.getSession().getId(), auth.getName(),
+              86_400_000L, request, response);
+    response.sendRedirect("/app");
+}
+```
+
+This is the flow used by the runnable OIDC demo (`src/demo/java-oidc`,
+activated by the `oidc` Maven profile); see `src/demo/resources-oidc/application-oidc.yaml`
+for the Entra ID settings and `README-DEMO.md` for how to run it. Form login is **not**
+affected: it binds from a `POST` that the browser made to your own origin, so the
+initiator is already same-site and the plain success-handler form is correct there.
 
 If your app is **stateless** and has no `HttpSession`, do not invent one just for this —
 bind to whatever opaque id you already mint per client, as in the stateless example
