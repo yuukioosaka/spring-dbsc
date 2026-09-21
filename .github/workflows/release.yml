@@ -1,0 +1,124 @@
+name: Release to Maven Central
+
+# Manual only, on purpose. Publishing to Central is permanent and irreversible:
+# the coordinate click.yukio.dbsc:spring-dbsc:<version> can never be deleted or
+# reused, so a release should never be triggered as a side effect of a push.
+#
+# Steps:
+#   1. Bump <version> in pom.xml to the release version and commit.
+#   2. Run this workflow with that version.
+#   3. It builds, signs, uploads and waits for Central to validate.
+#   4. Publishing is still manual (autoPublish=false) — approve the deployment in
+#      the Central Portal, or set publish=true below.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version being released. Must match <version> in pom.xml.'
+        required: true
+        type: string
+      publish:
+        description: 'Publish automatically once Central validates, instead of stopping for approval.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release ${{ inputs.version }} to Maven Central
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: temurin
+          cache: maven
+
+      # The whole release rests on the POM version matching what the operator
+      # typed. A mismatch would either publish the wrong version or fail deep in
+      # the upload, so it is checked before anything is signed.
+      - name: Verify the requested version matches pom.xml
+        run: |
+          pom_version=$(mvn -B --no-transfer-progress help:evaluate \
+            -Dexpression=project.version -q -DforceStdout)
+          echo "pom.xml version: ${pom_version}"
+          echo "requested version: ${{ inputs.version }}"
+          if [ "${pom_version}" != "${{ inputs.version }}" ]; then
+            echo "::error::pom.xml is at ${pom_version} but the release requested ${{ inputs.version }}"
+            exit 1
+          fi
+          case "${pom_version}" in
+            *-SNAPSHOT)
+              echo "::error::Central rejects snapshot versions."
+              exit 1
+              ;;
+          esac
+
+      # A release that does not pass its own tests has no business being
+      # published, and release versions cannot be withdrawn.
+      - name: Run the full test suite
+        run: mvn -B --no-transfer-progress verify
+
+      - name: Import the signing key
+        env:
+          MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+        run: |
+          # --batch keeps gpg from trying to prompt on a runner with no tty.
+          echo "${MAVEN_GPG_PRIVATE_KEY}" | gpg --batch --import
+          echo "--- secret keys now available ---"
+          gpg --list-secret-keys --keyid-format LONG
+
+      # The key was generated without a passphrase, so MAVEN_GPG_PASSPHRASE is
+      # deliberately not set. If the key is ever rotated to one with a
+      # passphrase, add it as a secret and export it here.
+      - name: Build, sign, and deploy to Central
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<'XML'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+            <servers>
+              <server>
+                <id>central</id>
+                <username>${env.MAVEN_CENTRAL_USERNAME}</username>
+                <password>${env.MAVEN_CENTRAL_PASSWORD}</password>
+              </server>
+            </servers>
+          </settings>
+          XML
+
+          mvn -B --no-transfer-progress -P release deploy \
+            -DskipTests \
+            -Dcentral.autoPublish=${{ inputs.publish }}
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## Release ${{ inputs.version }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Version | \`${{ inputs.version }}\` |"
+            echo "| Auto-publish | \`${{ inputs.publish }}\` |"
+            echo "| Triggered by | @${{ github.actor }} |"
+            echo ""
+            if [ "${{ inputs.publish }}" = "false" ]; then
+              echo "Stopped after Central validated the deployment."
+              echo "**Approve it at https://central.sonatype.com → Publish → Deployments.**"
+            else
+              echo "Uploaded and published once Central validated it."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

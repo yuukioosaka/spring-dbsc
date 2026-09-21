@@ -63,7 +63,14 @@
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
     <maven-gpg-plugin.version>3.2.7</maven-gpg-plugin.version>
-    <central-publishing-maven-plugin.version>0.7.0</central-publishing-maven-plugin.version>
+    <central-publishing-maven-plugin.version>0.11.0</central-publishing-maven-plugin.version>
+
+    <!--
+      Read by central-publishing-maven-plugin. False means "upload, validate, then
+      stop for manual approval", which is the safe default given that a Central
+      release is irreversible. Overridden with -Dcentral.autoPublish=true.
+    -->
+    <central.autoPublish>false</central.autoPublish>
   </properties>
 
   <dependencies>
@@ -288,11 +295,12 @@
             <configuration>
               <publishingServerId>central</publishingServerId>
               <!--
-                Kept manual on purpose: a release is permanent and cannot be
-                deleted, so the last step should be a human decision. Set to true to
-                let the upload publish itself once validation passes.
+                Publishing is permanent and cannot be undone, so the default is to
+                stop once Central has validated the deployment and let a human
+                approve it in the Portal. The release workflow overrides this with
+                -Dcentral.autoPublish=true when the operator asks for it.
               -->
-              <autoPublish>false</autoPublish>
+              <autoPublish>${central.autoPublish}</autoPublish>
               <waitUntil>validated</waitUntil>
             </configuration>
           </plugin>
