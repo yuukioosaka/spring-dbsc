@@ -51,7 +51,7 @@ Spring Boot 3.x.x, 4.x.x are the tested versions.
 <dependency>
   <groupId>click.yukio.dbsc</groupId>
   <artifactId>spring-dbsc</artifactId>
-  <version>0.2.0</version>
+  <version>0.3.0</version>
 </dependency>
 ```
 
