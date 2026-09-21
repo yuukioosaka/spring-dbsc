@@ -622,7 +622,10 @@ class ProtocolBehaviourTest {
         CountDownLatch done = new CountDownLatch(threads);
         AtomicInteger winners = new AtomicInteger();
 
-        try (ExecutorService pool = Executors.newFixedThreadPool(threads)) {
+        // ExecutorService only became AutoCloseable in Java 19, and these tests
+        // compile at the Java 17 level, so shutdown is explicit.
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
             for (int i = 0; i < threads; i++) {
                 pool.submit(() -> {
                     try {
@@ -639,6 +642,8 @@ class ProtocolBehaviourTest {
             }
             start.countDown();
             assertTrue(done.await(10, TimeUnit.SECONDS), "concurrent consume did not finish");
+        } finally {
+            pool.shutdownNow();
         }
 
         assertEquals(1, winners.get(),

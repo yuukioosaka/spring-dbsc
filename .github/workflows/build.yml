@@ -22,11 +22,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The library targets Java 25. Testing on 26 as well catches the case
-        # where a newer JDK tightens something the build relies on; it is
-        # allowed to fail without blocking the build.
-        java: ['25', '26']
+        # The library compiles at the Java 17 release level, so 17 is the baseline
+        # that must hold and is tested for real. 25 is the current LTS-track JDK the
+        # project is developed on; 26 catches the case where a newer JDK tightens
+        # something the build relies on and is allowed to fail without blocking.
+        java: ['17', '21', '25', '26']
         include:
+          - java: '17'
+            experimental: false
+          - java: '21'
+            experimental: false
           - java: '25'
             experimental: false
           - java: '26'
@@ -61,7 +66,7 @@ jobs:
           retention-days: 7
 
       - name: Upload library JAR
-        if: matrix.java == '25' && success()
+        if: matrix.java == '17' && success()
         uses: actions/upload-artifact@v5
         with:
           name: spring-dbsc-jar

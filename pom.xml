@@ -13,7 +13,7 @@
 
   <groupId>click.yukio.dbsc</groupId>
   <artifactId>spring-dbsc</artifactId>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <name>spring-dbsc</name>
   <description>Embeddable Spring Boot implementation of Device Bound Session Credentials (DBSC Toolkit Protocol 1.0)</description>
   <url>https://github.com/yuukioosaka/spring-dbsc</url>
@@ -51,14 +51,17 @@
 
   <properties>
     <!--
-      Built and compiled for Java 25, deliberately. Central accepts a bytecode level
-      of 8+, so this is a distribution choice rather than a requirement: these class
-      files load on JDK 25 and later only. Adopters on 21 or 17 will see
-      UnsupportedClassVersionError rather than a failed resolution, so it is worth
-      stating plainly in the README, which it is.
+      Built for Java 17, the lowest JDK Spring Boot 3.5 supports. Compiling at
+      the Java 17 release level rather than 25 is a distribution choice: the class
+      files then load on JDK 17 and every later JDK, so the library is usable by
+      adopters on 17, 21 and 25 alike instead of 25+ only.
+
+      The source deliberately stays inside the Java 17 language level. That rules
+      out switch pattern matching (case String s ->, case null ->), which is 21+;
+      the JSON codec in core.Json uses if/else chains where it would otherwise be
+      the natural style.
     -->
-    <java.version>25</java.version>
-    <maven.compiler.release>25</maven.compiler.release>
+    <maven.compiler.release>17</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 

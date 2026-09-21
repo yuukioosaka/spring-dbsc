@@ -29,19 +29,27 @@ public class TelemetryPublisher {
         if (event == null) {
             return;
         }
-        switch (event) {
-            case DbscTelemetryEvent.SessionStolen stolen -> log.warn(
+        //
+        // An if/else chain rather than a pattern-matching switch: switch patterns
+        // are Java 21, and this library compiles at the Java 17 language level.
+        // Order matters — the typed subtypes are tested before the generic
+        // fallback, exactly as the switch's default branch did.
+        if (event instanceof DbscTelemetryEvent.SessionStolen stolen) {
+            log.warn(
                     "DBSC session_stolen: sessionId={} tier={} ip={} — a refresh signature failed "
                             + "while a bound key still exists; a stolen cookie may have been replayed",
                     stolen.sessionId(), stolen.tier().wireValue(), stolen.ip());
-            case DbscTelemetryEvent.VerificationFailure failure -> log.warn(
+        } else if (event instanceof DbscTelemetryEvent.VerificationFailure failure) {
+            log.warn(
                     "DBSC verification_failure: sessionId={} tier={} reason={} ip={}",
                     failure.sessionId(), failure.tier().wireValue(), failure.reason(), failure.ip());
-            case DbscTelemetryEvent.PolyfillMissing missing -> log.warn(
+        } else if (event instanceof DbscTelemetryEvent.PolyfillMissing missing) {
+            log.warn(
                     "DBSC polyfill_missing: sessionId={} tier={} ip={} — native key present but no "
                             + "bound key, so per-request proofs will fail",
                     missing.sessionId(), missing.tier().wireValue(), missing.ip());
-            default -> log.debug(
+        } else {
+            log.debug(
                     "DBSC {}: sessionId={} tier={}",
                     event.type(), event.sessionId(), event.tier().wireValue());
         }

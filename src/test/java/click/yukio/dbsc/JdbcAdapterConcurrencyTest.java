@@ -103,7 +103,10 @@ class JdbcAdapterConcurrencyTest {
         CountDownLatch start = new CountDownLatch(1);
         CountDownLatch done = new CountDownLatch(THREADS);
 
-        try (ExecutorService pool = Executors.newFixedThreadPool(THREADS)) {
+        // ExecutorService only became AutoCloseable in Java 19, and these tests
+        // compile at the Java 17 level, so shutdown is explicit.
+        ExecutorService pool = Executors.newFixedThreadPool(THREADS);
+        try {
             for (int i = 0; i < THREADS; i++) {
                 pool.submit(() -> {
                     try {
@@ -118,6 +121,8 @@ class JdbcAdapterConcurrencyTest {
             }
             start.countDown();
             assertTrue(done.await(30, TimeUnit.SECONDS), "concurrent work did not finish");
+        } finally {
+            pool.shutdownNow();
         }
     }
 

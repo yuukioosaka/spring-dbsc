@@ -104,42 +104,52 @@ public final class Json {
         return out.toString();
     }
 
+    //
+    // Written as an if/else chain rather than a pattern-matching switch: switch
+    // patterns are Java 21, and this library compiles at the Java 17 language
+    // level. The typed branches must come before the Iterable and default cases,
+    // in that order, which is the same order the switch used.
     private static void writeValue(StringBuilder out, Object value) {
-        switch (value) {
-            case null -> out.append("null");
-            case String s -> writeString(out, s);
-            case Boolean b -> out.append(b);
-            case Integer i -> out.append(i.intValue());
-            case Long l -> out.append(l.longValue());
-            case Double d -> out.append(d);
-            case Float f -> out.append(f.floatValue());
-            case Map<?, ?> map -> {
-                out.append('{');
-                boolean first = true;
-                for (Map.Entry<?, ?> entry : map.entrySet()) {
-                    if (!first) {
-                        out.append(',');
-                    }
-                    first = false;
-                    writeString(out, String.valueOf(entry.getKey()));
-                    out.append(':');
-                    writeValue(out, entry.getValue());
+        if (value == null) {
+            out.append("null");
+        } else if (value instanceof String s) {
+            writeString(out, s);
+        } else if (value instanceof Boolean b) {
+            out.append(b);
+        } else if (value instanceof Integer i) {
+            out.append(i.intValue());
+        } else if (value instanceof Long l) {
+            out.append(l.longValue());
+        } else if (value instanceof Double d) {
+            out.append(d);
+        } else if (value instanceof Float f) {
+            out.append(f.floatValue());
+        } else if (value instanceof Map<?, ?> map) {
+            out.append('{');
+            boolean first = true;
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (!first) {
+                    out.append(',');
                 }
-                out.append('}');
+                first = false;
+                writeString(out, String.valueOf(entry.getKey()));
+                out.append(':');
+                writeValue(out, entry.getValue());
             }
-            case Iterable<?> items -> {
-                out.append('[');
-                boolean first = true;
-                for (Object item : items) {
-                    if (!first) {
-                        out.append(',');
-                    }
-                    first = false;
-                    writeValue(out, item);
+            out.append('}');
+        } else if (value instanceof Iterable<?> items) {
+            out.append('[');
+            boolean first = true;
+            for (Object item : items) {
+                if (!first) {
+                    out.append(',');
                 }
-                out.append(']');
+                first = false;
+                writeValue(out, item);
             }
-            default -> writeString(out, String.valueOf(value));
+            out.append(']');
+        } else {
+            writeString(out, String.valueOf(value));
         }
     }
 

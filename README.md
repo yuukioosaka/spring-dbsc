@@ -37,10 +37,9 @@ the session demoted to `none` the moment someone tries to refresh with it.
 
 ## Requirements
 
-The library is compiled and released at **Java 25** (`--release 25`), so its class
-files load on JDK 25 and later **only**. Adopters on 21 or 17 will see
-`UnsupportedClassVersionError` rather than a failed resolution — worth checking before
-you add the dependency.
+The library is compiled at the **Java 17** release level, so its class files load on
+JDK 17 and every later JDK — 17, 21 and 25 all work. Java 17 is the lowest JDK Spring
+Boot 3.5 supports, and it is the CI baseline.
 
 Spring Boot 3.5.x and Spring Security 6.5.x are the tested versions.
 
@@ -52,7 +51,7 @@ Spring Boot 3.5.x and Spring Security 6.5.x are the tested versions.
 <dependency>
   <groupId>click.yukio.dbsc</groupId>
   <artifactId>spring-dbsc</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>0.2.0</version>
 </dependency>
 ```
 
@@ -297,8 +296,8 @@ that as the protocol itself — neither depends on Spring Security. See
 
 The build is on GitHub Actions:
 
-- **[`build.yml`](./.github/workflows/build.yml)** — `mvn verify` on Java 25 (blocking)
-  and 26 (experimental). Uploads the library JAR.
+- **[`build.yml`](./.github/workflows/build.yml)** — `mvn verify` on Java 17, 21 and 25
+  (blocking) and 26 (experimental). Uploads the library JAR.
 - **[`e2e.yml`](./.github/workflows/e2e.yml)** — boots the demo over HTTPS with a
   2-second challenge TTL and runs `scripts/e2e.py` against it.
 
