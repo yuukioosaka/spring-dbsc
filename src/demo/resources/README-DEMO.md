@@ -60,6 +60,63 @@ The difference between those two rows is the whole feature.
 an unsupported platform, or a profile without the hardware key facility. That is
 different from a failure, and `GET /app/whoami` reports it.
 
+## OIDC variant (Entra ID)
+
+The `oidc` profile swaps form login for `oauth2Login()`, to show that the DBSC
+filters do not care how the user authenticated. It is not part of the library:
+the `spring-boot-starter-oauth2-client` dependency is scoped to this profile and
+never reaches the published JAR.
+
+```sh
+ENTRA_CLIENT_SECRET='…' mvn -Pdemo,oidc -Dmaven.repo.local=.m2repo spring-boot:run
+```
+
+Open <https://localhost:8443/app> and sign in at the identity provider. The
+redirect URI to register on the app is Spring Security's callback path, **not**
+`/oidc`:
+
+```
+https://localhost:8443/login/oauth2/code/entraid
+```
+
+`/oidc` is only the page the browser lands on after the callback, and is where
+the DBSC binding actually happens.
+
+### Why the binding is deferred to `/oidc/bind`
+
+This is the one non-obvious part, and it fails as a `403` that looks like a
+server bug. The OIDC callback response is **cross-site**: Chromium makes DBSC
+requests inherit the initiator of the request that caused them, so a registration
+header returned straight from the callback produces a registration POST whose
+`SameSite=Lax` session cookie is withheld. Chromium records that failure as
+permanent and never retries for the rest of the login.
+
+A server-side redirect does **not** reset the initiator — only a navigation the
+browser issues itself does. So:
+
+| Step | Route | `Sec-Fetch-Site` | What happens |
+|---|---|---|---|
+| 1 | callback → success handler | cross-site | redirects to `/oidc`; **no** `bind()` |
+| 2 | `GET /oidc` | cross-site | serves HTML whose script calls `location.replace('/oidc/bind')` |
+| 3 | `GET /oidc/bind` | same-origin | `bind()` — the cookie is present |
+
+`DbscService.bind()` handles half of this itself: on a request carrying
+`Sec-Fetch-Site: cross-site` it records the session but withholds the
+registration header, so Chromium is never told to make a doomed POST. It is then
+up to the application to call `bind()` again from a same-site request. Form login
+is unaffected — it binds from a POST the browser made to this origin, so the
+plain success-handler form is correct there.
+
+### Resetting a poisoned browser
+
+After a failed registration Chromium remembers it and will not retry, so a fixed
+server still fails against the same browser profile. To start clean:
+
+1. `chrome://device-bound-sessions` → delete the `https://localhost` entry
+2. `chrome://settings/content/all` → `localhost:8443` → delete site data
+3. restart the browser (the state can live in-process), and delete
+   `data/demo.mv.db` so the server forgets the old session too
+
 ## Automated end-to-end test
 
 The browser flow above is the manual check. For a repeatable one, run the suite in

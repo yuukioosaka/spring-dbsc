@@ -324,8 +324,10 @@ public class DbscService {
             return new BoundChallengeResult(Map.of("error", "no session"), false);
         }
 
+        // The JTI goes in the body only, never in the challenge cookie: that
+        // cookie is the native routes' channel and overwriting it here would
+        // invalidate a native registration in flight.
         Challenge challenge = challenges.issue(sessionId.get());
-        setCookie(response, cookieScope.challengeCookieName(), challenge.jti(), properties.challengeTtlMs());
         return new BoundChallengeResult(Map.of("challenge", challenge.jti()), true);
     }
 
@@ -379,7 +381,9 @@ public class DbscService {
         }
         engine.handleBoundRefresh(sessionId, signature, challengeJti, timestamp);
 
-        response.addHeader("Set-Cookie", cookieScope.deleteCookieValue(cookieScope.challengeCookieName()));
+        // Only the binding cookie is touched. Clearing the challenge cookie here
+        // would delete a native challenge that is still in flight; the bound
+        // protocol keeps its JTI in the body, so it has nothing to clear.
         setCookie(response, cookieScope.bindingCookieName(), sessionId, properties.boundCookieTtlMs());
 
         ProtectionTier tier = engine.currentTier(sessionId);

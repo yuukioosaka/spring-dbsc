@@ -35,6 +35,7 @@ import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -315,7 +316,11 @@ class HttpFlowTest {
         assertEquals(200, challengeResult.getResponse().getStatus());
         String jti = (String) Json.parseObject(
                 challengeResult.getResponse().getContentAsString()).get("challenge");
-        var challengeCookie = challengeResult.getResponse().getCookie(cookieScope.challengeCookieName());
+        // The bound protocol carries its JTI in the body only. A challenge cookie
+        // here would share its name with the native routes' cookie and clobber a
+        // native registration that is simultaneously in flight.
+        assertNull(challengeResult.getResponse().getCookie(cookieScope.challengeCookieName()),
+                "the bound challenge route must not write the native challenge cookie");
 
         // Register over the bare JTI.
         TestKey key = TestKey.generate();
@@ -327,7 +332,7 @@ class HttpFlowTest {
         MvcResult registration = mvc.perform(post("/dbsc-bound/registration")
                         .contentType("application/json")
                         .content(registrationBody)
-                        .cookie(login.registrationCookie(), challengeCookie))
+                        .cookie(login.registrationCookie()))
                 .andReturn();
 
         assertEquals(200, registration.getResponse().getStatus(),
@@ -345,8 +350,6 @@ class HttpFlowTest {
                 .andReturn();
         String refreshJti = (String) Json.parseObject(
                 nextChallenge.getResponse().getContentAsString()).get("challenge");
-        var refreshChallengeCookie =
-                nextChallenge.getResponse().getCookie(cookieScope.challengeCookieName());
         long timestamp = dbscClock.millis();
 
         String refreshBody = Json.write(Map.of(
@@ -357,7 +360,7 @@ class HttpFlowTest {
         MvcResult refresh = mvc.perform(post("/dbsc-bound/refresh")
                         .contentType("application/json")
                         .content(refreshBody)
-                        .cookie(login.registrationCookie(), refreshChallengeCookie))
+                        .cookie(login.registrationCookie()))
                 .andReturn();
 
         assertEquals(200, refresh.getResponse().getStatus(),

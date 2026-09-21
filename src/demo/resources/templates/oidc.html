@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <title>DBSC demo — binding</title>
+    <style>
+        body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 4rem auto; padding: 0 1rem; }
+        h1 { font-size: 1.3rem; }
+        .note { background: #f4f4f4; padding: .75rem 1rem; border-radius: 4px; margin-top: 2rem; }
+        code { background: #eee; padding: .1rem .3rem; border-radius: 3px; }
+    </style>
+</head>
+<body>
+<h1>Binding this device…</h1>
+<p>You are signed in. Handing over to the DBSC bind step.</p>
+
+<div class="note">
+    <p>This page exists for one reason: the OIDC callback response is
+        <strong>cross-site</strong>, and Chromium makes DBSC requests inherit the
+        initiator. Returning <code>Secure-Session-Registration</code> straight from the
+        callback would make the registration POST cross-site, so the
+        <code>SameSite=Lax</code> session cookie would be dropped and Chromium would
+        never retry for the rest of the login.</p>
+    <p>The navigation below is issued by this page, which re-originates the request on
+        this site. <code>/oidc/bind</code> then binds against a session cookie that is
+        actually present.</p>
+</div>
+
+<!-- No redirect from the server would do: a 302/303 keeps the cross-site initiator. -->
+<script>location.replace('/oidc/bind');</script>
+</body>
+</html>

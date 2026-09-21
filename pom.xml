@@ -74,6 +74,14 @@
       release is irreversible. Overridden with -Dcentral.autoPublish=true.
     -->
     <central.autoPublish>false</central.autoPublish>
+
+    <!--
+      Extra Spring profiles the demo app activates, appended to "demo". The demo
+      profile's active profiles are a command-line argument, and a command-line
+      argument wins over -Dspring-boot.run.jvmArguments, so this property is the
+      only working place to add one.
+    -->
+    <dbsc.demo.profiles></dbsc.demo.profiles>
   </properties>
 
   <dependencies>
@@ -196,9 +204,68 @@
               <arguments>
                 <!-- The demo's own config file, kept out of the way of the
                      library's defaults, which are also named application.yaml. -->
-                <argument>--spring.profiles.active=demo</argument>
+                <argument>--spring.profiles.active=demo${dbsc.demo.profiles}</argument>
               </arguments>
             </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <!--
+      The OIDC variant of the demo: adds an Entra ID login on top of src/demo and
+      turns off the form-login chain (the two cannot coexist on one chain).
+
+        ENTRA_CLIENT_SECRET=... mvn -Pdemo,oidc -Dmaven.repo.local=.m2repo spring-boot:run
+
+      The oauth2 client starter is scoped to this profile and stays out of the
+      published JAR: DBSC must not drag an OAuth2 dependency into the library.
+    -->
+    <profile>
+      <id>oidc</id>
+      <properties>
+        <dbsc.demo.profiles>,oidc</dbsc.demo.profiles>
+      </properties>
+      <dependencies>
+        <dependency>
+          <groupId>org.springframework.boot</groupId>
+          <artifactId>spring-boot-starter-oauth2-client</artifactId>
+        </dependency>
+      </dependencies>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <version>3.6.1</version>
+            <executions>
+              <execution>
+                <id>add-demo-oidc-source</id>
+                <phase>generate-sources</phase>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <configuration>
+                  <sources>
+                    <source>src/demo/java-oidc</source>
+                  </sources>
+                </configuration>
+              </execution>
+              <execution>
+                <id>add-demo-oidc-resources</id>
+                <phase>generate-resources</phase>
+                <goals>
+                  <goal>add-resource</goal>
+                </goals>
+                <configuration>
+                  <resources>
+                    <resource>
+                      <directory>src/demo/resources-oidc</directory>
+                    </resource>
+                  </resources>
+                </configuration>
+              </execution>
+            </executions>
           </plugin>
         </plugins>
       </build>

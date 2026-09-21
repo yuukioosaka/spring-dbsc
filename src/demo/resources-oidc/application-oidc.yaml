@@ -1,0 +1,39 @@
+# OIDC variant of the demo (profile "oidc", on top of "demo").
+#
+#   ENTRA_CLIENT_SECRET=... mvn -Pdemo,oidc -Dmaven.repo.local=.m2repo spring-boot:run
+#
+# Redirect URI to register on the app registration:
+#   https://localhost:8443/login/oauth2/code/entraid
+# That is Spring Security's callback path, not /oidc — /oidc is only the page the
+# browser lands on afterwards, and is where the DBSC binding actually happens.
+
+demo:
+  oidc:
+    # Gates DemoOidcConfig and switches the form-login chains off.
+    enabled: true
+
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          entraid:
+            client-id: f9c6da3d-468e-46e3-87f1-0ec65ce21981
+            client-secret: ${ENTRA_CLIENT_SECRET}
+            # Entra answers a client_secret_basic token request with a 401
+            # invalid_token_response; the secret has to go in the body instead.
+            client-authentication-method: client_secret_post
+            authorization-grant-type: authorization_code
+            scope: openid, profile, email
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+        provider:
+          entraid:
+            # The /v2.0 form: the bare tenant URL advertises a different issuer.
+            issuer-uri: https://login.microsoftonline.com/90485b6d-0d39-4c2b-a2d1-ddf6d06d7978/v2.0
+            user-name-attribute: sub
+
+logging:
+  level:
+    # DBSC's own decisions, including the cross-site deferral in bind().
+    click.yukio.dbsc: DEBUG
+    org.springframework.security: INFO

@@ -142,15 +142,13 @@ public class DbscFilter extends OncePerRequestFilter {
 
     private void boundState(HttpServletRequest request, HttpServletResponse response)
             throws IOException {
+        // No cookie is written here. The bound protocol passes its challenge in
+        // the JSON body, and the browser echoes it from there; the challenge
+        // cookie belongs to the *native* routes alone. Writing it here used to
+        // clobber a challenge the native registration was primed with, because
+        // both would use the same cookie name, and the registration POST that
+        // followed then failed JTI_MISMATCH against a JTI Chrome had never seen.
         DbscService.BoundStateResult result = dbsc.boundState(request);
-        if (result.challenge() != null) {
-            // The client needs the JTI as a cookie too: the registration route
-            // validates the challenge it finds in the cookie jar.
-            var scope = dbsc.cookieScope();
-            response.addHeader("Set-Cookie", scope.setCookieValue(
-                    scope.challengeCookieName(), result.challenge().jti(),
-                    dbsc.properties().challengeTtlMs()));
-        }
         writeJson(response, HttpStatus.OK, result.body());
     }
 

@@ -5,6 +5,7 @@ import click.yukio.dbsc.web.DbscProofGuardFilter;
 import click.yukio.dbsc.web.DbscFilterConfiguration.GuardedRoute;
 import click.yukio.dbsc.web.DbscFilter;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -66,74 +67,84 @@ public class DemoFormLoginConfig {
      * <p>Matched on Ant patterns rather than the String overload, which resolves
      * to {@code MvcRequestMatcher} and drags in an MVC dependency the filter layer
      * has no business having.
-     */
-    @Bean
-    @Order(0)
-    SecurityFilterChain dbscProtocolChain(
-            HttpSecurity http, @Qualifier("dbscFilter") DbscFilter dbscFilter) throws Exception {
-        http
-                // One OrRequestMatcher rather than chained securityMatcher() calls:
-                // each call SETS the matcher, so chaining silently keeps only the
-                // last path and the other routes fall through to the app chain.
-                .securityMatcher(new OrRequestMatcher(
-                        new AntPathRequestMatcher("/dbsc/**"),
-                        new AntPathRequestMatcher("/dbsc-bound/**"),
-                        new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
-                .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
-                // Chromium drives these routes before any user session exists and
-                // posts no CSRF token with them.
-                .sessionManagement(session -> session
-                        .sessionCreationPolicy(
-                                org.springframework.security.config.http.SessionCreationPolicy.STATELESS))
-                .csrf(csrf -> csrf.disable())
-                // CsrfFilter sits before UsernamePasswordAuthenticationFilter, so a
-                // filter positioned relative to the latter would still land after
-                // it and let CSRF reject the browser's registration POST first.
-                // Anchor on CsrfFilter instead, so DBSC sees the request first.
-                .addFilterBefore(dbscFilter, CsrfFilter.class);
-        return http.build();
-    }
-
-    /**
-     * The application chain: form login, authorization, and the proof guard.
      *
-     * <p>The guard runs before authorization, so a request without a valid proof
-     * is refused with DBSC's 403 before any application logic or session lookup
-     * happens. It layers <em>on top of</em> authentication: a valid proof is never
-     * a substitute for logging in.
+     * <p>The two application chains are nested in {@link FormLoginChains} so the
+     * whole authentication setup can be switched off at once under the
+     * {@code oidc} profile, which supplies its own instead. Registering both would
+     * leave two chains matching {@code /**} and the winner up to bean ordering.
      */
-    @Bean
-    @Order(1)
-    SecurityFilterChain appChain(
-            HttpSecurity http,
-            @Qualifier("dbscProofGuardFilter") DbscProofGuardFilter guardFilter,
-            DemoLoginSuccessHandler successHandler,
-            DbscService dbsc) throws Exception {
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnExpression("!environment.acceptsProfiles('oidc')")
+    static class FormLoginChains {
 
-        http
-                .securityMatcher(new AntPathRequestMatcher("/**"))
-                .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/login", "/css/**", "/favicon.ico").permitAll()
-                        .requestMatchers("/app/payment").authenticated()
-                        .anyRequest().authenticated())
-                .formLogin(form -> form
-                        .loginPage("/login")
-                        .successHandler(successHandler)
-                        .permitAll())
-                // Spring Security keeps the CSRF token in the session and, by
-                // default, only accepts it as a request parameter. The demo's
-                // fetch() calls send JSON, so the token has to be accepted as a
-                // header instead; without this every POST is refused by
-                // CsrfFilter and the 403 is indistinguishable from DBSC's own.
-                .csrf(csrf -> csrf
-                        .csrfTokenRepository(new HttpSessionCsrfTokenRepository())
-                        .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
-                .logout(logout -> logout
-                        .logoutUrl("/logout")
-                        .addLogoutHandler(demoLogoutHandler(dbsc))
-                        .logoutSuccessUrl("/login?loggedout"))
-                .addFilterBefore(guardFilter, UsernamePasswordAuthenticationFilter.class);
-        return http.build();
+        @Bean
+        @Order(0)
+        SecurityFilterChain dbscProtocolChain(
+                HttpSecurity http, @Qualifier("dbscFilter") DbscFilter dbscFilter) throws Exception {
+            http
+                    // One OrRequestMatcher rather than chained securityMatcher() calls:
+                    // each call SETS the matcher, so chaining silently keeps only the
+                    // last path and the other routes fall through to the app chain.
+                    .securityMatcher(new OrRequestMatcher(
+                            new AntPathRequestMatcher("/dbsc/**"),
+                            new AntPathRequestMatcher("/dbsc-bound/**"),
+                            new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
+                    .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
+                    // Chromium drives these routes before any user session exists and
+                    // posts no CSRF token with them.
+                    .sessionManagement(session -> session
+                            .sessionCreationPolicy(
+                                    org.springframework.security.config.http.SessionCreationPolicy.STATELESS))
+                    .csrf(csrf -> csrf.disable())
+                    // CsrfFilter sits before UsernamePasswordAuthenticationFilter, so a
+                    // filter positioned relative to the latter would still land after
+                    // it and let CSRF reject the browser's registration POST first.
+                    // Anchor on CsrfFilter instead, so DBSC sees the request first.
+                    .addFilterBefore(dbscFilter, CsrfFilter.class);
+            return http.build();
+        }
+
+        /**
+         * The application chain: form login, authorization, and the proof guard.
+         *
+         * <p>The guard runs before authorization, so a request without a valid proof
+         * is refused with DBSC's 403 before any application logic or session lookup
+         * happens. It layers <em>on top of</em> authentication: a valid proof is never
+         * a substitute for logging in.
+         */
+        @Bean
+        @Order(1)
+        SecurityFilterChain appChain(
+                HttpSecurity http,
+                @Qualifier("dbscProofGuardFilter") DbscProofGuardFilter guardFilter,
+                DemoLoginSuccessHandler successHandler,
+                DbscService dbsc) throws Exception {
+
+            http
+                    .securityMatcher(new AntPathRequestMatcher("/**"))
+                    .authorizeHttpRequests(auth -> auth
+                            .requestMatchers("/login", "/css/**", "/favicon.ico").permitAll()
+                            .requestMatchers("/app/payment").authenticated()
+                            .anyRequest().authenticated())
+                    .formLogin(form -> form
+                            .loginPage("/login")
+                            .successHandler(successHandler)
+                            .permitAll())
+                    // Spring Security keeps the CSRF token in the session and, by
+                    // default, only accepts it as a request parameter. The demo's
+                    // fetch() calls send JSON, so the token has to be accepted as a
+                    // header instead; without this every POST is refused by
+                    // CsrfFilter and the 403 is indistinguishable from DBSC's own.
+                    .csrf(csrf -> csrf
+                            .csrfTokenRepository(new HttpSessionCsrfTokenRepository())
+                            .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
+                    .logout(logout -> logout
+                            .logoutUrl("/logout")
+                            .addLogoutHandler(demoLogoutHandler(dbsc))
+                            .logoutSuccessUrl("/login?loggedout"))
+                    .addFilterBefore(guardFilter, UsernamePasswordAuthenticationFilter.class);
+            return http.build();
+        }
     }
 
     /**

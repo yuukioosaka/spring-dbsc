@@ -237,12 +237,25 @@ def binder_cookie_header(jar, sid, jti):
     return "; ".join(parts)
 
 
+def bound_challenge(opener, jar, path="/dbsc-bound/challenge"):
+    """Fetches a bound-protocol challenge from the response *body*.
+
+    The bound routes carry their JTI in JSON, never in a cookie: the challenge
+    cookie belongs to the native routes, and a second writer to the same name
+    would invalidate a native registration already in flight. Returns
+    (jti, status, text).
+    """
+    status, _, text = request(opener, "GET", path)
+    if status != 200:
+        return None, status, text
+    return json.loads(text).get("challenge"), status, text
+
+
 def bound_register(opener, jar, key):
-    """Runs bound registration off a challenge fetched from the bound challenge route."""
-    request(opener, "GET", "/dbsc-bound/challenge")
-    jti = cookie_value(jar, "__Host-dbsc-challenge")
+    """Runs bound registration off a challenge read from the JSON body."""
+    jti, status, text = bound_challenge(opener, jar)
     if jti is None:
-        return None, None, "no __Host-dbsc-challenge cookie"
+        return None, status, text
     status, headers, text = request(
         opener, "POST", "/dbsc-bound/registration", form=False, body={
             "publicKey": key.public_jwk(),
@@ -423,7 +436,8 @@ def main():
     check("GET /dbsc-bound/state -> 200", status == 200, f"got {status}: {ts[:200]}")
     status, _, tc = request(opener, "GET", "/dbsc-bound/challenge")
     check("GET /dbsc-bound/challenge -> 200", status == 200, f"got {status}: {tc[:200]}")
-    bound_ch = cookie_value(jar, "__Host-dbsc-challenge")
+    check("the bound challenge arrives in the body, not the cookie jar",
+          bool(json.loads(tc).get("challenge")) if status == 200 else False, tc[:200])
 
     # ---------------------------------------------------- 9. well-known
     print("\n-- 9. well-known metadata --")
@@ -530,7 +544,11 @@ def main():
 
     # ------------------------------------------------- C. already-registered
     print("\n-- C. a second registration of the same kind is refused --")
-    request(a_opener, "GET", "/dbsc-bound/challenge")
+    # A fresh *native* challenge: the bound routes keep their JTI in the body and
+    # never touch the challenge cookie, so this one has to come from the native
+    # refresh leg.
+    request(a_opener, "POST", "/dbsc/refresh", body=b"",
+            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": a_sid})
     a_ch2 = cookie_value(a_jar, "__Host-dbsc-challenge")
     status, _, text = request(
         a_opener, "POST", "/dbsc/registration", body=b"", headers={
@@ -538,6 +556,11 @@ def main():
             "Content-Type": "application/json"})
     check("second native registration -> SESSION_ALREADY_REGISTERED",
           "SESSION_ALREADY_REGISTERED" in text, f"{status} {text[:160]}")
+
+    # The next section asserts the bound flow against the *same* session, so the
+    # challenge it consumes is the one the native registration just passed over.
+    request(a_opener, "POST", "/dbsc/refresh", body=b"",
+            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": a_sid})
 
     # The native key must not block the *bound* registration: the kinds are
     # tracked separately and a Chromium session is expected to hold both.
@@ -567,14 +590,21 @@ def main():
     # A fresh login that has done neither registration needs a polyfill key.
     e_opener, e_jar = new_client()
     _, _, e_sid, _ = login(e_opener, e_jar)
+    e_login_ch = cookie_value(e_jar, "__Host-dbsc-challenge")
     status, _, text = request(e_opener, "GET", "/dbsc-bound/state")
     e_state = json.loads(text)
     check("no keys at all -> needs-registration with a challenge",
           e_state.get("phase") == "needs-registration" and bool(e_state.get("challenge")),
           text[:200])
-    check("needs-registration mirrors the challenge into the cookie",
-          cookie_value(e_jar, "__Host-dbsc-challenge") == e_state.get("challenge"),
-          text[:160])
+    # The bound protocol carries its challenge in the JSON body. It must NOT write
+    # the challenge cookie, which belongs to the native routes: a second writer to
+    # that name invalidates the native registration the login primed, and the
+    # registration POST that follows then fails JTI_MISMATCH.
+    check("state leaves the native challenge cookie untouched",
+          cookie_value(e_jar, "__Host-dbsc-challenge") == e_login_ch,
+          f"{e_login_ch} -> {cookie_value(e_jar, '__Host-dbsc-challenge')}")
+    check("the state challenge is not the native login challenge",
+          e_state.get("challenge") != e_login_ch, text[:200])
 
     e_native = Key()
     native_register(e_opener, e_jar, e_sid, e_native)
@@ -606,8 +636,7 @@ def main():
 
     # ------------------------------------------------- E. bound refresh
     print("\n-- E. bound refresh validates the timestamp before the key --")
-    status, _, text = request(e_opener, "GET", "/dbsc-bound/challenge")
-    e_ch = cookie_value(e_jar, "__Host-dbsc-challenge")
+    e_ch, _, text = bound_challenge(e_opener, e_jar)
     e_ts = now_ms()
     status, e_headers, e_text = request(
         e_opener, "POST", "/dbsc-bound/refresh", form=False, body={
@@ -615,12 +644,13 @@ def main():
     check("bound refresh with a fresh timestamp -> 200", status == 200, f"{status} {e_text[:160]}")
     check("bound endpoints advertise the server clock (X-Server-Time)",
           header(e_headers, "X-Server-Time") is not None, str(e_headers)[:160])
-    check("a successful bound refresh clears the challenge cookie",
-          "__Host-dbsc-challenge" in " ".join(all_headers(e_headers, "Set-Cookie")),
+    # The bound flow keeps its JTI in the body, so a refresh has nothing to clear
+    # and must not clear the native routes' cookie either.
+    check("a successful bound refresh leaves the challenge cookie alone",
+          "__Host-dbsc-challenge" not in " ".join(all_headers(e_headers, "Set-Cookie")),
           str(e_headers)[:200])
 
-    request(e_opener, "GET", "/dbsc-bound/challenge")
-    e_ch2 = cookie_value(e_jar, "__Host-dbsc-challenge")
+    e_ch2, _, _ = bound_challenge(e_opener, e_jar)
     stale = now_ms() - 10 * 60 * 1000
     status, _, text = request(
         e_opener, "POST", "/dbsc-bound/refresh", form=False, body={
@@ -629,8 +659,7 @@ def main():
           status == 403 and "SIGNATURE_INVALID" in text, f"{status} {text[:160]}")
 
     e_opener2, e_jar2, e_sid2, e_nat2, e_bnd2, _ = bound_session()
-    request(e_opener2, "GET", "/dbsc-bound/challenge")
-    e_ch3 = cookie_value(e_jar2, "__Host-dbsc-challenge")
+    e_ch3, _, _ = bound_challenge(e_opener2, e_jar2)
     e_ts3 = now_ms()
     # Signed by a *different* key than the one registered: the signature is
     # well-formed and in-window, so only the key lookup can reject it.
@@ -843,13 +872,11 @@ def main():
     # shares one challenge store, so a JTI burnt natively is burnt everywhere.
     k2_opener, k2_jar = new_client()
     _, _, k2_sid, _ = login(k2_opener, k2_jar)
-    request(k2_opener, "GET", "/dbsc-bound/challenge")
     k2_jti = cookie_value(k2_jar, "__Host-dbsc-challenge")
     k2_ck = binder_cookie_header(k2_jar, k2_sid, k2_jti)
     k2_native = Key()
     m, status, text = native_register_manual(k2_opener, k2_jti, k2_native)
-    check("a challenge issued by the bound route works on the native route",
-          status == 200, f"{status} {text[:160]}")
+    check("a challenge works on the native route", status == 200, f"{status} {text[:160]}")
     k2_bound = Key()
     status, _, text = request(
         k2_opener, "POST", "/dbsc-bound/registration", form=False, headers={"Cookie": k2_ck}, body={
@@ -857,6 +884,25 @@ def main():
             "signature": k2_bound.sign(k2_jti),
             "challenge": k2_jti})
     check("a JTI consumed by the native route -> CHALLENGE_CONSUMED on the bound route",
+          "CHALLENGE_CONSUMED" in text, f"{status} {text[:160]}")
+
+    # The reverse direction: a JTI the bound route issued is consumable natively.
+    k2b_opener, k2b_jar = new_client()
+    _, _, k2b_sid, _ = login(k2b_opener, k2b_jar)
+    k2b_jti, status, text = bound_challenge(k2b_opener, k2b_jar)
+    k2b_bound = Key()
+    status, _, text = request(
+        k2b_opener, "POST", "/dbsc-bound/registration", form=False, body={
+            "publicKey": k2b_bound.public_jwk(),
+            "signature": k2b_bound.sign(k2b_jti),
+            "challenge": k2b_jti})
+    check("a challenge issued by the bound route registers the bound key",
+          status == 200, f"{status} {text[:160]}")
+    status, _, text = request(
+        k2b_opener, "POST", "/dbsc-bound/refresh", form=False, body={
+            "challenge": k2b_jti, "signature": k2b_bound.sign(f"{k2b_jti}.{now_ms()}"),
+            "timestamp": now_ms()})
+    check("the same JTI on the bound refresh -> CHALLENGE_CONSUMED",
           "CHALLENGE_CONSUMED" in text, f"{status} {text[:160]}")
 
     if CHALLENGE_TTL_S is None:
