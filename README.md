@@ -23,7 +23,7 @@ the session demoted to `none` the moment someone tries to refresh with it.
 | Area | Status |
 |---|---|
 | Native protocol (Chromium, spec 02) | ✅ registration + refresh |
-| Bound protocol (Web Crypto polyfill, spec 03) | ✅ all four routes |
+| Bound protocol (Web Crypto polyfill, spec 03) | ✅ all four routes — see [the caveats](#native-vs-polyfill-bound--read-this-before-choosing) |
 | Per-request proof guard (spec 04) | ✅ incl. body binding |
 | Atomic challenge consumption | ✅ in-memory + JDBC |
 | Proof replay cache | ✅ in-memory + JDBC |
@@ -34,6 +34,75 @@ the session demoted to `none` the moment someone tries to refresh with it.
 
 **Test status: 112 tests passing**, including all 8 conformance vectors from
 `dbsc-toolkit/spec/vectors` replayed through the real engine.
+
+## Native vs. polyfill (`bound`) — read this before choosing
+
+DBSC proper — the [W3C draft](https://w3c.github.io/webappsec-dbsc/) and what
+Chromium implements — is the **native** mechanism: the browser mints a key in
+hardware-backed, non-extractable storage, and no script on the page can ever call
+it. That is the mechanism this library treats as the real one, and registering it
+requires no client code at all.
+
+The **`bound` tier is a different thing wearing the same name.** It is a
+**Web Crypto polyfill, outside the DBSC specification**, shipped by
+[`dbsc-toolkit`](https://github.com/SulimanAbdulrazzaq/dbsc-toolkit) for browsers
+that have not implemented native DBSC yet. Instead of a hardware key it stores a
+P-256 private key in **IndexedDB, where page script can read it**, and signs
+proofs in JavaScript:
+
+```html
+<script type="module">
+  import { initBoundDbsc } from "/dbsc-client/index.js";
+  initBoundDbsc();
+</script>
+```
+
+That one property — an **extractable** key in script-reachable storage — is the
+whole story, and it has consequences worth stating plainly:
+
+- **Any XSS anywhere on the origin is a signing oracle.** A single injected script
+  can export the private key or just call the signer, and it can do so from a
+  different page than the one being protected. The cookie-theft scenario DBSC
+  exists to defeat is *not* closed by the polyfill: an attacker who steals the
+  cookie can also steal the key that is supposed to make it useless.
+- **Theft resistance is therefore much weaker than native**, not merely "lower".
+  Native keys cannot be exported even by the page that owns them; polyfill keys
+  are readable by any script that reaches the same origin.
+- **It is opt-in client code**, so unlike the native path it depends on you
+  shipping `dbsc-client` and on it running — a broken script, a strict CSP, or a
+  blocked module silently means "bound sessions are impossible", not "degraded".
+
+Because these are genuinely different guarantees, the library keeps them in
+separate tiers rather than pretending they are equivalent:
+
+| Tier | Key | How it is registered | Relative strength |
+|---|---|---|---|
+| `dbsc` | Native, non-extractable, hardware-backed | `Secure-Session-Registration`, no client code | The DBSC mechanism |
+| `bound` | Web Crypto P-256, **script-readable** | `/dbsc-bound/*` via `dbsc-toolkit` client | Weaker; XSS turns it into an oracle |
+| `none` | — | — | Nothing is bound |
+
+### What that means for the proof guard
+
+The guard verifies `X-Dbsc-Bound-Proof` against **the polyfill key**, because a
+native key never leaves the browser and no page script can sign with it. So the
+guard's tier check is not an upgrade — it is a **refusal threshold**, and today it
+is only ever `bound`:
+
+- A guarded route requires at least tier `bound`, i.e. it **accepts a
+  script-readable key as sufficient**. That is the only behaviour the guard has,
+  and it is a real weakening relative to what "DBSC-protected" sounds like.
+  There is currently **no per-route way to demand `dbsc`** short of contributing
+  one; the helpers are a compatibility bridge, not a strict mode.
+- Setting `dbsc.bound: false` is the blunt instrument that does exist: the
+  polyfill routes stop being served, so no session can reach tier `bound` through
+  them and only natively registered sessions can satisfy a guard. Be aware of the
+  trade — a browser with no native DBSC support then cannot bind at all, so this
+  is an availability decision as much as a security one.
+
+If you want the honest short version: **the polyfill is a compatibility bridge,
+not a security upgrade.** Treat a `bound` session as "bound to a key that XSS can
+steal", and use `dbsc.bound: false` when you would rather have no binding than
+that one.
 
 ## Requirements
 
@@ -444,6 +513,15 @@ GuardedRoute transferRoute() {
 replayed against a modified payload. Use `withoutBody` for routes with no
 meaningful body.
 
+Something to be deliberate about: the helpers above accept tier `bound`, and
+`bound` is the **Web Crypto polyfill**, whose key page script can read. Guarding a
+route with them does not buy what "DBSC-protected" suggests if you are relying on
+theft resistance — see [Native vs. polyfill](#native-vs-polyfill-bound--read-this-before-choosing).
+There is no per-route way to demand the stronger native tier today; the way to
+refuse the polyfill outright is `dbsc.bound: false`, which stops `/dbsc-bound/*`
+from being served at all. That is a deliberate availability trade — a browser
+without native DBSC support then cannot bind.
+
 Declaring the route gives the guard filter something to enforce; **the filter itself
 still has to be in the chain serving that path**, which is the `appChain` bean in step
 2. Both halves are required, and a `GuardedRoute` with no guard filter in the matching
@@ -542,7 +620,7 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | Key | Default | Notes |
 |---|---|---|
 | `enabled` | `true` | `false` makes the whole feature a no-op |
-| `bound` | `true` | `false` runs native only; bound routes are not served |
+| `bound` | `true` | Whether the polyfill protocol (`/dbsc-bound/*`, spec 03) is served. It is **not** the W3C mechanism: its key is script-readable, so XSS makes it a signing oracle. `false` runs native only — see [Native vs. polyfill](#native-vs-polyfill-bound--read-this-before-choosing) |
 | `secure` | `true` | `__Host-` cookies + `Secure`. **Turn off only for localhost HTTP** |
 | `cookie-scope` | `host` | `site` enables multi-subdomain and requires `cookie-domain` |
 | `cookie-domain` | — | e.g. `example.com`; required for `site` scope |
@@ -633,6 +711,11 @@ extend this:
   deliberately excludes `Max-Age`, which the spec's match set does not include.
 - **Tier only climbs.** A session with a native key stays `dbsc` even after the
   polyfill co-registers, because the native binding is strictly stronger.
+- **The `bound` tier is the polyfill, not DBSC.** Its key lives in IndexedDB and
+  is readable by page script, so it trades theft resistance for reach. The guard
+  accepts it, and there is currently no per-route way to demand better —
+  `dbsc.bound: false` refuses the polyfill entirely. See
+  [Native vs. polyfill](#native-vs-polyfill-bound--read-this-before-choosing).
 
 ## License
 
