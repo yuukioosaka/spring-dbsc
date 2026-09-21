@@ -75,7 +75,42 @@ public class DbscFilter extends OncePerRequestFilter {
             return;
         }
 
+        offerBinding(request, response);
         chain.doFilter(request, response);
+    }
+
+    /**
+     * Advertises the registration header on any authenticated request, so an
+     * application never has to call {@link DbscService#bind} itself.
+     *
+     * <p>Deliberately unconditional otherwise: a browser that supports DBSC
+     * registers in response to the header and one that does not simply ignores it.
+     * No attempt is made to predict which is which, because the only thing that
+     * could predict it — {@code Sec-Fetch-Site} — describes the response's
+     * initiator, not whether this browser will act on the offer, and gating on it
+     * left OIDC and SAML callbacks permanently unbound.
+     *
+     * <p>Bounded by {@code dbsc.bind-attempts}: once the budget is spent this costs
+     * a cookie read and nothing else, so a browser that will never register (no
+     * DBSC support, or a user who declined) does not draw a challenge per request.
+     */
+    private void offerBinding(HttpServletRequest request, HttpServletResponse response) {
+        if (request.getUserPrincipal() == null) {
+            return;
+        }
+        if (!dbsc.hasRegisterBudget(request)) {
+            return;
+        }
+        if (!dbsc.sessionFor(request).isPresent()) {
+            // Not bound to an application session yet: nothing to key the record on.
+            return;
+        }
+        try {
+            dbsc.bindFor(request, response);
+        } catch (RuntimeException e) {
+            // A binding failure must never break the application's own request.
+            log.debug("DBSC bind skipped: {}", e.getMessage());
+        }
     }
 
     /**

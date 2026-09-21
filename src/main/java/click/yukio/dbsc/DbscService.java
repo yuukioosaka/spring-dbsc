@@ -78,17 +78,23 @@ public class DbscService {
      * with the registration header plus the two short-lived cookies. Chromium
      * then POSTs the registration JWS on its own, with no client-side code.
      *
-     * <p>If the response would be cross-site — the usual case behind an OIDC or
-     * SAML callback, where the request that produces this response was initiated
-     * by the identity provider — the registration header is withheld. Chromium
-     * makes DBSC requests inherit the initiator, so honouring it there would make
-     * the registration POST cross-site and drop the {@code SameSite=Lax} session
-     * cookie. Chromium records that failure as permanent and does not retry for the
-     * rest of the login, so the session would stay unbound. Call
-     * {@link #bind(String, String, long, HttpServletRequest, HttpServletResponse)}
-     * again from a same-site request (or navigate the browser through a page that
-     * does) to complete the registration; the session record itself is created
-     * either way.
+     * <p>Call it from any authenticated request. It is idempotent, and it is
+     * deliberately <strong>speculative</strong>: the server cannot know whether
+     * this browser supports DBSC, whether the response will be withheld from it,
+     * or whether the offer will simply be ignored. Nothing here inspects
+     * {@code Sec-Fetch-Site}: an earlier revision withheld the header on
+     * cross-site responses, on the theory that the registration POST would lose
+     * its {@code SameSite=Lax} cookie — but that made the offer depend on the
+     * browser re-initiating the request, which no server-side redirect can force,
+     * so behind an OIDC or SAML callback the header was never sent at all.
+     * Whether a registration succeeds is the browser's business.
+     *
+     * <p>The offer is bounded by {@code dbsc.bind-attempts}, counted in the
+     * pre-registration cookie. Once the budget is spent this method only keeps
+     * the session record up to date; it issues no challenge and sets no cookie,
+     * so a browser that will never register costs a fixed number of attempts
+     * rather than one per request. Use {@link #hasRegisterBudget(HttpServletRequest)}
+     * to check before calling if that matters.
      *
      * @param sessionId the application's session id (its own authenticated id)
      * @param userId    the authenticated user
@@ -103,9 +109,10 @@ public class DbscService {
                 sessionId, userId, ProtectionTier.NONE, now, now + effectiveTtlMs, 0);
         storage.setSession(session);
 
-        if (isCrossSite(request)) {
-            log.debug("DBSC bind for session {} deferred: the request is cross-site, so a"
-                    + " registration header here would be sent without the session cookie", sessionId);
+        int attempts = readBindAttempts(request);
+        if (attempts >= properties.getBindAttempts()) {
+            log.debug("DBSC bind for session {} advertises no registration header: "
+                    + "{} attempts already spent", sessionId, attempts);
             return;
         }
 
@@ -117,10 +124,40 @@ public class DbscService {
         response.addHeader(DbscHeaders.LEGACY_REGISTRATION, DbscHeaderCodec.buildRegistrationHeader(
                 "ES256", properties.getRegistrationPath(), challenge.jti()));
 
-        setCookie(response, cookieScope.registrationCookieName(), session.id(),
+        setCookie(response, cookieScope.registrationCookieName(), session.id() + "." + (attempts + 1),
                 properties.registrationCookieTtlMs());
         setCookie(response, cookieScope.challengeCookieName(), challenge.jti(),
                 properties.challengeTtlMs());
+    }
+
+    /**
+     * Whether a further registration offer is still worth making for this client.
+     *
+     * <p>Exposed so a caller can skip {@link #bind} entirely once the budget is
+     * spent, rather than paying for a storage write per request.
+     */
+    public boolean hasRegisterBudget(HttpServletRequest request) {
+        return readBindAttempts(request) < properties.getBindAttempts();
+    }
+
+    /**
+     * Re-advertises the registration header for an already-bound application
+     * session, using the record that {@link #sessionFor} resolves. This is what
+     * {@code DbscFilter} calls on every authenticated request, so a host never has
+     * to wire {@link #bind} into a login handler.
+     *
+     * <p>Only the existing record is refreshed: the user id and TTL come from the
+     * session the application already created, not from this request. That keeps
+     * the filter out of the session's lifecycle — it cannot extend a session's
+     * lifetime, only remind the browser that this session can be bound.
+     */
+    public void bindFor(HttpServletRequest request, HttpServletResponse response) {
+        Session session = sessionFor(request).orElse(null);
+        if (session == null) {
+            return;
+        }
+        long remainingMs = session.expiresAt() - clock.millis();
+        bind(session.id(), session.userId(), remainingMs, request, response);
     }
 
     /**
@@ -249,7 +286,47 @@ public class DbscService {
         if (binding.isPresent()) {
             return binding;
         }
-        return readCookie(request, cookieScope.registrationCookieName());
+        return readCookie(request, cookieScope.registrationCookieName())
+                .map(DbscService::sessionIdOf);
+    }
+
+    /**
+     * Splits the {@code <sessionId>.<attempts>} form the pre-registration cookie
+     * carries. A value with no counter (an older cookie, or one written by hand)
+     * is read as the session id itself.
+     */
+    private static String sessionIdOf(String registrationCookie) {
+        int dot = registrationCookie.lastIndexOf('.');
+        if (dot <= 0 || dot == registrationCookie.length() - 1) {
+            return registrationCookie;
+        }
+        String counter = registrationCookie.substring(dot + 1);
+        // Only strip it when it really is a counter; a session id may contain dots.
+        for (int i = 0; i < counter.length(); i++) {
+            if (!Character.isDigit(counter.charAt(i))) {
+                return registrationCookie;
+            }
+        }
+        return registrationCookie.substring(0, dot);
+    }
+
+    /** How many registration offers this client has already been given. */
+    private int readBindAttempts(HttpServletRequest request) {
+        return readCookie(request, cookieScope.registrationCookieName())
+                .map(DbscService::attemptsOf)
+                .orElse(0);
+    }
+
+    private static int attemptsOf(String registrationCookie) {
+        int dot = registrationCookie.lastIndexOf('.');
+        if (dot <= 0 || dot == registrationCookie.length() - 1) {
+            return 0;
+        }
+        try {
+            return Math.max(0, Integer.parseInt(registrationCookie.substring(dot + 1)));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     private String requireBinderSession(HttpServletRequest request) {
@@ -291,16 +368,6 @@ public class DbscService {
                 cookieScope,
                 includeSite,
                 properties);
-    }
-
-    /**
-     * Whether the request was initiated by another origin, per
-     * {@code Sec-Fetch-Site}. A browser that sends no such header is not assumed to
-     * be cross-site: the value is only trusted when it is present.
-     */
-    private boolean isCrossSite(HttpServletRequest request) {
-        String site = request.getHeader("Sec-Fetch-Site");
-        return "cross-site".equalsIgnoreCase(site);
     }
 
     private String readResponseHeader(HttpServletRequest request) {

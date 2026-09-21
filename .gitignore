@@ -41,3 +41,7 @@ __pycache__/
 
 # scratch
 commit-msg.tmp
+
+# Local OIDC demo launcher. Holds a live Entra client secret; the committed
+# reference is the ENTRA_* block in the README.
+start-oidc.sh

@@ -11,22 +11,22 @@
     </style>
 </head>
 <body>
-<h1>Binding this device…</h1>
-<p>You are signed in. Handing over to the DBSC bind step.</p>
+<h1>Signed in</h1>
+<p>This page is a plain landing page. It performs no binding of its own: the
+    registration header is advertised by <code>DbscFilter</code> on authenticated
+    requests, so the offer was already made before this page was rendered.</p>
 
 <div class="note">
-    <p>This page exists for one reason: the OIDC callback response is
-        <strong>cross-site</strong>, and Chromium makes DBSC requests inherit the
-        initiator. Returning <code>Secure-Session-Registration</code> straight from the
-        callback would make the registration POST cross-site, so the
-        <code>SameSite=Lax</code> session cookie would be dropped and Chromium would
-        never retry for the rest of the login.</p>
-    <p>The navigation below is issued by this page, which re-originates the request on
-        this site. <code>/oidc/bind</code> then binds against a session cookie that is
-        actually present.</p>
+    <p>The login callback response is <strong>cross-site</strong> — Chromium makes DBSC
+        requests inherit the initiator, and that initiator is the identity provider — so
+        a registration POST issued in response to it would arrive without the
+        <code>SameSite=Lax</code> session cookie.</p>
+    <p>This page exists because only a navigation the browser issues itself
+        re-originates the request on this site; a server-side redirect does not. From
+        here on, requests carry the session cookie and a registration offer can
+        succeed.</p>
 </div>
 
-<!-- No redirect from the server would do: a 302/303 keeps the cross-site initiator. -->
-<script>location.replace('/oidc/bind');</script>
+<p><a href="/app">Continue to the app</a></p>
 </body>
 </html>

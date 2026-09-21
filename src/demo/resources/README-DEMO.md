@@ -135,38 +135,37 @@ redirect URI to register on the app is Spring Security's callback path, **not**
 https://localhost:8443/login/oauth2/code/entraid
 ```
 
-`/oidc` is only the page the browser lands on after the callback, and is where
-the DBSC binding actually happens.
+`/oidc` is only the page the browser lands on after the callback. It does not call
+`bind()` itself — see the next section for why.
 
 `entraid` is only a local registration name; it is what appears in that callback
 URL. For a non-Entra provider, change the name (here and in the redirect URI) and
 set `ENTRA_ISSUER_URI`. The `user-name-attribute: sub` default suits any provider
 that issues a stable subject claim.
 
-### Why the binding is deferred to `/oidc/bind`
+### Why `/oidc` does not bind, and where the binding comes from
 
-This is the one non-obvious part, and it fails as a `403` that looks like a
-server bug. The OIDC callback response is **cross-site**: Chromium makes DBSC
-requests inherit the initiator of the request that caused them, so a registration
-header returned straight from the callback produces a registration POST whose
-`SameSite=Lax` session cookie is withheld. Chromium records that failure as
-permanent and never retries for the rest of the login.
+The OIDC callback response is **cross-site**: Chromium makes DBSC requests inherit the
+initiator of the request that caused them, so a registration header returned straight
+from the callback produces a registration POST whose `SameSite=Lax` session cookie is
+withheld. Chromium records that failure as permanent and never retries for the rest of
+the login. The first attempt is therefore wasted, and there is nothing the server can
+do about the *first* one.
 
-A server-side redirect does **not** reset the initiator — only a navigation the
-browser issues itself does. So:
+The binding still happens, because `DbscFilter` re-offers the registration header on
+any later request that reaches it with an authenticated session, as long as the login
+is still within its `dbsc.bind-attempts` budget (default `3`). In this demo the next
+request is the `GET /app` the user makes after landing, which is same-origin and
+carries the session cookie, so that is where the native registration completes. The
+budget is counted in the pre-registration cookie, so a fresh login starts it over.
 
-| Step | Route | `Sec-Fetch-Site` | What happens |
-|---|---|---|---|
-| 1 | callback → success handler | cross-site | redirects to `/oidc`; **no** `bind()` |
-| 2 | `GET /oidc` | cross-site | serves HTML whose script calls `location.replace('/oidc/bind')` |
-| 3 | `GET /oidc/bind` | same-origin | `bind()` — the cookie is present |
+No client-side code and no extra route are involved. Earlier versions of this demo
+had the page run `location.replace('/oidc/bind')` to manufacture a same-origin
+navigation; that is gone, and so is the server-side cross-site deferral that
+motivated it.
 
-`DbscService.bind()` handles half of this itself: on a request carrying
-`Sec-Fetch-Site: cross-site` it records the session but withholds the
-registration header, so Chromium is never told to make a doomed POST. It is then
-up to the application to call `bind()` again from a same-site request. Form login
-is unaffected — it binds from a POST the browser made to this origin, so the
-plain success-handler form is correct there.
+Form login is unaffected either way: it binds from a POST the browser made to this
+origin, so the session cookie is present on the very first offer.
 
 ### Resetting a poisoned browser
 

@@ -20,8 +20,9 @@ import java.io.IOException;
  *
  * <p>A server-side redirect does not reset the initiator either — only a
  * navigation the browser issues itself does. So this handler sends the browser to
- * an HTML page, and that page's script navigates to {@code /oidc/bind}, which is
- * same-site and therefore bindable. See README.md, "OIDC / oauth2Login()".
+ * {@code /oidc}, a page the browser navigates to on its own. The binding itself is
+ * left to {@code DbscFilter}, which offers the registration header on any
+ * authenticated request. See README.md, "OIDC / oauth2Login()".
  */
 class OidcLoginSuccessHandler implements AuthenticationSuccessHandler {
 
@@ -30,7 +31,7 @@ class OidcLoginSuccessHandler implements AuthenticationSuccessHandler {
             HttpServletRequest request, HttpServletResponse response, Authentication authentication)
             throws IOException, ServletException {
 
-        // The session must exist before /oidc/bind reads its id.
+        // The session must exist before /oidc reads its id.
         request.getSession();
 
         response.sendRedirect("/oidc");

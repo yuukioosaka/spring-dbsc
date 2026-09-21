@@ -88,9 +88,15 @@ class AutoConfigurationIntegrationTest {
         assertNotNull(response.getCookie(cookieScope.challengeCookieName()),
                 "bind() must set the challenge cookie the registration JWS is validated against");
 
-        // The host app's own session id is what got persisted under the hood.
-        String sessionId = response.getCookie(cookieScope.registrationCookieName()).getValue();
+        // The host app's own session id is what got persisted under the hood. The
+        // cookie carries it with the attempt counter appended, so only the id
+        // itself is asserted here; the counter is covered by BindAttemptsTest.
+        String sessionId = response.getContentAsString()
+                .replaceAll(".*\"sessionId\":\"([^\"]+)\".*", "$1");
         assertEquals(sessionId, storage.getSession(sessionId).orElseThrow().id());
+        assertTrue(response.getCookie(cookieScope.registrationCookieName()).getValue()
+                        .startsWith(sessionId + "."),
+                "the registration cookie must name the session");
     }
 
     /**
