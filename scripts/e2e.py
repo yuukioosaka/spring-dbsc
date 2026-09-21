@@ -323,15 +323,10 @@ def main():
     check("__Host- cookies are HttpOnly and Path=/",
           bool(reg_cookie and reg_cookie.has_nonstandard_attr("HttpOnly")
                and reg_cookie.path == "/"))
-    # The cookie carries the session id with the attempt counter appended:
-    # "<sessionId>.<attempts>". The id is what the session is keyed on; the counter
-    # bounds how many times the registration header is advertised for that id.
+    # The cookie carries the session id, which is what the session is keyed on.
     check("registration cookie names the servlet session id (coupling)",
-          reg_cookie is not None and reg_cookie.value.split(".")[0] == session_id,
+          reg_cookie is not None and reg_cookie.value == session_id,
           f"{reg_cookie.value if reg_cookie else None} vs {session_id}")
-    check("registration cookie carries a positive attempt counter",
-          bool(reg_cookie and re.fullmatch(r"[^.]+\.[1-9][0-9]*", reg_cookie.value)),
-          reg_cookie.value if reg_cookie else None)
     challenge = ch_cookie.value if ch_cookie else None
 
     # ------------------------------------------------- 2. native registration

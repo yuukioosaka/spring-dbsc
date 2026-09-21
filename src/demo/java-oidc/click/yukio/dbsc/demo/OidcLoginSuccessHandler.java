@@ -20,9 +20,8 @@ import java.io.IOException;
  *
  * <p>A server-side redirect does not reset the initiator either — only a
  * navigation the browser issues itself does. So this handler sends the browser to
- * {@code /oidc}, a page the browser navigates to on its own. The binding itself is
- * left to {@code DbscFilter}, which offers the registration header on any
- * authenticated request. See README.md, "OIDC / oauth2Login()".
+ * {@code /oidc}, a page the browser navigates to on its own, and the binding is made
+ * there. See README.md, "Binding behind OIDC or SAML".
  */
 class OidcLoginSuccessHandler implements AuthenticationSuccessHandler {
 
@@ -34,6 +33,7 @@ class OidcLoginSuccessHandler implements AuthenticationSuccessHandler {
         // The session must exist before /oidc reads its id.
         request.getSession();
 
+        // No bind() here: this response is the callback's, so it is cross-site.
         response.sendRedirect("/oidc");
     }
 }

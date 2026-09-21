@@ -73,13 +73,16 @@ public class DemoOidcConfig {
     /**
      * The application chain: OIDC login.
      *
-     * <p>{@code DbscFilter} is wired here too, and not only on the protocol chain.
-     * The same filter has two jobs: it answers the protocol routes, and it stamps
-     * the registration header onto ordinary authenticated responses. Only the first
-     * is path-scoped to {@code /dbsc/**}, so a chain that omits the filter still
-     * serves login and the app perfectly while never advertising DBSC — the browser
-     * has nothing to call {@code /dbsc/registration} for, and the session silently
-     * stays unbound.
+     * <p>{@code DbscFilter} answers the protocol routes, and those are only the
+     * paths it matches. It is wired here because the browser's registration POST
+     * must reach it before anything else in the chain can reject it: Spring
+     * Security's entry point answers {@code 401}, which Chromium treats as fatal on
+     * the refresh route and responds to by terminating the session.
+     *
+     * <p>The filter does <em>not</em> advertise the registration header on ordinary
+     * responses; the application does that by calling {@code bind()} itself. In this
+     * demo that call lives in {@link OidcBindPage}, which is the first same-site
+     * request after the callback.
      *
      * <p>Anchored on {@link CsrfFilter} for the same reason as the protocol chain:
      * the browser's registration POST must reach the filter before anything can

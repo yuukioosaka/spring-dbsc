@@ -89,12 +89,12 @@ public class DbscService {
      * so behind an OIDC or SAML callback the header was never sent at all.
      * Whether a registration succeeds is the browser's business.
      *
-     * <p>The offer is bounded by {@code dbsc.bind-attempts}, counted in the
-     * pre-registration cookie. Once the budget is spent this method only keeps
-     * the session record up to date; it issues no challenge and sets no cookie,
-     * so a browser that will never register costs a fixed number of attempts
-     * rather than one per request. Use {@link #hasRegisterBudget(HttpServletRequest)}
-     * to check before calling if that matters.
+     * <p>Whether a registration succeeds is the browser's business. If you have
+     * reason to believe the response will not reach the browser as a binding
+     * opportunity — an OIDC or SAML callback is the common case — call this again
+     * from a later, same-site request. See "Binding behind OIDC or SAML" in the
+     * README; retrying is a strategy the caller owns, not something this library
+     * does on your behalf.
      *
      * @param sessionId the application's session id (its own authenticated id)
      * @param userId    the authenticated user
@@ -109,13 +109,6 @@ public class DbscService {
                 sessionId, userId, ProtectionTier.NONE, now, now + effectiveTtlMs, 0);
         storage.setSession(session);
 
-        int attempts = readBindAttempts(request);
-        if (attempts >= properties.getBindAttempts()) {
-            log.debug("DBSC bind for session {} advertises no registration header: "
-                    + "{} attempts already spent", sessionId, attempts);
-            return;
-        }
-
         Challenge challenge = challenges.issue(session.id());
 
         response.addHeader(DbscHeaders.REGISTRATION, DbscHeaderCodec.buildRegistrationHeader(
@@ -124,40 +117,10 @@ public class DbscService {
         response.addHeader(DbscHeaders.LEGACY_REGISTRATION, DbscHeaderCodec.buildRegistrationHeader(
                 "ES256", properties.getRegistrationPath(), challenge.jti()));
 
-        setCookie(response, cookieScope.registrationCookieName(), session.id() + "." + (attempts + 1),
+        setCookie(response, cookieScope.registrationCookieName(), session.id(),
                 properties.registrationCookieTtlMs());
         setCookie(response, cookieScope.challengeCookieName(), challenge.jti(),
                 properties.challengeTtlMs());
-    }
-
-    /**
-     * Whether a further registration offer is still worth making for this client.
-     *
-     * <p>Exposed so a caller can skip {@link #bind} entirely once the budget is
-     * spent, rather than paying for a storage write per request.
-     */
-    public boolean hasRegisterBudget(HttpServletRequest request) {
-        return readBindAttempts(request) < properties.getBindAttempts();
-    }
-
-    /**
-     * Re-advertises the registration header for an already-bound application
-     * session, using the record that {@link #sessionFor} resolves. This is what
-     * {@code DbscFilter} calls on every authenticated request, so a host never has
-     * to wire {@link #bind} into a login handler.
-     *
-     * <p>Only the existing record is refreshed: the user id and TTL come from the
-     * session the application already created, not from this request. That keeps
-     * the filter out of the session's lifecycle — it cannot extend a session's
-     * lifetime, only remind the browser that this session can be bound.
-     */
-    public void bindFor(HttpServletRequest request, HttpServletResponse response) {
-        Session session = sessionFor(request).orElse(null);
-        if (session == null) {
-            return;
-        }
-        long remainingMs = session.expiresAt() - clock.millis();
-        bind(session.id(), session.userId(), remainingMs, request, response);
     }
 
     /**
@@ -279,54 +242,16 @@ public class DbscService {
      *
      * <p>A cookie proves nothing: it is attacker-supplied on any unauthenticated
      * request, so this only names a candidate session. The caller's proof check is
-     * what admits or rejects it.
+     * what admits or rejects it. The pre-registration cookie carries the session id
+     * as written by {@link #bind}, and is the candidate the registration route
+     * resolves when no binding cookie exists yet.
      */
     public Optional<String> resolveBinderSession(HttpServletRequest request) {
         Optional<String> binding = readCookie(request, cookieScope.bindingCookieName());
         if (binding.isPresent()) {
             return binding;
         }
-        return readCookie(request, cookieScope.registrationCookieName())
-                .map(DbscService::sessionIdOf);
-    }
-
-    /**
-     * Splits the {@code <sessionId>.<attempts>} form the pre-registration cookie
-     * carries. A value with no counter (an older cookie, or one written by hand)
-     * is read as the session id itself.
-     */
-    private static String sessionIdOf(String registrationCookie) {
-        int dot = registrationCookie.lastIndexOf('.');
-        if (dot <= 0 || dot == registrationCookie.length() - 1) {
-            return registrationCookie;
-        }
-        String counter = registrationCookie.substring(dot + 1);
-        // Only strip it when it really is a counter; a session id may contain dots.
-        for (int i = 0; i < counter.length(); i++) {
-            if (!Character.isDigit(counter.charAt(i))) {
-                return registrationCookie;
-            }
-        }
-        return registrationCookie.substring(0, dot);
-    }
-
-    /** How many registration offers this client has already been given. */
-    private int readBindAttempts(HttpServletRequest request) {
-        return readCookie(request, cookieScope.registrationCookieName())
-                .map(DbscService::attemptsOf)
-                .orElse(0);
-    }
-
-    private static int attemptsOf(String registrationCookie) {
-        int dot = registrationCookie.lastIndexOf('.');
-        if (dot <= 0 || dot == registrationCookie.length() - 1) {
-            return 0;
-        }
-        try {
-            return Math.max(0, Integer.parseInt(registrationCookie.substring(dot + 1)));
-        } catch (NumberFormatException e) {
-            return 0;
-        }
+        return readCookie(request, cookieScope.registrationCookieName());
     }
 
     private String requireBinderSession(HttpServletRequest request) {

@@ -199,9 +199,12 @@ Security component and registers as a plain servlet filter.
 #### OIDC / `oauth2Login()`
 
 DBSC binds a session that already exists, so it composes with any authentication
-mechanism. Put `bind()` in a success handler — a redirect flow never reaches a
-controller, so a success handler is the only place that sees the request, the response
-and the authenticated principal together:
+mechanism. For OIDC and SAML, however, **the obvious place to bind does not work** —
+read [Binding behind OIDC or SAML](#binding-behind-oidc-or-saml-why-the-first-offer-fails)
+before wiring this up, because the fix is application code and the failure is silent.
+
+The shape below is the *retry* variant: the callback only decides where to land, and
+the binding happens on the first ordinary same-site request.
 
 ```java
 @Configuration
@@ -215,13 +218,23 @@ public class OidcSecurityConfig {
                         .requestMatchers("/login/**", "/oauth2/**").permitAll()
                         .requestMatchers("/api/transfer").authenticated()
                         .anyRequest().authenticated())
-                .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) -> {
-                    dbsc.bind(request.getSession().getId(), auth.getName(),
-                              86_400_000L, request, response);
-                    response.sendRedirect("/");
-                }));
+                .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) ->
+                        // No bind() here: this response is cross-site, so the
+                        // registration POST it triggers loses the session cookie.
+                        response.sendRedirect("/")));
         return http.build();
     }
+}
+```
+
+Then bind from a route the browser reaches on its own, for example the landing page:
+
+```java
+@GetMapping("/")
+public String home(HttpServletRequest request, HttpServletResponse response, Model model) {
+    dbsc.bind(request.getSession().getId(), request.getUserPrincipal().getName(),
+              86_400_000L, request, response);
+    return "home";
 }
 ```
 
@@ -230,49 +243,115 @@ public class OidcSecurityConfig {
 already exist at that point. In a success handler it does, because authentication
 created it.
 
-**The user id must not come from a mutable claim.** `auth.getName()` maps to whatever
-the provider's `user-name-attribute` names, and for OIDC that should be `sub`. Using
-`preferred_username` or `email` instead makes the binding change owner if the address
-does — see `DemoOidcConfig.subjectAsName()` for the override.
+**The user id must not come from a mutable claim.** Whichever claim you read, do not
+take it from `preferred_username` or `email`: the binding would change owner if the
+address did. The OIDC `sub` claim is the stable choice — for `oauth2Login()` that
+means setting `user-name-attribute: sub`, which is what `auth.getName()` then returns.
 
 If your app has no `HttpSession`, bind to whatever opaque id you already mint per
 client — as in [the stateless example](#stateless-api--bearer-tokens) — rather than
 inventing one for this.
 
-##### The registration POST is speculative, and bounded
+##### Binding behind OIDC or SAML: why the first offer fails
 
-A registration offer is a guess. The server cannot know whether a browser supports
-DBSC, whether the response will reach it, or whether the offer will be ignored — so
-the offer is made and the outcome accepted either way. There is no retry loop and no
-attempt to predict the browser's behaviour.
+This is the one part of DBSC integration that is not a one-liner, and it fails in a way
+that looks like a server bug. Worth understanding before choosing a strategy.
 
-That guess is bounded by **`dbsc.bind-attempts`** (default `3`), counted in the
-pre-registration cookie. If the header is advertised this many times without a
-registration arriving, the server stops offering it and issues no further challenges
-for that login. Raising it buys more chances at the cost of a challenge per extra
-request; `0` disables the offer entirely.
+Chromium makes a DBSC request inherit the **initiator** of the request that produced
+it. For an OIDC or SAML login, the response carrying your `Secure-Session-Registration`
+header is the **callback** — and the callback's initiator is the identity provider,
+not your site. So the registration POST Chromium fires in response counts as
+**cross-site**, and Chromium withholds your `SameSite=Lax` session cookie from it:
 
-Two consequences worth knowing:
+```
+GET  /login/oauth2/code/entraid   302   session cookie set
+POST /dbsc/registration           403   session cookie NOT sent
+```
 
-- **Behind an OIDC or SAML callback the first offer can be wasted.** Chromium makes
-  DBSC requests inherit the **initiator** of the request that produced them, and a
-  callback's initiator is the identity provider. A registration POST issued in
-  response to that response counts as cross-site, so the `SameSite=Lax` session
-  cookie is withheld and Chromium logs
-  `Registration returned challenge error response code` / `POST /dbsc/registration -> 403`.
-  A server-side redirect (`302`/`303`) does not reset the initiator — only a
-  navigation the browser issues itself does. The remaining attempts are what save
-  the login: a later authenticated request from the same session carries the cookie,
-  and the offer there succeeds.
-- **Once a browser has registered, further offers cost it nothing.** A session that
-  reaches `tier: dbsc` ignores the header, and the budget simply expires unused.
+Your registration route sees a request with no session and answers `403`. Worse,
+Chromium records that failure as permanent and does not retry for the rest of that
+login, so the session stays at `tier: none` no matter how long it lives.
 
-`DbscFilter` also re-offers the header itself on any authenticated request, so an
-application that never calls `bind()` still gets registration so long as the session
-record exists — the filter reuses the record's own user id and expiry rather than
-inventing either. Calling `bind()` from the login route is still the recommended
-entry point: it is what creates that record, and it is where the application's TTL
-policy belongs.
+A server-side redirect does **not** help: `302`/`303` to your own page keeps the
+callback as the initiator. Only a navigation the *browser* issues on its own — a
+click, a page load, a script-driven location change — resets it.
+
+**This library does not work around it.** `bind()` advertises the header on whatever
+request you call it from and does not inspect `Sec-Fetch-Site`; deciding when to try
+again is application policy, and it depends on your login flow. Two strategies work;
+both are the app's code, not the library's.
+
+###### Strategy 1: bounce through a page the browser navigates to
+
+Do not bind in the callback. Bind from a same-site page the browser reaches by
+trusting a navigation it issued itself:
+
+```java
+// The success handler only decides where to land. No bind() here.
+.oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) ->
+        response.sendRedirect("/post-login")))
+```
+
+```html
+<!-- Templates, not a redirect: the script issues a navigation the browser owns. -->
+<script>location.replace('/post-login/bind')</script>
+```
+
+```java
+@GetMapping("/post-login/bind")
+public void bind(HttpServletRequest request, HttpServletResponse response) throws IOException {
+    dbsc.bind(request.getSession().getId(), request.getUserPrincipal().getName(),
+              86_400_000L, request, response);
+    response.sendRedirect("/");            // registration lands: same-site, cookie present
+}
+```
+
+The extra hop is the cost, and it reveals the session id in a URL. It also adds a
+page the user passes through, which is why it is the fallback rather than the
+default.
+
+###### Strategy 2: retry from any same-site route the app already has
+
+Do not special-case the login at all. Call `bind()` from the first ordinary request
+the user makes after landing — `/`, a dashboard, an API call. That request is
+same-site, so its cookie is present and registration succeeds:
+
+```java
+@GetMapping("/")
+public String home(HttpServletRequest request, HttpServletResponse response, Model model) {
+    // Idempotent, and cheap when the session is already bound: bind() records the
+    // session again and re-advertises the header. Chromium ignores the offer once
+    // it has registered.
+    dbsc.bind(request.getSession().getId(), request.getUserPrincipal().getName(),
+              86_400_000L, request, response);
+    return "home";
+}
+```
+
+But the same trap applies at one remove: if `/` is *itself* reached by a redirect
+from the callback, that navigation is still the provider's. Strategy 2 needs the user
+to arrive by a route the browser initiates — a bookmark, a typed URL, clicking a link
+on a page. In a flow that ends with an automatic redirect, that may never happen, and
+the session quietly stays unbound. **If you cannot point at the browser-initiated
+navigation in your flow, use Strategy 1.**
+
+###### Choosing, and the cost of retrying
+
+| | Strategy 1 | Strategy 2 |
+|---|---|---|
+| Extra hop | yes, one | no |
+| Needs a browser-initiated navigation | yes, guaranteed by the script | yes, and you must find one |
+| Works with a pure redirect chain | yes | **no** |
+| Bind location | a dedicated route | an existing route |
+
+Whichever you pick, keep the call **idempotent and unbudgeted** — that is what
+`bind()` is. It costs one challenge and two cookie writes per call. Do not put it on a
+hot path, and do not call it from an unauthenticated route: `bind()` trusts its
+arguments, and `getUserPrincipal()` is what makes the session id trustworthy.
+
+For the form-login case none of this applies. Form login owns the POST the browser
+made to your own origin, so the callback *is* same-site and a single `bind()` in the
+success handler is complete.
 
 #### Form login (password)
 
@@ -340,11 +419,12 @@ FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
 Details and the reasoning are in
 [Wiring it into your own app](#wiring-it-into-your-own-app); the short version:
 
-- **`dbsc.bind(sessionId, userId, ttlMillis, request, response)`** — at the end of your
-  login handler. Binding is idempotent per session; the browser does the rest of the
-  native registration on its own. If your login runs behind a cross-site redirect
-  (OIDC, SAML), the header may not survive that first response — the filter re-offers
-  it on later authenticated requests, bounded by `bind-attempts`.
+- **`dbsc.bind(sessionId, userId, ttlMillis, request, response)`** — from an
+  authenticated request, usually at the end of your login flow. Binding is idempotent
+  per session; the browser does the rest of the native registration on its own. Behind
+  an OIDC or SAML callback the first call cannot succeed — see
+  [Binding behind OIDC or SAML](#binding-behind-oidc-or-saml-why-the-first-offer-fails)
+  for where to call it instead.
 - **`dbsc.terminate(...)`** — on logout, so the browser forgets the binding instead of
   retrying against a dead session.
 - **`dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)`** — the DBSC state your own
@@ -442,13 +522,13 @@ cookies, and adds `Secure-Session-Registration`. Chromium then calls
 `/dbsc/registration` on its own within about a second — there is no client code to
 write for the native path.
 
-**This call is optional but recommended.** `DbscFilter` also offers the header on any
-request that reaches it with an authenticated session, so a login route you never
-touch still gets a binding. Calling `bind()` yourself is still the better choice, for
-two reasons: it records the session with *your* lifetime rather than the filter's
-`session-ttl` default, and it keys the session by the id you choose instead of
-`principal.getName()`. The filter's offer stops after `bind-attempts` (default `3`)
-per login; a `bind()` call has no such budget.
+**This call is required for a binding to exist.** `DbscFilter` handles the DBSC
+protocol routes only — it never adds the registration header to your application's
+own responses, so a login flow that never calls `bind()` produces no binding at all.
+Call it from an authenticated request, and call it again from a same-site one if the
+first attempt was lost (see the OIDC note above). The call is idempotent, so a route
+that binds on every request is fine; it is not free, though — each call issues a
+challenge and rewrites two cookies, so keep it off hot paths.
 
 On logout, call `dbsc.terminate(...)` so the browser forgets the binding
 immediately instead of retrying against a dead session:
@@ -587,7 +667,6 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `challenge-ttl` | `5m` | lifetime of a challenge JTI |
 | `refresh-grace` | `30s` | softens the freshness poll across a refresh |
 | `session-ttl` | `7d` | default lifetime applied by `bind()` when the caller does not set one |
-| `bind-attempts` | `3` | how many times a login may advertise the registration header before the offer is given up; `0` disables the filter's speculative offer |
 | `rate-limit.enabled` | `true` | |
 | `rate-limit.capacity` | `30` | per IP, per window |
 | `rate-limit.failure-capacity` | `15` | **failed** attempts per IP, per window — trips long before `capacity` does |

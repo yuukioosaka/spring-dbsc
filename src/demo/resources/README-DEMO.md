@@ -143,29 +143,32 @@ URL. For a non-Entra provider, change the name (here and in the redirect URI) an
 set `ENTRA_ISSUER_URI`. The `user-name-attribute: sub` default suits any provider
 that issues a stable subject claim.
 
-### Why `/oidc` does not bind, and where the binding comes from
+### Why `/oidc` does not bind
 
 The OIDC callback response is **cross-site**: Chromium makes DBSC requests inherit the
-initiator of the request that caused them, so a registration header returned straight
-from the callback produces a registration POST whose `SameSite=Lax` session cookie is
-withheld. Chromium records that failure as permanent and never retries for the rest of
-the login. The first attempt is therefore wasted, and there is nothing the server can
-do about the *first* one.
+initiator of the request that caused them, and the initiator here is the identity
+provider. A registration header returned straight from the callback therefore
+produces a registration POST whose `SameSite=Lax` session cookie is withheld, and
+Chromium records that failure as permanent and never retries for the rest of the
+login.
 
-The binding still happens, because `DbscFilter` re-offers the registration header on
-any later request that reaches it with an authenticated session, as long as the login
-is still within its `dbsc.bind-attempts` budget (default `3`). In this demo the next
-request is the `GET /app` the user makes after landing, which is same-origin and
-carries the session cookie, so that is where the native registration completes. The
-budget is counted in the pre-registration cookie, so a fresh login starts it over.
+So this demo does not bind from the callback. It uses **Strategy 2** from the README:
+`bind()` is called from `/app`, the first ordinary same-site request the user makes
+after landing. That request carries the session cookie, so the native registration
+completes there. `GET /app` happens to be the very next thing the page does, so in
+practice the binding is established about as fast as the callback would have been.
 
-No client-side code and no extra route are involved. Earlier versions of this demo
-had the page run `location.replace('/oidc/bind')` to manufacture a same-origin
-navigation; that is gone, and so is the server-side cross-site deferral that
-motivated it.
+`DbscFilter` plays no part in this. It serves the protocol routes only and never adds
+the registration header to an application response, so the `bind()` calls in
+`DemoOidcConfig` and `DemoFormLoginConfig` are the whole mechanism.
 
-Form login is unaffected either way: it binds from a POST the browser made to this
-origin, so the session cookie is present on the very first offer.
+The alternative — the strategy this demo deliberately does *not* use — is to have the
+page issue `location.replace('/post-login/bind')` and bind there, which resets the
+initiator at the cost of an extra hop. See the README for when that is necessary:
+especially, when your flow has no browser-initiated navigation to hang Strategy 2 on.
+
+Form login never hits any of this: it binds from a POST the browser made to this
+origin, so the success handler is the right and only place.
 
 ### Resetting a poisoned browser
 

@@ -54,21 +54,6 @@ public class DbscProperties {
     /** Lifetime of the pre-registration cookie that carries the session id. */
     private Duration registrationCookieTtl = Duration.ofHours(24);
 
-    /**
-     * How many times a single pre-registration window may advertise the
-     * registration header.
-     *
-     * <p>Needed because the header is offered speculatively: the server cannot
-     * know whether this browser supports DBSC, is behind a cross-site callback
-     * whose cookies will be withheld, or simply ignored the offer. Without a
-     * budget every authenticated request would issue another challenge and
-     * rewrite two cookies forever, for a client that may never register.
-     *
-     * <p>The count travels in the pre-registration cookie, so it resets with the
-     * login rather than being enforced globally.
-     */
-    private int bindAttempts = 3;
-
     /** Lifetime of a challenge JTI. */
     private Duration challengeTtl = Duration.ofMinutes(5);
 
@@ -193,14 +178,6 @@ public class DbscProperties {
 
     public void setBindingCookieTtl(Duration bindingCookieTtl) {
         this.bindingCookieTtl = bindingCookieTtl;
-    }
-
-    public int getBindAttempts() {
-        return bindAttempts;
-    }
-
-    public void setBindAttempts(int bindAttempts) {
-        this.bindAttempts = bindAttempts;
     }
 
     public Duration getRegistrationCookieTtl() {
