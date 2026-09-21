@@ -13,7 +13,7 @@
 
   <groupId>click.yukio.dbsc</groupId>
   <artifactId>spring-dbsc</artifactId>
-  <version>0.3.0</version>
+  <version>0.4.0</version>
   <name>spring-dbsc</name>
   <description>Embeddable Spring Boot implementation of Device Bound Session Credentials (DBSC Toolkit Protocol 1.0)</description>
   <url>https://github.com/yuukioosaka/spring-dbsc</url>
