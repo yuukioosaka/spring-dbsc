@@ -140,18 +140,41 @@ public final class SignatureVerifier {
         }
     }
 
-    /** Strips any private material so a stored/echoed key is public-only. */
+    /**
+     * Reduces a JWK to the public members of its declared key type, so a stored or
+     * echoed key can never carry anything an importer could be persuaded to use.
+     *
+     * <p>This is an <strong>allowlist, deliberately</strong>. Dropping a known set of
+     * private fields is not enough: a JWK may carry members belonging to a
+     * <em>different</em> key type (an RSA {@code n}/{@code e} alongside
+     * {@code kty:"EC"}), and a denylist would let those survive. Since
+     * {@link SignatureVerifier#verifyJwsSignature} selects its importer from the
+     * algorithm named in an attacker-controlled JWS header, anything that survives
+     * here can later be selected as a verification key. Keeping only the members
+     * that the declared {@code kty} actually uses removes the discrepancy.
+     */
     public static Map<String, Object> publicOnly(Map<String, Object> jwk) {
-        java.util.LinkedHashMap<String, Object> out = new java.util.LinkedHashMap<>();
-        for (Map.Entry<String, Object> entry : jwk.entrySet()) {
-            switch (entry.getKey()) {
-                case "d", "p", "q", "dp", "dq", "qi", "k", "key_ops", "ext", "use", "alg", "kid" -> {
-                    // private or advisory fields are dropped
-                }
-                default -> out.put(entry.getKey(), entry.getValue());
-            }
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        if (jwk == null) {
+            return out;
+        }
+        String kty = Json.string(jwk, "kty");
+        out.put("kty", kty);
+        if ("EC".equals(kty)) {
+            copy(jwk, out, "crv");
+            copy(jwk, out, "x");
+            copy(jwk, out, "y");
+        } else if ("RSA".equals(kty)) {
+            copy(jwk, out, "n");
+            copy(jwk, out, "e");
         }
         return out;
+    }
+
+    private static void copy(Map<String, Object> from, Map<String, Object> to, String key) {
+        if (from.containsKey(key)) {
+            to.put(key, from.get(key));
+        }
     }
 
     /**

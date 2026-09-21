@@ -101,6 +101,23 @@ public final class DbscJws {
         }
 
         String jti = requireJti(payload);
+
+        // The algorithm must come from the key the server stored, never from the
+        // JWS header. Dispatching on the header alone lets an attacker sign with a
+        // key type of their choosing: a stored EC key that also carried RSA n/e
+        // members would otherwise be importable as RSA, and a stolen cookie with
+        // no device key at all could then be refreshed indefinitely. Registration
+        // pins this the same way; the check has to be repeated here because the
+        // stored key is read back from storage on every refresh.
+        Jwk.validate(storedJwk);
+        DbscAlgorithm expected = Jwk.detectAlgorithm(storedJwk);
+        if (expected != algorithm) {
+            throw DbscException.unknownAlgorithm(
+                    "algorithm " + algorithm.wireValue()
+                            + " does not match the registered key (expected "
+                            + expected.wireValue() + ")");
+        }
+
         if (!SignatureVerifier.verifyJwsSignature(
                 storedJwk, algorithm, segments.signature(), segments.signingInput())) {
             throw DbscException.signatureInvalid("JWS signature verification failed");
