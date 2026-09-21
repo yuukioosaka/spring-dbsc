@@ -21,6 +21,8 @@ public enum DbscErrorCode {
     /** Legacy, kind-agnostic code retained for back-compat. */
     KEY_NOT_FOUND,
     SESSION_NOT_FOUND,
+    /** No session record for the cookie, so nothing has been registered yet. */
+    SESSION_NOT_REGISTERED,
     SESSION_ALREADY_REGISTERED,
     RATE_LIMITED,
     MISSING_PROOF,

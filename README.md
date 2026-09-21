@@ -194,27 +194,34 @@ exist at that point. In a success handler it does, because authentication create
 
 ##### Caveat: call `bind()` from a same-site page, not from the callback
 
-The snippet above looks correct and will still fail on Chromium, with the browser
-reporting:
+Behind an OIDC or SAML callback the response above is cross-site, and Chromium will
+report:
 
 ```
 Registration returned challenge error response code
 POST /dbsc/registration -> 403
 ```
 
-and the server logging `SESSION_NOT_FOUND -> 403: no DBSC session cookie on the request`
-from `bind()`. The cause is a DBSC-specific rule, not a Spring bug:
+The cause is a DBSC-specific rule, not a Spring bug:
 
 > Chromium makes DBSC requests inherit the **initiator** of the request that caused
-> them, and DBSC cookies are subject to `SameSite`. The OIDC callback response is
+> them, and DBSC cookies are subject to `SameSite`. The login callback response is
 > produced in a request whose initiator is the identity provider
 > (`login.microsoftonline.com`), so the registration POST that Chrome issues in
 > response to the `Secure-Session-Registration` header counts as **cross-site**, and
-> the `SameSite=Lax` session cookie is withheld.
+> the `SameSite=Lax` session cookie is withheld — hence the `403`.
+>
+> Chromium records that failure and does not retry for the rest of the login, so the
+> session stays unbound.
 
 A server-side redirect (`302`/`303`) does **not** reset the initiator — the new response
-still inherits it. Only a **client-side navigation** does. So the fix is to defer the
-binding by one browser-initiated hop:
+still inherits it. Only a **client-side navigation** does.
+
+`bind()` already handles half of this: when the request carries
+`Sec-Fetch-Site: cross-site` it records the session but **withholds the registration
+header**, so Chromium is never told to make a doomed POST. It is then up to the
+application to call `bind()` once more from a same-site request. Do that by deferring
+the binding by one browser-initiated hop:
 
 ```java
 // 1. Success handler: redirect to an HTML page, do NOT bind here.
@@ -229,7 +236,7 @@ binding by one browser-initiated hop:
 ```
 
 ```java
-// 3. Same-site, authenticated GET: now bind, then hand over to the app.
+// 3. Same-site, authenticated GET: bind, then hand over to the app.
 @GetMapping("/oidc/bind")
 public void bind(Authentication auth, HttpServletRequest request,
                  HttpServletResponse response) throws IOException {

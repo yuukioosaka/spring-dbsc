@@ -382,18 +382,18 @@ class HttpFlowTest {
     }
 
     @Test
-    @DisplayName("bound routes: a cookie naming a session that does not exist is refused")
+    @DisplayName("bound routes: a forged cookie cannot install a key, and refresh is refused")
     void boundRoutesRequireAnExistingSession() throws Exception {
         // A cookie is attacker-supplied on an unauthenticated route, so a session id
-        // it names proves nothing. Without the storage lookup these routes would
-        // mint challenges and accept registrations for a session that never existed.
+        // it names proves nothing. Registration itself is lazy — whether the browser
+        // has registered is unknowable up front — so what has to hold is that a
+        // forged cookie cannot get a key installed, and that a proof-bearing route
+        // refuses outright.
         var forged = new jakarta.servlet.http.Cookie(cookieScope.bindingCookieName(), "sess_does_not_exist");
 
         MvcResult challenge = mvc.perform(get("/dbsc-bound/challenge").cookie(forged)).andReturn();
-        assertEquals(403, challenge.getResponse().getStatus(),
-                "a sessionless challenge request is refused, as if no cookie were sent");
-        assertEquals("no session", Json.parseObject(
-                challenge.getResponse().getContentAsString()).get("error"));
+        assertEquals(200, challenge.getResponse().getStatus(),
+                "a challenge is issued so a first registration can proceed");
 
         MvcResult registration = mvc.perform(post("/dbsc-bound/registration")
                         .contentType("application/json")
@@ -403,8 +403,8 @@ class HttpFlowTest {
                                 "challenge", "AAAA")))
                         .cookie(forged))
                 .andReturn();
-        assertEquals(400, registration.getResponse().getStatus(),
-                "the session is absent, so the request is a client error before any proof is judged");
+        assertEquals(403, registration.getResponse().getStatus(),
+                "the challenge is not one this server issued, so no key is installed");
 
         MvcResult refresh = mvc.perform(post("/dbsc-bound/refresh")
                         .contentType("application/json")
@@ -412,7 +412,8 @@ class HttpFlowTest {
                                 "challenge", "AAAA", "signature", "AAAA", "timestamp", 1L)))
                         .cookie(forged))
                 .andReturn();
-        assertEquals(400, refresh.getResponse().getStatus());
+        assertEquals(403, refresh.getResponse().getStatus(),
+                "a refresh verifies a signature, so an unknown session is a rejected proof");
     }
 
     @Test

@@ -18,6 +18,8 @@ import click.yukio.dbsc.protocol.SessionConfig;
 import click.yukio.dbsc.ratelimit.RateLimiter;
 import click.yukio.dbsc.replay.ProofReplayCache;
 import click.yukio.dbsc.web.OriginResolver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -38,6 +40,8 @@ import java.util.Optional;
  * session).
  */
 public class DbscService {
+
+    private static final Logger log = LoggerFactory.getLogger(DbscService.class);
 
     private final DbscProperties properties;
     private final StorageAdapter storage;
@@ -79,6 +83,18 @@ public class DbscService {
      * with the registration header plus the two short-lived cookies. Chromium
      * then POSTs the registration JWS on its own, with no client-side code.
      *
+     * <p>If the response would be cross-site — the usual case behind an OIDC or
+     * SAML callback, where the request that produces this response was initiated
+     * by the identity provider — the registration header is withheld. Chromium
+     * makes DBSC requests inherit the initiator, so honouring it there would make
+     * the registration POST cross-site and drop the {@code SameSite=Lax} session
+     * cookie. Chromium records that failure as permanent and does not retry for the
+     * rest of the login, so the session would stay unbound. Call
+     * {@link #bind(String, String, long, HttpServletRequest, HttpServletResponse)}
+     * again from a same-site request (or navigate the browser through a page that
+     * does) to complete the registration; the session record itself is created
+     * either way.
+     *
      * @param sessionId the application's session id (its own authenticated id)
      * @param userId    the authenticated user
      * @param ttlMs     lifetime of the coupled application session in ms; a
@@ -94,6 +110,12 @@ public class DbscService {
         Session session = new Session(
                 sessionId, userId, ProtectionTier.NONE, now, now + effectiveTtlMs, 0);
         storage.setSession(session);
+
+        if (isCrossSite(request)) {
+            log.debug("DBSC bind for session {} deferred: the request is cross-site, so a"
+                    + " registration header here would be sent without the session cookie", sessionId);
+            return;
+        }
 
         Challenge challenge = challenges.issue(session.id());
 
@@ -280,24 +302,29 @@ public class DbscService {
     }
 
     /**
-     * {@code GET /dbsc-bound/challenge}: 403 when there is no session.
+     * {@code GET /dbsc-bound/challenge}: 403 when the request carries no session
+     * identifier.
      *
      * <p>The sessionless case is not an exception: spec 03 pins the exact body
      * {@code {"error":"no session"}}, so it is returned here for the controller to
      * render alongside the 403 status.
+     *
+     * <p>A cookie naming a session with no record is treated the same as no cookie:
+     * registration is lazy, so "not registered yet" is the normal first state of
+     * every session and must not be an error. The challenge issued here is bound to
+     * the session identifier, and registration re-validates it.
      */
     public BoundChallengeResult boundChallenge(HttpServletRequest request, HttpServletResponse response) {
-        // A cookie naming a session the server never issued is a 403, not a 400:
-        // this route reports "no session" in the body and does not distinguish the
-        // two cases to the caller beyond that.
-        String sessionId;
-        try {
-            sessionId = requireExistingSession(request, false);
-        } catch (DbscException e) {
+        // Registration is lazy: the browser may not have registered yet, so a
+        // cookie naming a session the server has no record of just means "not
+        // registered". Both cases answer the same way, and the caller decides how
+        // to render them.
+        Optional<String> sessionId = resolveBinderSession(request);
+        if (sessionId.isEmpty()) {
             return new BoundChallengeResult(Map.of("error", "no session"), false);
         }
 
-        Challenge challenge = challenges.issue(sessionId);
+        Challenge challenge = challenges.issue(sessionId.get());
         setCookie(response, cookieScope.challengeCookieName(), challenge.jti(), properties.challengeTtlMs());
         return new BoundChallengeResult(Map.of("challenge", challenge.jti()), true);
     }
@@ -320,7 +347,9 @@ public class DbscService {
 
         // Missing cookie or field is 400 here (spec 03/08), unlike every other
         // DBSC failure: it is a client bug, not a rejected proof.
-        String sessionId = requireExistingSession(request, true);
+        // The browser may be registering for the first time, so the record is
+        // deliberately not required to exist yet: registration is what creates it.
+        String sessionId = requireBinderSession(request, true);
         if (publicKey == null || signature == null || signature.isEmpty()
                 || challengeJti == null || challengeJti.isEmpty()) {
             throw DbscException.badRequest(
@@ -340,7 +369,10 @@ public class DbscService {
         requireBoundEnabled();
         checkRefreshRateLimit(request);
 
-        String sessionId = requireExistingSession(request, true);
+        // A refresh carries a signature over a challenge this server issued, so an
+        // unknown session is a forged cookie: a rejected proof (403), not a client
+        // bug.
+        String sessionId = requireRegisteredSession(request, false);
         if (signature == null || signature.isEmpty() || challengeJti == null || challengeJti.isEmpty()
                 || timestamp == null) {
             throw DbscException.badRequest("bound refresh requires challenge, signature and timestamp");
@@ -380,9 +412,8 @@ public class DbscService {
      * registration cookie for the bound protocol's pre-binding requests.
      *
      * <p>A cookie proves nothing: it is attacker-supplied on any unauthenticated
-     * request, so this only names a candidate session. Callers on the bound routes
-     * must follow it with {@link #requireExistingSession}, which is what the
-     * reference implementation does too.
+     * request, so this only names a candidate session. The caller's proof check is
+     * what admits or rejects it.
      */
     public Optional<String> resolveBinderSession(HttpServletRequest request) {
         Optional<String> binding = readCookie(request, cookieScope.bindingCookieName());
@@ -390,30 +421,6 @@ public class DbscService {
             return binding;
         }
         return readCookie(request, cookieScope.registrationCookieName());
-    }
-
-    /**
-     * Rejects a binder that names no session, mirroring the reference's bound
-     * routes, which look the session up before doing anything with it.
-     *
-     * <p>Without this a cookie value the server never issued is enough to mint
-     * challenges for, and install a bound key on, a session that does not exist.
-     * The reference's {@code handleBoundStateRoute}/{@code handleBoundChallengeRoute}
-     * short-circuit on a missing session; this closes the same gap.
-     *
-     * @param clientError when true this is a 400, matching the bound registration
-     *                    and refresh routes, which treat a bad session as a client
-     *                    bug rather than a rejected proof
-     */
-    private String requireExistingSession(HttpServletRequest request, boolean clientError) {
-        String sessionId = requireBinderSession(request, clientError);
-        if (storage.getSession(sessionId).isEmpty()) {
-            throw clientError
-                    ? DbscException.badRequest("no such DBSC session")
-                    : new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
-                            "no such DBSC session");
-        }
-        return sessionId;
     }
 
     private String requireBinderSession(HttpServletRequest request) {
@@ -431,6 +438,27 @@ public class DbscService {
                         ? DbscException.badRequest("no DBSC session cookie on the request")
                         : new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
                                 "no DBSC session cookie on the request"));
+    }
+
+    /**
+     * Like {@link #requireBinderSession(HttpServletRequest, boolean)}, but also
+     * refuses a cookie whose value was never issued a record.
+     *
+     * <p>Used where the request carries a proof to verify: there, an unknown
+     * session is indistinguishable from a forged cookie, so it is a rejected proof
+     * (403) rather than a client bug (400). Registration is deliberately excluded —
+     * whether the browser has registered is unknowable up front, so routes that
+     * lead to a registration must not require a record to exist yet.
+     */
+    private String requireRegisteredSession(HttpServletRequest request, boolean clientError) {
+        String sessionId = requireBinderSession(request, clientError);
+        if (storage.getSession(sessionId).isEmpty()) {
+            throw clientError
+                    ? DbscException.badRequest("no such DBSC session")
+                    : new DbscException(DbscErrorCode.SESSION_NOT_REGISTERED,
+                            "no such DBSC session");
+        }
+        return sessionId;
     }
 
     /** The session's tier as reported to the application. */
@@ -455,6 +483,16 @@ public class DbscService {
                 cookieScope,
                 includeSite,
                 properties);
+    }
+
+    /**
+     * Whether the request was initiated by another origin, per
+     * {@code Sec-Fetch-Site}. A browser that sends no such header is not assumed to
+     * be cross-site: the value is only trusted when it is present.
+     */
+    private boolean isCrossSite(HttpServletRequest request) {
+        String site = request.getHeader("Sec-Fetch-Site");
+        return "cross-site".equalsIgnoreCase(site);
     }
 
     private String readResponseHeader(HttpServletRequest request) {
