@@ -54,43 +54,36 @@ jobs:
       - name: Generate the demo keystore
         run: sh scripts/make-keystore.sh
 
-      # Started with the demo profile and a 2-second challenge TTL, which is what
-      # makes the CHALLENGE_EXPIRED scenario reachable at test speed.
-      - name: Start the demo over HTTPS
-        run: |
-          nohup mvn -B --no-transfer-progress -Pdemo \
-            -Dspring-boot.run.jvmArguments="-Ddbsc.challenge-ttl=2s" \
-            spring-boot:run > /tmp/demo.log 2>&1 &
-          for i in $(seq 1 60); do
-            if grep -q "Started DemoApplication" /tmp/demo.log; then
-              echo "demo is up after ${i}s"
-              exit 0
-            fi
-            if grep -qE "BUILD FAILURE|APPLICATION FAILED TO START" /tmp/demo.log; then
-              echo "demo failed to start"
-              tail -100 /tmp/demo.log
-              exit 1
-            fi
-            sleep 2
-          done
-          echo "demo did not start within 120s"
-          tail -100 /tmp/demo.log
-          exit 1
+      # Two instances, not one. The main demo raises its rate-limit budgets to 1000
+      # so this suite's deliberate failures do not throttle the run that is testing
+      # them, which leaves the 429 branch unreachable there; the second instance
+      # exists only to make RATE_LIMITED observable. Both get a 2-second challenge
+      # TTL, which is what makes CHALLENGE_EXPIRED reachable at test speed.
+      - name: Start both demos over HTTPS
+        run: sh scripts/run-demos.sh
 
       - name: Run the end-to-end suite
         env:
           DBSC_CHALLENGE_TTL: '2'
+          DBSC_RATE_LIMIT_FAILURES: '5'
         run: python scripts/e2e.py
+
+      # Guards against a new error code being added without a scenario that
+      # reaches it, which is how RATE_LIMITED and INVALID_JWK went unexercised.
+      - name: Check every error code is exercised
+        run: python scripts/check-error-coverage.py
 
       - name: Demo log on failure
         if: failure()
-        run: tail -200 /tmp/demo.log
+        run: tail -200 /tmp/demo.log; echo '--- rate-limit demo ---'; tail -200 /tmp/demo-ratelimit.log
 
-      - name: Upload demo log
+      - name: Upload demo logs
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: demo-log
-          path: /tmp/demo.log
+          name: demo-logs
+          path: |
+            /tmp/demo.log
+            /tmp/demo-ratelimit.log
           if-no-files-found: ignore
           retention-days: 7

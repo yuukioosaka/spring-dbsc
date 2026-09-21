@@ -213,6 +213,23 @@
     </profile>
 
     <!--
+      A second demo instance whose rate-limit budget is small enough to exhaust on
+      purpose. The main demo raises its budgets to 1000 so this suite's deliberate
+      failures do not throttle it, which leaves the 429 branch unreachable there.
+
+        mvn -Pdemo,ratelimit-e2e -Dmaven.repo.local=.m2repo spring-boot:run
+
+      See src/demo/resources/application-ratelimit-e2e.yaml for the budgets and
+      scripts/e2e.py for the checks that need them.
+    -->
+    <profile>
+      <id>ratelimit-e2e</id>
+      <properties>
+        <dbsc.demo.profiles>,ratelimit-e2e</dbsc.demo.profiles>
+      </properties>
+    </profile>
+
+    <!--
       The OIDC variant of the demo: adds an Entra ID login on top of src/demo and
       turns off the form-login chain (the two cannot coexist on one chain).
 

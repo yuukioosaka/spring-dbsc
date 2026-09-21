@@ -1,0 +1,38 @@
+# A second demo instance for the RATE_LIMITED checks in scripts/e2e.py.
+#
+# Why a second instance exists at all: application-demo.yaml raises the rate-limit
+# budgets to 1000 so the E2E suite's own deliberate failures (bad signatures,
+# replayed challenges, malformed proofs) do not throttle the run itself. That is
+# right for the main suite and it makes the 429 branch unreachable, so the
+# RATE_LIMITED assertions need an instance whose budget is small enough to exhaust
+# on purpose.
+#
+# Run alongside the main demo:
+#
+#   mvn -Pdemo,ratelimit-e2e -Dmaven.repo.local=.m2repo spring-boot:run
+#   DBSC_RATE_LIMIT_FAILURES=5 python3 scripts/e2e.py
+#
+# The failure budget below is what DBSC_RATE_LIMIT_FAILURES must be set to; nothing
+# reads it from here, so change both together.
+
+server:
+  port: 9443
+
+spring:
+  datasource:
+    # Its own file. Sharing data/demo.mv.db with the running main demo fails at
+    # startup: H2 takes an exclusive lock and the second instance refuses to boot.
+    url: jdbc:h2:file:./data/e2e-ratelimit;DB_CLOSE_DELAY=-1
+
+dbsc:
+  rate-limit:
+    enabled: true
+    # The ordinary budget has to stay above the failure budget, or the request
+    # counter trips first and the failure counter is never consulted.
+    capacity: 20
+    failure-capacity: 5
+    window: 1m
+
+logging:
+  level:
+    click.yukio.dbsc: DEBUG

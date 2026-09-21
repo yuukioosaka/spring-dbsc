@@ -588,9 +588,26 @@ public class DbscService {
 
     private void checkRefreshRateLimit(HttpServletRequest request) {
         if (properties.getRateLimit().isEnabled()
-                && !rateLimiter.checkRefresh(clientIp(request), null)) {
+                && !rateLimiter.checkRefresh(clientIp(request), refreshSessionKey(request))) {
             throw new DbscException(DbscErrorCode.RATE_LIMITED, "refresh rate limit tripped");
         }
+    }
+
+    /**
+     * The session component of the refresh rate-limit key.
+     *
+     * <p>It must match what {@link #recordRateLimitFailure} charges, or the refresh
+     * budget is never consulted: the check and the record would use different keys,
+     * and repeated failed refreshes would go unthrottled. {@link RateLimiter} keys
+     * refreshes on the session so one noisy client cannot throttle every session
+     * behind the same address, so both sides resolve it identically here.
+     *
+     * <p>A request naming no session is keyed as {@code null} on both sides, which
+     * is correct: it is unauthenticated and rate-limited per client, and the shared
+     * registration budget covers it.
+     */
+    private String refreshSessionKey(HttpServletRequest request) {
+        return resolveBinderSession(request).orElse(null);
     }
 
     /**

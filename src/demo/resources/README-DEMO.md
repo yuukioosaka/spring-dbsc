@@ -122,16 +122,22 @@ server still fails against the same browser profile. To start clean:
 The browser flow above is the manual check. For a repeatable one, run the suite in
 `scripts/e2e.py` against a running demo — it drives the same paths over TLS as a
 browser would, plus the ones a browser will not reach on demand (stale proofs,
-replayed challenges, malformed headers, the bound protocol):
+replayed challenges, malformed headers, the bound protocol).
+
+The one-command form, which starts both instances the suite needs and then runs it:
 
 ```sh
-mvn -Pdemo -Dmaven.repo.local=.m2repo spring-boot:run   # in another shell
-python3 scripts/e2e.py
+sh scripts/run-demos.sh                # in another shell
+DBSC_CHALLENGE_TTL=2 DBSC_RATE_LIMIT_FAILURES=5 python3 scripts/e2e.py
 ```
 
 It needs the `cryptography` package (for ES256 signing) and prints a per-check
 PASS/FAIL list plus a final tally. It does not test this file's manual steps; it
 tests the protocol.
+
+`scripts/check-error-coverage.py` is a companion gate: it fails if an error code is
+defined in `DbscErrorCode` but never reached by the suite. That is how `RATE_LIMITED`
+and `INVALID_JWK` were found to be unexercised.
 
 ### Testing challenge expiry
 
@@ -149,6 +155,27 @@ failed. Note that the challenge *cookie's* `Max-Age` tracks the TTL, so a client
 honouring cookie expiry stops sending the JTI and the server reports
 `CHALLENGE_NOT_FOUND` rather than `CHALLENGE_EXPIRED`. The suite therefore
 re-sends the stale JTI by hand to reach the expiry branch.
+
+### Testing rate limiting
+
+`RATE_LIMITED` needs a **second** demo instance. The main one sets its budgets to
+1000 (see the comment in `application-demo.yaml`) precisely so that this suite's own
+deliberate failures do not throttle the run that is testing them — which leaves the
+429 branch unreachable there. Start the low-budget instance alongside it:
+
+```sh
+mvn -Pdemo,ratelimit-e2e -Dmaven.repo.local=.m2repo \
+    -Dspring-boot.run.jvmArguments="-Ddbsc.challenge-ttl=2s" spring-boot:run
+DBSC_RATE_LIMIT_FAILURES=5 python3 scripts/e2e.py
+```
+
+It listens on 9443 with its own database file, so it cannot disturb the main run.
+`DBSC_RATE_LIMIT_FAILURES` must match `dbsc.rate-limit.failure-capacity` in
+`application-ratelimit-e2e.yaml`; nothing reads it from there. The limiter keys on
+client IP and holds counters for a whole window, so a suite run right after another
+may find the instance already throttled — the check reports that as *skipped*
+rather than pretending the attempt count was observed. `scripts/run-demos.sh`
+starts both instances for you.
 
 ## Notes on the wiring
 

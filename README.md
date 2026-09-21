@@ -349,16 +349,29 @@ The build is on GitHub Actions:
 
 - **[`build.yml`](./.github/workflows/build.yml)** — `mvn verify` on Java 17, 21 and 25
   (blocking) and 26 (experimental). Uploads the library JAR.
-- **[`e2e.yml`](./.github/workflows/e2e.yml)** — boots the demo over HTTPS with a
-  2-second challenge TTL and runs `scripts/e2e.py` against it.
+- **[`e2e.yml`](./.github/workflows/e2e.yml)** — boots two demo instances over HTTPS
+  and runs `scripts/e2e.py` against them, then checks error-code coverage.
 
-The second one exists because the expiry scenarios are only reachable at a tiny TTL;
-at the 5-minute default the suite skips `CHALLENGE_EXPIRED` rather than testing it.
+The E2E workflow exists because some scenarios are only reachable under test
+conditions: the expiry checks need a tiny challenge TTL, and the throttling check
+needs an instance whose rate-limit budget is small enough to exhaust on purpose
+(the main demo's are set to 1000 so the suite's own deliberate failures do not
+throttle the run that is testing them). At the production defaults the suite skips
+those checks rather than testing them.
+
+`scripts/check-error-coverage.py` is a gate, not a convenience: it fails the build
+when an error code is defined but no scenario reaches it. Both `RATE_LIMITED` and
+`INVALID_JWK` were reaching real code paths that nothing tested before it existed.
 
 Locally:
 
 ```sh
 mvn verify
+
+# E2E, both instances (see src/demo/resources/README-DEMO.md for detail)
+sh scripts/run-demos.sh
+DBSC_CHALLENGE_TTL=2 DBSC_RATE_LIMIT_FAILURES=5 python3 scripts/e2e.py
+python3 scripts/check-error-coverage.py
 ```
 
 The web tests run against `DbscTestHostApplication` in `src/test` — a miniature

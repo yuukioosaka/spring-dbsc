@@ -19,6 +19,17 @@ this script about it:
 
 Without DBSC_CHALLENGE_TTL those checks are reported as skipped, not failed.
 
+RATE_LIMITED needs a third thing: the demo raises its rate-limit budgets to 1000 so
+this suite's own deliberate failures do not throttle it, which makes the 429 branch
+unreachable there. Start a second instance with a small failure budget:
+
+    mvn -Pdemo -Dmaven.repo.local=.m2repo \
+        -Dspring-boot.run.arguments="--server.port=9443 \
+            --spring.datasource.url=jdbc:h2:file:./data/e2e-ratelimit" \
+        -Dspring-boot.run.jvmArguments="-Ddbsc.rate-limit.failure-capacity=5" \
+        spring-boot:run
+    DBSC_RATE_LIMIT_FAILURES=5 python3 scripts/e2e.py
+
 Requires `cryptography` (EC keygen + ES256 signing).
 """
 import base64, hashlib, json, os, re, ssl, sys, time
@@ -37,6 +48,17 @@ SKIP = []
 # Its absence makes the expiry checks unrunnable rather than failing them, since
 # waiting out a 5-minute default is not a practical test.
 CHALLENGE_TTL_S = float(os.environ.get("DBSC_CHALLENGE_TTL") or 0) or None
+
+# The demo sets capacity/failure-capacity to 1000 so the suite's own negative cases
+# (bad signatures, replayed challenges) do not throttle it. That makes RATE_LIMITED
+# unreachable against it, so those checks need a second instance started with a
+# deliberately tiny budget; this is its registration failure budget. Absent means
+# the checks are reported as skipped, the same way the TTL checks are.
+RATE_LIMIT_FAILURES = int(os.environ.get("DBSC_RATE_LIMIT_FAILURES") or 0) or None
+
+# The low-budget instance. It shares nothing with the main one: separate port,
+# separate database file, so neither can exhaust the other's counters.
+RATE_BASE = os.environ.get("DBSC_RATE_BASE") or "https://localhost:9443"
 
 
 def check(name, ok, detail=""):
@@ -71,7 +93,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def request(opener, method, path, body=None, headers=None, form=True):
+def request(opener, method, path, body=None, headers=None, form=True, base=None):
     """Returns (status, headers, text). Never raises on HTTP error status."""
     data = None
     hdrs = dict(headers or {})
@@ -82,7 +104,7 @@ def request(opener, method, path, body=None, headers=None, form=True):
         else:
             data = json.dumps(body).encode()
             hdrs.setdefault("Content-Type", "application/json")
-    req = urllib.request.Request(BASE + path, data=data, headers=hdrs, method=method)
+    req = urllib.request.Request((base or BASE) + path, data=data, headers=hdrs, method=method)
     try:
         with opener.open(req) as r:
             return r.status, dict(r.headers), r.read().decode()
@@ -149,20 +171,20 @@ class Key:
         return f"{h}.{p}.{self.sign(f'{h}.{p}')}"
 
 
-def login(opener, jar, user="demo", password="demo"):
+def login(opener, jar, user="demo", password="demo", base=None):
     """Form login, returns (status, headers, session id, csrf).
 
     The CSRF token is rotated on authentication, so the value scraped from the
     login page is stale by the time the login completes. Callers that need a
     usable token must read it from a page served *after* login.
     """
-    _, _, html = request(opener, "GET", "/login")
+    _, _, html = request(opener, "GET", "/login", base=base)
     m = re.search(r'name="_csrf" value="([^"]+)"', html)
     if not m:
         return None, None, None, None
     status, headers, _ = request(
         opener, "POST", "/login",
-        {"username": user, "password": password, "_csrf": m.group(1)})
+        {"username": user, "password": password, "_csrf": m.group(1)}, base=base)
     return status, headers, cookie_value(jar, "JSESSIONID"), m.group(1)
 
 
@@ -952,8 +974,116 @@ def main():
         {"X-CSRF-TOKEN": k_csrf or "x", "Content-Type": "application/json",
          "X-Dbsc-Bound-Proof": signed_proof(k_key, k_sid, "POST", "/app/payment", k_ts, p_body)})
     check("a proof with no bound key -> 403, not a crash", status == 403, f"{status} {text[:160]}")
+    check("the refusal names KEY_NOT_FOUND_BOUND",
+          "KEY_NOT_FOUND_BOUND" in text, text[:160])
     check("the refusal is a DBSC error body, not a Spring default page",
           "error" in text and "timestamp" not in text, text[:160])
+
+    # ------------------------------------------------- N. INVALID_JWK
+    print("\n-- N. a JWK that breaks the key rules is INVALID_JWK, not a crash --")
+    n_opener, n_jar = new_client()
+    _, _, n_sid, _ = login(n_opener, n_jar)
+    # Each of these trips a different rule in Jwk.validate. The signature is real
+    # and the challenge is live, so only the key check can reject the request.
+    for label, bad_key, expect in [
+            ("an unsupported curve (P-384) -> INVALID_JWK",
+             {"kty": "EC", "crv": "P-384", "x": "a", "y": "b"}, "unsupported curve"),
+            ("an EC key with no coordinates -> INVALID_JWK",
+             {"kty": "EC", "crv": "P-256"}, "missing x or y"),
+            ("an unsupported key type (oct) -> INVALID_JWK",
+             {"kty": "oct", "k": "AAAA"}, "unsupported key type"),
+            ("an RSA modulus under 2048 bits -> INVALID_JWK",
+             {"kty": "RSA", "n": "AQAB"}, "too short")]:
+        n_ch, _, _ = bound_challenge(n_opener, n_jar)
+        n_key = Key()
+        status, _, text = request(
+            n_opener, "POST", "/dbsc-bound/registration", form=False, body={
+                "publicKey": bad_key, "signature": n_key.sign(n_ch), "challenge": n_ch})
+        check(label, status == 403 and "INVALID_JWK" in text, f"{status} {text[:160]}")
+        # The rule that fired is named, so a caller can tell a rejected curve from
+        # an undersized modulus without reading the source.
+        check(f"  ...and names the rule: {expect}", expect in text, text[:160])
+
+    # The native route validates the JWK carried in the JWS header, not just the
+    # one in a bound body, so it must reject a bad key on its own path too.
+    n_jti = cookie_value(n_jar, "__Host-dbsc-challenge")
+    n_bad_head = {"alg": "ES256", "typ": "dbsc+jwt",
+                  "jwk": {"kty": "EC", "crv": "P-384", "x": "AA", "y": "AA"}}
+    n_h = b64u(json.dumps(n_bad_head, separators=(",", ":")).encode())
+    n_p = b64u(json.dumps({"jti": n_jti}).encode())
+    status, _, text = request(
+        n_opener, "POST", "/dbsc/registration", body=b"", headers={
+            "Secure-Session-Response": f"{n_h}.{n_p}.{b64u(b'0' * 64)}",
+            "Content-Type": "application/json"})
+    check("a native registration carrying a bad JWK -> INVALID_JWK",
+          status == 403 and "INVALID_JWK" in text, f"{status} {text[:160]}")
+
+    # ------------------------------------------------- O. SESSION_NOT_REGISTERED
+    print("\n-- O. a refresh naming a session that was never stored --")
+    # A challenge is bound to whatever session id the request presents, so a forged
+    # id gets a legitimate challenge. Authentication comes back as OK for *that*
+    # id, but no record exists for it: the refresh must be refused rather than
+    # treated as an unknown-but-plausible client. This is the forged-cookie case.
+    o_forged = "f" * 32
+    o_rg, o_rg_jar = new_client()
+    login(o_rg, o_rg_jar)
+    o_key = Key()
+    status, _, text = request(o_rg, "GET", "/dbsc-bound/challenge",
+                              headers={"Cookie": f"__Host-dbsc-reg={o_forged}"})
+    check("a forged session id can still obtain a challenge", status == 200, f"{status} {text[:160]}")
+    o_ch = json.loads(text).get("challenge") if status == 200 else None
+    o_ts = now_ms()
+    status, _, text = request(
+        o_rg, "POST", "/dbsc-bound/refresh", form=False,
+        headers={"Cookie": f"__Host-dbsc-reg={o_forged}"},
+        body={"challenge": o_ch, "signature": o_key.sign(f"{o_ch}.{o_ts}"),
+              "timestamp": o_ts})
+    check("a refresh for an unstored session -> SESSION_NOT_REGISTERED",
+          status == 403 and "SESSION_NOT_REGISTERED" in text, f"{status} {text[:160]}")
+    check("it is not reported as a missing key or a bad signature",
+          "KEY_NOT_FOUND" not in text and "SIGNATURE_INVALID" not in text, text[:160])
+
+    # ------------------------------------------------ Q. JTI_MISMATCH
+    print("\n-- Q. a challenge presented by the wrong session --")
+    # A JTI is bound to the session it was issued for. Two sessions are set up and
+    # one's challenge is presented on the other, which is the case a stolen or
+    # replayed challenge hits. The signature is made by the *right* key for the
+    # presenting session, so the session binding is the only thing rejecting it.
+    q1, q1_jar, _, _, q1_bound, _ = bound_session()
+    q2, q2_jar, _, _, q2_bound, _ = bound_session()
+    q1_ch, _, _ = bound_challenge(q1, q1_jar)
+    q_ts = now_ms()
+    status, _, text = request(
+        q2, "POST", "/dbsc-bound/refresh", form=False, body={
+            "challenge": q1_ch,
+            "signature": q2_bound.sign(f"{q1_ch}.{q_ts}"),
+            "timestamp": q_ts})
+    check("another session's challenge -> JTI_MISMATCH",
+          status == 403 and "JTI_MISMATCH" in text, f"{status} {text[:160]}")
+    check("it is not reported as missing or expired",
+          "CHALLENGE_NOT_FOUND" not in text and "CHALLENGE_EXPIRED" not in text, text[:160])
+
+    # -------------------------------------------- R. UNKNOWN_ALGORITHM
+    print("\n-- R. a valid key the bound protocol cannot use --")
+    # A 2048-bit RSA key is a perfectly valid JWK and the native protocol accepts
+    # it, but the bound polyfill is ES256-only. It is therefore UNKNOWN_ALGORITHM
+    # (the algorithm cannot be honoured) rather than INVALID_JWK (the key is bad),
+    # and the two must not be conflated.
+    r_opener, r_jar = new_client()
+    _, _, r_sid, _ = login(r_opener, r_jar)
+    r_ch, _, _ = bound_challenge(r_opener, r_jar)
+    # An RSA modulus of the minimum permitted size, so only the algorithm check can
+    # object: Jwk.validate accepts this key.
+    r_n = b64u(bytes([0x80]) + b"\x00" * 255)
+    r_key = Key()
+    status, _, text = request(
+        r_opener, "POST", "/dbsc-bound/registration", form=False, body={
+            "publicKey": {"kty": "RSA", "n": r_n},
+            "signature": r_key.sign(r_ch), "challenge": r_ch})
+    check("an RSA key on the bound route -> UNKNOWN_ALGORITHM",
+          status == 403 and "UNKNOWN_ALGORITHM" in text, f"{status} {text[:160]}")
+    check("it is not reported as INVALID_JWK",
+          "INVALID_JWK" not in text, text[:160])
 
     # ---------------------------------------------------- 10. logout
     print("\n-- M. logout terminates the binding --")
@@ -972,6 +1102,69 @@ def main():
     anon, _ = new_client()
     status, _, _ = request(anon, "GET", "/app/whoami")
     check("anonymous GET /app/whoami is not 200", status != 200, f"got {status}")
+
+    # ------------------------------------------------- P. RATE_LIMITED
+    print("\n-- P. a client that keeps failing is throttled --")
+    if RATE_LIMIT_FAILURES is None:
+        skip("repeated failures -> 429 RATE_LIMITED",
+             "start a second demo on " + RATE_BASE + " with a small "
+             "dbsc.rate-limit.failure-capacity and set DBSC_RATE_LIMIT_FAILURES")
+    else:
+        # A separate instance: the demo's own budgets are 1000 so that this suite's
+        # deliberate failures do not throttle it, which leaves RATE_LIMITED
+        # unreachable there. The limiter counts failures, not just requests, so a
+        # loop of rejected proofs is what trips it.
+        #
+        # The limiter keys on client IP and holds its counters for a whole window,
+        # and every local run shares one IP. A previous run -- or a previous
+        # section -- can therefore leave this instance already throttled, which
+        # would make "it trips after N attempts" meaningless. Probing first tells
+        # the two situations apart instead of failing on a spent window.
+        p_opener, p_jar = new_client()
+        p_status, _, p_sid, _ = login(p_opener, p_jar, base=RATE_BASE)
+        if p_status != 302:
+            check("the low-budget demo accepts the same login", False,
+                  f"login returned {p_status}; is a second instance on {RATE_BASE}?")
+        else:
+            p_key = Key()
+
+            def p_refresh():
+                ts = now_ms()
+                return request(
+                    p_opener, "POST", "/dbsc-bound/refresh", form=False, base=RATE_BASE, body={
+                        "challenge": "never-issued",
+                        "signature": p_key.sign(f"never-issued.{ts}"),
+                        "timestamp": ts})
+
+            # Each iteration presents a proof whose challenge was never issued, so
+            # every request fails and is charged to the client's failure budget.
+            throttled_at = None
+            for i in range(RATE_LIMIT_FAILURES + 10):
+                status, _, text = p_refresh()
+                if status == 429:
+                    throttled_at = i
+                    break
+            check("repeating a rejected proof -> 429 RATE_LIMITED", throttled_at is not None,
+                  f"never throttled in {RATE_LIMIT_FAILURES + 10} attempts; last was {status} {text[:120]}")
+            if throttled_at is not None:
+                check("the 429 body carries RATE_LIMITED, not a generic error",
+                      "RATE_LIMITED" in text, text[:160])
+                if throttled_at == 0:
+                    # The window was already spent before this section started, so
+                    # the attempt count says nothing. Say so rather than assert it.
+                    skip("it trips at the configured failure budget, not before",
+                         "the instance was already throttled when this section began")
+                else:
+                    check("it trips at the configured failure budget, not before",
+                          throttled_at >= RATE_LIMIT_FAILURES - 1,
+                          f"tripped after {throttled_at} attempts, budget {RATE_LIMIT_FAILURES}")
+                # A throttled request must not be charged again, or a client that
+                # keeps retrying would push its own lockout out forever. Waiting out
+                # a whole window is the only way to observe that here, so it is done
+                # once and the check is kept cheap.
+                status2, _, _ = p_refresh()
+                check("a refused request stays refused while retried", status2 == 429,
+                      f"got {status2}")
 
     summary = f"\n=== {len(PASS)} passed, {len(FAIL)} failed"
     summary += f", {len(SKIP)} skipped ===" if SKIP else " ==="
