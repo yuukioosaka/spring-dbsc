@@ -689,7 +689,7 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `session-identifier-name` | — | **removed.** `session_identifier` carries the session id itself (spec §9.6), so there was no name left to configure. Setting it now has no effect |
 | `credential-cookie-name` | `__Host-auth_cookie` | the protected cookie named in `credentials[].name`, whose value rotates. Used verbatim — a prefix is your choice |
 | `binding-cookie-ttl` | `10m` | lifetime of the credential cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
-| `registration-cookie-ttl` | `24h` | lifetime of the single-use registration token. The token is consumed by a successful registration; this is only the ceiling for one that never completes |
+| `registration-token-ttl` | `5m` | lifetime of the single-use registration token. The token is spent by the registration attempt, success or failure; this only bounds one that is never presented at all |
 | `challenge-ttl` | `5m` | lifetime of a challenge JTI |
 | `refresh-grace` | `30s` | softens the freshness poll across a refresh |
 | `rotation-grace` | `60s` | how long a retired credential cookie value keeps resolving. Rotation itself is not optional — see [Credential rotation](#credential-rotation) |

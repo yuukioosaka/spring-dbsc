@@ -72,8 +72,17 @@ public class DbscProperties {
      */
     private Duration bindingCookieTtl = Duration.ofMinutes(10);
 
-    /** Lifetime of a registration token, and so of the registration opportunity. */
-    private Duration registrationCookieTtl = Duration.ofHours(24);
+    /**
+     * Lifetime of a registration token, and so of the registration opportunity.
+     *
+     * <p>Five minutes, not hours, and deliberately the same span as a challenge. The
+     * window this value bounds is not how long a user may take to log in — it is how
+     * long one already-issued token stays usable, and Chromium POSTs its registration
+     * within about a second of the login response (02, step 2). The token is spent on
+     * the attempt, success or failure, so a short ceiling costs a real browser
+     * nothing while denying a captured token a long retry window.
+     */
+    private Duration registrationTokenTtl = Duration.ofMinutes(5);
 
     /** Lifetime of a challenge JTI. */
     private Duration challengeTtl = Duration.ofMinutes(5);
@@ -350,12 +359,12 @@ public class DbscProperties {
         this.bindingCookieTtl = bindingCookieTtl;
     }
 
-    public Duration getRegistrationCookieTtl() {
-        return registrationCookieTtl;
+    public Duration getRegistrationTokenTtl() {
+        return registrationTokenTtl;
     }
 
-    public void setRegistrationCookieTtl(Duration registrationCookieTtl) {
-        this.registrationCookieTtl = registrationCookieTtl;
+    public void setRegistrationTokenTtl(Duration registrationTokenTtl) {
+        this.registrationTokenTtl = registrationTokenTtl;
     }
 
     public Duration getChallengeTtl() {
@@ -437,8 +446,8 @@ public class DbscProperties {
         return bindingCookieTtl.toMillis();
     }
 
-    public long registrationCookieTtlMs() {
-        return registrationCookieTtl.toMillis();
+    public long registrationTokenTtlMs() {
+        return registrationTokenTtl.toMillis();
     }
 
     public long challengeTtlMs() {

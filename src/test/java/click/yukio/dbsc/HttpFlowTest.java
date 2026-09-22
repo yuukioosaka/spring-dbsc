@@ -212,6 +212,63 @@ class HttpFlowTest {
     }
 
     @Test
+    @DisplayName("registration: a rejected proof still spends the token, so it cannot be retried")
+    void registrationFailureSpendsTheToken() throws Exception {
+        LoginState login = loginWithState();
+
+        // A structural failure, not a signature one: the token must be spent by the
+        // attempt whatever went wrong, so a rejected proof cannot be walked through
+        // the verification path repeatedly for the token's whole TTL.
+        MvcResult rejected = mvc.perform(post(login.registrationPath())
+                        .header("Secure-Session-Response", "not-a-jws"))
+                .andReturn();
+
+        assertEquals(403, rejected.getResponse().getStatus(),
+                "got: " + rejected.getResponse().getStatus() + " "
+                        + rejected.getResponse().getContentAsString());
+        Map<String, Object> body = Json.parseObject(rejected.getResponse().getContentAsString());
+        assertEquals("MALFORMED_JWS", body.get("error"), "body: " + body);
+
+        // The same token now reports a replay rather than offering another attempt,
+        // which is also what makes the short registration-token-ttl safe to rely on.
+        // Even a proof that would have been accepted gets nowhere.
+        MvcResult retry = mvc.perform(post(login.registrationPath())
+                        .header("Secure-Session-Response",
+                                TestKey.generate().registrationJws(login.challenge(), login.sessionId())))
+                .andReturn();
+
+        assertEquals(403, retry.getResponse().getStatus());
+        Map<String, Object> retryBody = Json.parseObject(retry.getResponse().getContentAsString());
+        assertEquals("REGISTRATION_TOKEN_CONSUMED", retryBody.get("error"),
+                "a failed registration must not leave the token usable");
+        assertTrue(storage.getDeviceKey(login.sessionId()).isEmpty(),
+                "no device key may be stored by the retry");
+    }
+
+    @Test
+    @DisplayName("registration: a captured token cannot be replayed to bind after a failure")
+    void registrationFailureDoesNotLeaveASecondAttempt() throws Exception {
+        LoginState login = loginWithState();
+        String path = login.registrationPath();
+
+        // The attacker's guess: a proof whose signature does not verify.
+        mvc.perform(post(path).header("Secure-Session-Response", "not.a.jws")).andReturn();
+
+        // The attacker now has the right JWS — the token is still the only thing
+        // standing between them and a binding, and it is already spent.
+        MvcResult attack = mvc.perform(post(path)
+                        .header("Secure-Session-Response",
+                                TestKey.generate().registrationJws(login.challenge(), login.sessionId())))
+                .andReturn();
+
+        assertEquals(403, attack.getResponse().getStatus());
+        Map<String, Object> body = Json.parseObject(attack.getResponse().getContentAsString());
+        assertEquals("REGISTRATION_TOKEN_CONSUMED", body.get("error"));
+        assertTrue(storage.getDeviceKey(login.sessionId()).isEmpty(),
+                "no device key may be stored from a replayed token");
+    }
+
+    @Test
     @DisplayName("registration: no Secure-Session-Response is 403, not 500 or 401")
     void registrationWithoutProof() throws Exception {
         LoginState login = loginWithState();
@@ -251,6 +308,80 @@ class HttpFlowTest {
         assertTrue(response.getHeaders("Set-Cookie").stream()
                         .noneMatch(c -> c.contains("dbsc-challenge")),
                 "no challenge cookie: it is issued again on every leg and held server-side");
+    }
+
+    @Test
+    @DisplayName("refresh: an unknown Sec-Secure-Session-Id is refused, and no challenge is issued")
+    void refreshUnknownSessionIdIsRefused() throws Exception {
+        // The header is client-supplied and unauthenticated. Naming a session that
+        // does not exist must not create a challenge for it: the record is small, but
+        // nothing bounds the number of distinct ids, so issuing one per request turns
+        // the route into unbounded row creation.
+        MvcResult result = mvc.perform(post("/dbsc/refresh")
+                        .header("Sec-Secure-Session-Id", "sess_never_bound"))
+                .andReturn();
+
+        assertEquals(403, result.getResponse().getStatus());
+        assertNull(result.getResponse().getHeader("Secure-Session-Challenge"),
+                "no challenge may be issued for a session that does not exist");
+        Map<String, Object> body = Json.parseObject(result.getResponse().getContentAsString());
+        assertEquals("SESSION_NOT_FOUND", body.get("error"));
+    }
+
+    @Test
+    @DisplayName("refresh: a session with no bound key cannot be challenged either")
+    void refreshSessionWithoutKeyIsRefused() throws Exception {
+        LoginState login = loginWithState();
+
+        // bind() has run, so the session record exists, but no device key is stored
+        // until the browser's registration POST lands. There is no key to verify a
+        // proof against, so asking for one is pointless.
+        MvcResult result = mvc.perform(post("/dbsc/refresh")
+                        .header("Sec-Secure-Session-Id", login.sessionId()))
+                .andReturn();
+
+        assertEquals(403, result.getResponse().getStatus());
+        assertNull(result.getResponse().getHeader("Secure-Session-Challenge"),
+                "a session with no key has nothing to proof against");
+        Map<String, Object> body = Json.parseObject(result.getResponse().getContentAsString());
+        assertEquals("KEY_NOT_FOUND", body.get("error"));
+    }
+
+    @Test
+    @DisplayName("refresh: a demoted session still gets a challenge, because that is how it recovers")
+    void refreshDemotedSessionStillChallenges() throws Exception {
+        LoginState login = loginWithState();
+        TestKey key = TestKey.generate();
+        register(login, key);
+
+        // A well-formed refresh JWS from a different key, naming the live challenge.
+        // The JTI matches, so signature verification is reached and fails -- which is
+        // the demotion path. A mismatched JTI would be caught earlier as JTI_MISMATCH
+        // and would not demote at all.
+        MvcResult leg1 = mvc.perform(post("/dbsc/refresh")
+                        .header("Sec-Secure-Session-Id", login.sessionId()))
+                .andReturn();
+        String challengeHeader = leg1.getResponse().getHeader("Secure-Session-Challenge");
+        String jti = challengeHeader.substring(1, challengeHeader.indexOf('"', 1));
+
+        mvc.perform(post("/dbsc/refresh")
+                        .header("Sec-Secure-Session-Id", login.sessionId())
+                        .header("Secure-Session-Response", TestKey.generate().refreshJws(jti)))
+                .andReturn();
+        assertEquals(ProtectionTier.NONE,
+                storage.getSession(login.sessionId()).orElseThrow().tier(),
+                "a failed signature must demote the session");
+
+        MvcResult result = mvc.perform(post("/dbsc/refresh")
+                        .header("Sec-Secure-Session-Id", login.sessionId()))
+                .andReturn();
+
+        assertEquals(403, result.getResponse().getStatus(),
+                "got: " + result.getResponse().getStatus() + " "
+                        + result.getResponse().getContentAsString());
+        assertNotNull(result.getResponse().getHeader("Secure-Session-Challenge"),
+                "a demoted session must still be offered a challenge; body: "
+                        + result.getResponse().getContentAsString());
     }
 
     @Test

@@ -37,8 +37,10 @@ dbsc:
   # Grace window past the binding cookie's expiry: a freshness poll that lands
   # while the browser's next refresh is in flight still reads the old tier.
   binding-cookie-ttl: 10m
-  # Lifetime of a registration token, and so of the registration opportunity.
-  registration-cookie-ttl: 24h
+  # Lifetime of a registration token, and so of the registration opportunity. The
+  # token is spent by the registration attempt, so this only bounds one that is never
+  # presented. Chromium POSTs within about a second of the login response.
+  registration-token-ttl: 5m
   challenge-ttl: 5m
   refresh-grace: 30s
   # How long a retired ticket-cookie value keeps resolving to the id that replaced

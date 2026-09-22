@@ -165,7 +165,7 @@ public class DbscService {
                 Base64Url.randomJti(),
                 sessionId,
                 now,
-                now + properties.registrationCookieTtlMs(),
+                now + properties.registrationTokenTtlMs(),
                 false);
         storage.setRegistrationToken(token);
         return token.token();
@@ -234,14 +234,26 @@ public class DbscService {
         String sessionId = requireSessionForToken(registrationToken);
         String responseHeader = readResponseHeader(request);
 
-        engine.handleRegistration(sessionId, responseHeader);
-
-        // The token has now done its job. Consuming it — not deleting it — leaves
-        // the record for the failure path to report a replay as
-        // REGISTRATION_TOKEN_CONSUMED rather than as an unknown token, which is
-        // the difference between "you are replaying a captured POST" and "this URL
+        // The token is spent on the attempt, not on the success. A registration POST
+        // is issued by Chromium within about a second of the login response (02 step 2)
+        // and is never retried — not after a network error and not after a rejected
+        // proof — so a token that only a success consumes has exactly one client that
+        // will ever present it, and a short TTL costs that client nothing.
+        //
+        // Consuming it here rather than after the verification also closes the window
+        // the previous ordering left open: the route is unauthenticated, nothing else
+        // stands between an attacker and unlimited verification attempts on a captured
+        // token, and each attempt is an ECDSA verification against a header-supplied
+        // key. Spending the token first makes an invalid proof unusable the moment it
+        // is rejected.
+        //
+        // Consuming — not deleting — leaves the record for the failure path to report a
+        // replay as REGISTRATION_TOKEN_CONSUMED rather than as an unknown token, which
+        // is the difference between "you are replaying a captured POST" and "this URL
         // was never ours".
         storage.consumeRegistrationToken(registrationToken);
+
+        engine.handleRegistration(sessionId, responseHeader);
 
         // Registration is the one place the credential cookie is dropped rather than
         // replaced. Until now the browser held a ticket that predates the binding; the
@@ -263,6 +275,11 @@ public class DbscService {
 
     /**
      * Resolves and validates a registration token, returning the session it names.
+     *
+     * <p>This only reads; the caller spends the token. Keeping the two apart is what
+     * lets the token be consumed before the proof is verified — the lookup has to
+     * succeed first, and a token that is unknown or already spent must be reported as
+     * such without a verification attempt.
      *
      * @throws DbscException {@code SESSION_NOT_FOUND} when the token is unknown,
      *         {@code REGISTRATION_TOKEN_CONSUMED} when it was already used, and
@@ -310,6 +327,7 @@ public class DbscService {
         String responseHeader = readResponseHeader(request);
         if (responseHeader == null || responseHeader.isBlank()) {
             // First leg: no proof yet. Issue a challenge and answer 403.
+            requireBoundSession(sessionId);
             issueChallengeAndReject(response, sessionId);
             return null;
         }
@@ -361,6 +379,54 @@ public class DbscService {
                     "refresh requires the " + DbscHeaders.SESSION_ID + " header");
         }
         return sessionId;
+    }
+
+    /**
+     * Verifies that the session named by {@code Sec-Secure-Session-Id} exists and can
+     * still refresh, before anything is issued against it.
+     *
+     * <p>The header is client-supplied and unauthenticated, and the value goes on to
+     * name a record: without this check, a request naming any string at all would
+     * persist a challenge for it. The record is small and expires, but nothing bounds
+     * the number of distinct ids — the storage contract has no eviction — so the only
+     * thing standing between the route and unbounded row creation was the rate limiter.
+     *
+     * <p>The rule is existence plus a key, which is what spec 02 step 2 makes
+     * normative for a refresh ({@code KEY_NOT_FOUND_NATIVE}): a session that was never
+     * bound has no key to verify a proof against, so there is nothing to challenge it
+     * for. Asking for a proof from a session that cannot produce one tells the caller
+     * nothing, while a challenge issued to an unknown id is pure attack surface.
+     *
+     * <p>A session that is merely demoted still has its key and passes: the refresh
+     * cadence is exactly how a demoted session climbs back, so it has to reach this
+     * route. Only a session with no key — unknown, or bound and then cleared — is
+     * refused.
+     *
+     * <p>Note the deliberate absence of a Cookie header on this leg. Hardening
+     * {@code SameSite=Lax} to {@code Strict} would cost the browser nothing if the
+     * refresh POST never carried a cookie, which is what a flow with no challenge
+     * cookie should look like; but nothing in this implementation depends on it, so it
+     * is an observation for a future change rather than a requirement today.
+     *
+     * <p>A refusal is reported as {@code SESSION_NOT_FOUND} /
+     * {@code KEY_NOT_FOUND} and maps to the same 403 as any other rejected refresh, so
+     * a caller cannot use the status to tell an unknown session from one whose proof
+     * failed. That indistinguishability is intentional on an unauthenticated route
+     * that is reachable without a cookie, which makes it worth a client's time to
+     * enumerate session ids against it.
+     *
+     * @throws DbscException {@code SESSION_NOT_FOUND} when no session carries this id,
+     *         {@code KEY_NOT_FOUND} when it carries no device key
+     */
+    private void requireBoundSession(String sessionId) {
+        if (storage.getSession(sessionId).isEmpty()) {
+            throw new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
+                    "refresh names a session that does not exist");
+        }
+        if (storage.getDeviceKey(sessionId).isEmpty()) {
+            throw new DbscException(DbscErrorCode.KEY_NOT_FOUND,
+                    "no device key for session");
+        }
     }
 
     /**

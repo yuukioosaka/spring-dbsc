@@ -942,10 +942,10 @@ def main():
         # lookup finds nothing live and the expiry branch is the one reached.
         #
         # Registration adds a second clock: its token carries a TTL too
-        # (registration-cookie-ttl, 24h by default), and the token is checked
-        # *before* the challenge. Waiting out a short challenge TTL does not
-        # exhaust it, so the path below stays a live one and CHALLENGE_EXPIRED,
-        # not REGISTRATION_TOKEN_EXPIRED, is the branch under test.
+        # (registration-token-ttl, 5m by default), but the token is checked
+        # *before* the challenge and this wait is short, so the path below stays
+        # a live one and CHALLENGE_EXPIRED, not REGISTRATION_TOKEN_EXPIRED, is
+        # the branch under test.
         k3_opener, k3_jar = new_client()
         _, k3_h, k3_reg, _ = login(k3_opener, k3_jar)
         k3_jti = registration_jti(k3_h)
@@ -966,10 +966,10 @@ def main():
               and "SESSION_NOT_FOUND" not in text, text[:160])
 
         # A JTI that never existed is a different failure and must stay distinct.
-        # It needs its own session and token: the attempt above does not consume
-        # the token (validation precedes consumption) but it does arm a fresh
-        # challenge, and reusing the spent one would report CHALLENGE_CONSUMED
-        # rather than the unknown-JTI branch under test.
+        # It needs its own session and token: the attempt above spends the token it
+        # presented (consumption precedes verification) and arms a fresh challenge,
+        # so reusing either would report REGISTRATION_TOKEN_CONSUMED or
+        # CHALLENGE_CONSUMED rather than the unknown-JTI branch under test.
         k4_opener, k4_jar = new_client()
         _, _, k4_reg, _ = login(k4_opener, k4_jar)
         status, _, text = request(
