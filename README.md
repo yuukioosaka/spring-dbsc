@@ -31,6 +31,7 @@ and the theft is reported as `session_stolen`.
 | Telemetry events | ✅ 7 event types |
 | Rate limiting | ✅ per-IP, with a separate failure budget |
 | Credential rotation on refresh | ✅ always on; bounds how long a captured credential cookie is worth |
+| Application-session binding | ✅ the DBSC session id is bound to your own session id (`JSESSIONID`, Spring Session, …), so the guard can tell a client that never bound from one that dropped its DBSC cookies — see [What the guard actually decides](#what-the-guard-actually-decides) |
 
 ## The protection model
 
@@ -632,6 +633,36 @@ says a stolen cookie must never be usable — say so explicitly rather than assu
 handshake alone covers it: the protocol routes and `bind()` are what the library does,
 and it is the guard or a check like the block above that turns a bound session into an
 enforced one.
+
+### Riding alongside your own session
+
+The two extensions above are not in the DBSC spec, and they are what make the library a
+*fallback* layer rather than an either/or choice — one application can serve
+DBSC-capable browsers and ordinary ones at the same time.
+
+**Your session cookie is used in parallel, not replaced.** The DBSC session id and your
+application's session id are bound together at `bind()`, and the guard can therefore
+answer a question the protocol itself cannot: was *this* session ever bound? Because the
+application session id is treated as an opaque string rather than as a container-managed
+value, this composes with Spring Session as well as with a plain `HttpSession`.
+
+| Present on the request | Binding exists for the app session? | Decision |
+|---|---|---|
+| DBSC credential cookie | — | the credential decides; tier and revocation are read from it |
+| none | yes | **refused** — the client dropped its DBSC cookies |
+| none | no | unregistered: allowed, or refused under `dbsc.unregistered: deny` |
+
+The middle row is the one worth reading twice. "No DBSC cookie" cannot be read as "no
+binding", because *omitting* a cookie is something the client controls: otherwise a
+stolen `JSESSIONID` would regain plain-cookie access simply by not presenting the
+credential cookie. At most one binding per application session id is enforced, so this
+lookup has a single answer rather than a picking problem.
+
+The application's session id reaches the guard from `request.getSession(false)` —
+deliberately the servlet session rather than the authenticated principal, since it must
+be the same value the login route passed to `bind()`. A request with no session has no id
+to look up and reads as unregistered. Call `dbsc.guardDecision(request, appSessionId)`
+directly if you resolve that id some other way.
 
 ## Configuration
 
