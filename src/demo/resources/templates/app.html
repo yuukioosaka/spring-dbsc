@@ -27,7 +27,7 @@
 
 <h2>2. /app/payment</h2>
 <p class="hint">
-    A guarded route: declared as a <code>GuardedRoute</code>, so the guard filter
+    A guarded route: declared with a <code>DbscGuardRoutes</code> matcher, so the guard filter
     refuses it unless the login session's tier is currently <code>dbsc</code>.
     Unbind DBSC in the browser and the same POST answers 403
     <code>DBSC_REQUIRED</code> — a valid login cookie and CSRF token are not enough.

@@ -66,6 +66,17 @@ RATE_LIMIT_FAILURES = int(os.environ.get("DBSC_RATE_LIMIT_FAILURES") or 0) or No
 # separate database file, so neither can exhaust the other's counters.
 RATE_BASE = os.environ.get("DBSC_RATE_BASE") or "https://localhost:9443"
 
+# A third instance, started with dbsc.unregistered=deny. The policy is a property of
+# the server, not of the client, so the only way to observe both outcomes is to ask two
+# servers. The main demo runs the default (allow); section L drives the deny instance
+# and compares the two answers on the same guarded route. Absent means those checks are
+# skipped, the same way the TTL and rate-limit ones are.
+DENY_BASE = os.environ.get("DBSC_DENY_BASE") or ""
+
+# The guarded route both instances agree on. Declared in DemoFormLoginConfig's
+# DbscGuardRoutes; keep this in step with src/demo/java/.../DemoFormLoginConfig.java.
+GUARDED_PATH = "/app/payment"
+
 
 def check(name, ok, detail=""):
     (PASS if ok else FAIL).append(name)
@@ -211,11 +222,25 @@ def session_id_of(opener):
         return None
 
 
-def current_csrf(opener):
+def current_csrf(opener, base=None):
     """Reads the live CSRF token from the page the app renders it into."""
-    _, _, html = request(opener, "GET", "/app")
+    _, _, html = request(opener, "GET", "/app", base=base)
     m = re.search(r'name="csrf" content="([^"]+)"', html)
     return m.group(1) if m else None
+
+
+def post_guarded(opener, base, csrf):
+    """POSTs the guarded route and returns (status, body).
+
+    The route is guarded by its own DbscGuardRoutes matcher, independent of
+authentication, so this is the request whose outcome dbsc.unregistered decides.
+    """
+    status, _, text = request(
+        opener, "POST", GUARDED_PATH, form=False,
+        body={"amount": 1000, "currency": "usd"},
+        headers={"X-CSRF-TOKEN": csrf or "x"},
+        base=base)
+    return status, text
 
 
 def all_headers(headers, name):
@@ -1044,6 +1069,43 @@ def main():
                 status2, _ = p_register()
                 check("a refused request stays refused while retried", status2 == 429,
                       f"got {status2}")
+
+    # ------------------------------------------------- L. dbsc.unregistered policy
+    print("\n-- L. dbsc.unregistered decides what an unbound client gets --")
+    if not DENY_BASE:
+        skip("unregistered client -> 403 on a deny instance",
+             "start a third demo with -Ddbsc.unregistered=deny and set DBSC_DENY_BASE")
+    else:
+        # A client that logs in and then never registers: this is what a browser
+        # with no DBSC support looks like, and the two policies must disagree about
+        # it. Both checks below are on the *same* route with the same matcher, so the
+        # only variable is the property.
+        d_opener, d_jar = new_client()
+        d_status, _, d_reg, _ = login(d_opener, d_jar, base=DENY_BASE)
+        if d_status != 302:
+            check("the deny instance accepts the same login", False,
+                  f"login returned {d_status}; is an instance on {DENY_BASE}?")
+        else:
+            check("the deny instance still offers registration",
+                  d_reg is not None, str(d_reg))
+            d_token = current_csrf(d_opener, base=DENY_BASE)
+            d_code, d_text = post_guarded(d_opener, DENY_BASE, d_token)
+            check("unregistered client on a deny instance -> 403", d_code == 403,
+                  f"got {d_code}: {d_text[:160]}")
+            check("that 403 is DBSC_REQUIRED, not a generic refusal",
+                  "DBSC_REQUIRED" in d_text, d_text[:160])
+
+            # The control: the same request against the default instance is allowed.
+            # Without this the check above would also pass against a guard that
+            # refuses everything, which is the failure mode `unregistered` exists to
+            # avoid.
+            m_opener, m_jar = new_client()
+            m_status, _, _, _ = login(m_opener, m_jar)
+            m_code, m_text = post_guarded(
+                m_opener, BASE, current_csrf(m_opener, base=BASE))
+            check("the same request on the default (allow) instance -> 200",
+                  m_status == 302 and m_code == 200,
+                  f"login {m_status}, guarded {m_code}: {m_text[:160]}")
 
     summary = f"\n=== {len(PASS)} passed, {len(FAIL)} failed"
     summary += f", {len(SKIP)} skipped ===" if SKIP else " ==="

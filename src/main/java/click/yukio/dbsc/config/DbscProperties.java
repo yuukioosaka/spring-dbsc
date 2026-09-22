@@ -74,6 +74,34 @@ public class DbscProperties {
     /** Rate limiting for the unauthenticated registration/refresh surface. */
     private RateLimit rateLimit = new RateLimit();
 
+    /** How the guard treats a request from a client with no DBSC binding at all. */
+    private Unregistered unregistered = Unregistered.ALLOW;
+
+    /**
+     * What the guard does with a client that has no DBSC binding.
+     *
+     * <p>This is separate from {@code cookieScope} and the other protocol settings:
+     * it is policy, not protocol. The distinction matters because it decides whether
+     * the library is an additional layer or a requirement.
+     */
+    public enum Unregistered {
+        /**
+         * Let it through. DBSC is additive: a browser without support for the
+         * protocol, and a client that has logged in but not yet registered, both
+         * look like this, and neither should be locked out of the application.
+         * This is the default, and it is what makes a guard matcher covering
+         * every route a reasonable thing to write.
+         */
+        ALLOW,
+        /**
+         * Refuse it with {@code 403 DBSC_REQUIRED}. DBSC becomes a requirement:
+         * every browser that does not support the protocol is locked out, so this
+         * is only appropriate when the client population is known to be capable.
+         * A session that registered and then <em>lapsed</em> is refused either way.
+         */
+        DENY
+    }
+
     /**
      * Rate limiting is a SHOULD, not a MUST: the spec leaves the algorithm out of
      * scope. Enabled by default so a public deployment is not trivially abusable.
@@ -222,6 +250,14 @@ public class DbscProperties {
 
     public void setRateLimit(RateLimit rateLimit) {
         this.rateLimit = rateLimit;
+    }
+
+    public Unregistered getUnregistered() {
+        return unregistered;
+    }
+
+    public void setUnregistered(Unregistered unregistered) {
+        this.unregistered = unregistered;
     }
 
     // ---- Derived values, in milliseconds ----

@@ -441,16 +441,16 @@ public class DbscService {
             }
             // Tier none with lastRefreshAt 0: bind() ran but registration has not
             // completed. The browser is still unregistered, not lapsed.
-            return GuardDecision.allow(GuardDecision.Reason.UNREGISTERED);
+            return unregisteredDecision();
         }
 
         if (appSessionId == null || appSessionId.isBlank()) {
-            return GuardDecision.allow(GuardDecision.Reason.UNREGISTERED);
+            return unregisteredDecision();
         }
 
         Optional<Session> byAppSession = storage.getSessionByAppSessionId(appSessionId);
         if (byAppSession.isEmpty()) {
-            return GuardDecision.allow(GuardDecision.Reason.UNREGISTERED);
+            return unregisteredDecision();
         }
 
         // A binding exists for this application session yet the request carried no
@@ -464,6 +464,21 @@ public class DbscService {
 
     public Optional<Session> sessionFor(HttpServletRequest request) {
         return resolveBinderSession(request).flatMap(storage::getSession);
+    }
+
+    /**
+     * Applies the {@code dbsc.unregistered} policy to a client with no binding.
+     *
+     * <p>Every "nothing was ever bound" branch funnels through here, so the policy
+     * has exactly one implementation. The refusal is still reported as
+     * {@link GuardDecision.Reason#UNREGISTERED} rather than as a lapse, so an
+     * application can tell "this client cannot do DBSC" apart from "this session
+     * stopped proving possession".
+     */
+    private GuardDecision unregisteredDecision() {
+        return properties.getUnregistered() == DbscProperties.Unregistered.DENY
+                ? GuardDecision.deny(GuardDecision.Reason.UNREGISTERED)
+                : GuardDecision.allow(GuardDecision.Reason.UNREGISTERED);
     }
 
     // ------------------------------------------------------------------

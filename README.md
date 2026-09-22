@@ -80,8 +80,9 @@ Two things are easy to assume from the name, and both are false here:
   step-up prompt rather than proof of who the caller is.
 
 DBSC is **additive**: adopting the library never silently changes the behaviour of
-an existing endpoint, because nothing is guarded until you declare a
-`GuardedRoute`.
+an existing endpoint, because nothing is guarded until you declare `DbscGuardRoutes`,
+and even then a client that never registered is allowed through unless you opt into
+`dbsc.unregistered: deny`.
 
 ## Requirements
 
@@ -168,10 +169,14 @@ public class MySecurityConfig {
         return http.build();
     }
 
-    /** The one route whose session must be device bound. */
+    /**
+     * The requests whose session must currently be DBSC-protected. Patterns are
+     * ordinary Spring Security matchers, so /api/** means what it means anywhere
+     * else. Declaring no bean leaves the guard a no-op.
+     */
     @Bean
-    public GuardedRoute transferRequiresDbsc() {
-        return GuardedRoute.at("/api/transfer");
+    public DbscGuardRoutes dbscGuardRoutes() {
+        return DbscGuardRoutes.of(new AntPathRequestMatcher("/api/**"));
     }
 }
 ```
@@ -184,11 +189,14 @@ The three details that actually matter, and how each one fails:
 | `addFilterBefore(..., CsrfFilter.class)` **and** CSRF off on the protocol chain | The browser's registration POST carries no CSRF token, so a chain that applies CSRF to `/dbsc/**` rejects it before `DbscFilter` runs |
 | Each bean is registered in **one** chain only | `OncePerRequestFilter` records itself in a request attribute, so the same instance in a second chain silently skips it |
 
-**Declaring no `GuardedRoute` guards nothing**, which is the default and the reason
-adoption is safe: the guard filter is then a single list lookup on every request.
-Skipping the guard entirely is also fine — see
-[Act on the tier](#act-on-the-tier) for the inline form, which is the same check
-without a filter.
+**Declaring no `DbscGuardRoutes` guards nothing**, which is the default and the reason
+adoption is safe. Note that a wide matcher is not the same as strict enforcement: a
+client that never registered is allowed through either way unless you set
+`dbsc.unregistered: deny`. That is what makes `/**`-sized coverage reasonable to
+write — see [What the guard actually decides](#what-the-guard-actually-decides).
+
+Skipping the guard entirely is also fine — see [Act on the tier](#act-on-the-tier) for
+the inline form, which is the same check without a filter.
 
 **Disable Boot's automatic servlet registration.** A `Filter` bean is picked up by the
 servlet container as well as by the security chain, which would run each filter a
@@ -384,8 +392,8 @@ public void logout(HttpServletRequest request, HttpServletResponse response) {
 ### 3. Act on the tier
 
 Your authorization does not change. DBSC is additional state your own code consults, and
-nothing is guarded until you say so: declare a `GuardedRoute` and `dbscGuardFilter`
-enforces the tier there, or read the tier inline. Both forms are in
+nothing is guarded until you say so: declare `DbscGuardRoutes` and `dbscGuardFilter`
+enforces the tier where it matches, or read the tier inline. Both forms are in
 [Act on the tier](#act-on-the-tier).
 
 ## How it is wired (and why)
@@ -480,7 +488,7 @@ this is what they do.
 | `dbsc.terminate(sessionId, request, response)` | On logout, so the browser forgets the binding instead of retrying against a dead session |
 | `dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)` | Whenever your own code wants to know whether this browser is bound |
 | `dbsc.guardDecision(request, appSessionId)` | When you want the guard's decision without the filter, e.g. to branch on *why* a request was refused |
-| `GuardedRoute.at(path)` | To have the filter enforce the tier on a whole route instead |
+| `DbscGuardRoutes.of(matchers…)` | To have the filter enforce the tier where the matchers apply |
 
 **The two ids are different concepts and the library never conflates them.** `sessionId`
 identifies the DBSC session and the stored device key; `appSessionId` identifies *your*
@@ -510,16 +518,23 @@ replaces the first. That is deliberate, so a re-login can re-key an existing ses
 
 ### Act on the tier
 
-Two ways to enforce it, and they check the same thing. **Declaring a route** hands the
+Two ways to enforce it, and they check the same thing. **Declaring a matcher** hands the
 decision to `DbscGuardFilter`, which refuses with `403` and `DBSC_REQUIRED` before your
-handler runs:
+handler runs. Patterns are ordinary Spring Security matchers, so the same
+`/api/**` you would write in `authorizeHttpRequests` works here:
 
 ```java
 @Bean
-GuardedRoute transferRequiresDbsc() {
-    return GuardedRoute.at("/api/transfer");
+DbscGuardRoutes dbscGuardRoutes() {
+    return DbscGuardRoutes.of(
+            new AntPathRequestMatcher("/api/**"),
+            new AntPathRequestMatcher("/account/**"));
 }
 ```
+
+Several matchers are OR-ed, and `DbscGuardRoutes` is itself a `RequestMatcher`, so it
+composes with `AndRequestMatcher` and friends. A matcher is only the **range** — what
+happens inside it is the policy below.
 
 **Reading the tier inline** is for a route where a blanket refusal is the wrong answer —
 where the response should differ, or where only part of the handler needs protection:
@@ -546,9 +561,21 @@ situations that must be answered differently:
 | Registered, currently proving possession | allow |
 | Registered once, then demoted (or revoked) | **refuse** |
 | Bound, but the record is gone | **refuse** — it was bound and is not any more |
-| `bind()` ran, registration has not completed yet | allow — the pre-registration window |
-| No DBSC cookie, and no binding for this application session | allow — DBSC is additive |
+| `bind()` ran, registration has not completed yet | allow (or refuse under `dbsc.unregistered: deny`) |
+| No DBSC cookie, and no binding for this application session | allow (or refuse under `dbsc.unregistered: deny`) |
 | No DBSC cookie, but a binding exists for this application session | **refuse** |
+
+The two rows marked `dbsc.unregistered` are the one **policy** choice in the table, and
+they are what `DbscService.Unregistered` in `DbscProperties` controls:
+
+| `dbsc.unregistered` | Meaning |
+|---|---|
+| `allow` (default) | DBSC is an **additional layer**. A browser without support for the protocol, and a client that has logged in but not yet registered, both reach the application. A session that bound and then lapsed is still refused. |
+| `deny` | DBSC is a **requirement**. Any client that has not registered is refused with `403 DBSC_REQUIRED`, so browsers without support are locked out. Only appropriate when the client population is known to be capable. |
+
+The distinction matters when choosing a matcher: under `allow` a matcher covering `/**`
+does not lock anyone out, and still catches every lapsed session. Under `deny` the same
+matcher is a hard requirement on every route.
 
 `DbscGuardFilter` therefore delegates to `dbsc.guardDecision(request, appSessionId)`
 rather than comparing tiers itself. Use the same call if you want to branch on the reason
@@ -595,6 +622,7 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | Key | Default | Notes |
 |---|---|---|
 | `secure` | `true` | `__Host-` cookies + `Secure`. **Turn off only for localhost HTTP** |
+| `unregistered` | `allow` | What the guard does with a client that has no DBSC binding: `allow` (additive) or `deny` (required) |
 | `cookie-scope` | `host` | `site` enables multi-subdomain and requires `cookie-domain` |
 | `cookie-domain` | — | e.g. `example.com`; required for `site` scope |
 | `registration-path` | `/dbsc/regist` | **prefix** for the registration route, not a full path: the advertised route is `<prefix>/<token>` |

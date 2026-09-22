@@ -259,6 +259,48 @@ class GuardDecisionTest {
     }
 
     // ------------------------------------------------------------------
+    // dbsc.unregistered: the one policy knob
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("unregistered DENY refuses a client that never bound anything")
+    void unregisteredDenyRefusesAFreshClient() {
+        properties.setUnregistered(DbscProperties.Unregistered.DENY);
+
+        GuardDecision decision = decide(null);
+
+        assertFalse(decision.allowed());
+        assertEquals(GuardDecision.Reason.UNREGISTERED, decision.reason());
+    }
+
+    @Test
+    @DisplayName("unregistered DENY is still only about absence: a lapse stays a lapse")
+    void unregisteredDenyDoesNotMaskALapse() {
+        // Denying unregistered clients is a policy about clients with no binding.
+        // A session that bound and lapsed must keep reporting LAPSED, so an
+        // application can tell the two apart and react differently.
+        properties.setUnregistered(DbscProperties.Unregistered.DENY);
+        storage.setSession(session().withTierAndLastRefreshAt(ProtectionTier.NONE, NOW_MS));
+
+        GuardDecision decision = decide(bindingCookie());
+
+        assertFalse(decision.allowed());
+        assertEquals(GuardDecision.Reason.LAPSED, decision.reason());
+    }
+
+    @Test
+    @DisplayName("unregistered DENY still lets a registered session through")
+    void unregisteredDenyAllowsAProtectedSession() {
+        properties.setUnregistered(DbscProperties.Unregistered.DENY);
+        storage.setSession(session().withTierAndLastRefreshAt(ProtectionTier.DBSC, NOW_MS));
+
+        GuardDecision decision = decide(bindingCookie());
+
+        assertTrue(decision.allowed());
+        assertEquals(GuardDecision.Reason.PROTECTED, decision.reason());
+    }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
 

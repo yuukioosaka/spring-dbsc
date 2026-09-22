@@ -2,7 +2,7 @@ package click.yukio.dbsc;
 
 import click.yukio.dbsc.core.GuardDecision;
 import click.yukio.dbsc.web.DbscGuardFilter;
-import click.yukio.dbsc.web.GuardedRoute;
+import click.yukio.dbsc.web.DbscGuardRoutes;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -11,6 +11,7 @@ import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockHttpSession;
+import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 
 import java.util.List;
 
@@ -38,11 +39,18 @@ class GuardFilterTest {
     @BeforeEach
     void setUp() {
         dbsc = Mockito.mock(DbscService.class);
-        guard = new DbscGuardFilter(dbsc, List.of(GuardedRoute.at(GUARDED)));
+        guard = new DbscGuardFilter(dbsc, DbscGuardRoutes.of(
+                new AntPathRequestMatcher(GUARDED)));
     }
 
     private MockHttpServletRequest request(String path) {
-        return new MockHttpServletRequest("POST", path);
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", path);
+        // AntPathRequestMatcher matches on the path *within the context*, so it
+        // reads servletPath rather than requestURI. MockHttpServletRequest derives
+        // servletPath from the URI in the constructor, but setting it explicitly
+        // keeps the mock honest about what a real container hands the filter.
+        request.setServletPath(path);
+        return request;
     }
 
     private void decide(GuardDecision decision) {
@@ -163,7 +171,9 @@ class GuardFilterTest {
     @Test
     @DisplayName("declaring no guarded routes leaves the filter inert")
     void noGuardedRoutesMeansNoGuard() throws Exception {
-        DbscGuardFilter inert = new DbscGuardFilter(dbsc, List.of());
+        // What the auto-configuration hands the filter when the application declares
+        // no DbscGuardRoutes bean.
+        DbscGuardFilter inert = new DbscGuardFilter(dbsc, request -> false);
 
         MockHttpServletRequest request = request(GUARDED);
         MockFilterChain chain = new MockFilterChain();
@@ -174,10 +184,39 @@ class GuardFilterTest {
     }
 
     @Test
-    @DisplayName("a guarded route has to be a real path")
-    void guardedRouteValidatesItsPath() {
-        assertThrows(IllegalArgumentException.class, () -> GuardedRoute.at(null));
-        assertThrows(IllegalArgumentException.class, () -> GuardedRoute.at("  "));
-        assertThrows(IllegalArgumentException.class, () -> GuardedRoute.at("api/transfer"));
+    @DisplayName("a matcher can cover a prefix, the way authorizeHttpRequests does")
+    void prefixMatcherGuardsEveryPathUnderIt() throws Exception {
+        DbscGuardFilter byPrefix = new DbscGuardFilter(dbsc, DbscGuardRoutes.of(
+                new AntPathRequestMatcher("/api/**")));
+        decide(GuardDecision.deny(GuardDecision.Reason.LAPSED));
+
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        byPrefix.doFilter(request("/api/v1/transfer"), response, new MockFilterChain());
+        assertEquals(403, response.getStatus());
+
+        // Outside the pattern, the filter does not run at all.
+        MockFilterChain chain = new MockFilterChain();
+        byPrefix.doFilter(request("/other/transfer"), new MockHttpServletResponse(), chain);
+        assertNotNull(chain.getRequest());
+    }
+
+    @Test
+    @DisplayName("several matchers are OR-ed")
+    void severalMatchersAreOred() throws Exception {
+       DbscGuardFilter multi = new DbscGuardFilter(dbsc, DbscGuardRoutes.of(List.of(
+                new AntPathRequestMatcher("/api/**"),
+                new AntPathRequestMatcher("/account/**"))));
+        decide(GuardDecision.deny(GuardDecision.Reason.LAPSED));
+
+        MockHttpServletResponse second = new MockHttpServletResponse();
+        multi.doFilter(request("/account/settings"), second, new MockFilterChain());
+        assertEquals(403, second.getStatus());
+    }
+
+    @Test
+    @DisplayName("an empty matcher list is refused rather than silently disabling the guard")
+    void emptyRoutesAreRejected() {
+        assertThrows(IllegalArgumentException.class, DbscGuardRoutes::of);
+        assertThrows(IllegalArgumentException.class, () -> DbscGuardRoutes.of(List.of()));
     }
 }

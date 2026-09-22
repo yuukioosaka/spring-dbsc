@@ -13,9 +13,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.security.web.util.matcher.RequestMatcher;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -68,8 +68,11 @@ import java.util.Map;
  * the refresh route and terminates the session, and this filter runs in the same
  * chain.
  *
- * <p>Guard no paths by default. Declaring a {@link GuardedRoute} per route is
- * what opts in, and the filter is a no-op — one list lookup — until then.
+ * <p>Which requests it runs on is declared with a {@link DbscGuardRoutes} bean. Guard
+ * nothing by default: with no such bean the filter is a no-op, and declaring one is
+ * what opts in. The matcher decides only <em>where</em> the question is asked; what
+ * the answer is — and so whether an unregistered client is allowed through — is
+ * {@link DbscService#guardDecision}'s, and is configured separately.
  */
 public class DbscGuardFilter extends OncePerRequestFilter {
 
@@ -79,16 +82,21 @@ public class DbscGuardFilter extends OncePerRequestFilter {
     public static final String REQUIRED_CODE = "DBSC_REQUIRED";
 
     private final DbscService dbsc;
-    private final List<String> guardedPaths;
+    private final RequestMatcher guardRoutes;
 
-    public DbscGuardFilter(DbscService dbsc, List<GuardedRoute> guardedRoutes) {
+    /**
+     * @param guardRoutes the requests to guard. Matched with a Spring Security
+     *                    {@link RequestMatcher}, so patterns like {@code /api/**} work
+     *                    the same way they do in {@code authorizeHttpRequests}
+     */
+    public DbscGuardFilter(DbscService dbsc, RequestMatcher guardRoutes) {
         this.dbsc = dbsc;
-        this.guardedPaths = guardedRoutes.stream().map(GuardedRoute::path).toList();
+        this.guardRoutes = guardRoutes;
     }
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return !guardedPaths.contains(request.getRequestURI());
+        return !guardRoutes.matches(request);
     }
 
     @Override

@@ -240,6 +240,22 @@
     </profile>
 
     <!--
+      A third demo instance running dbsc.unregistered=deny. The policy belongs to the
+      server, so both outcomes cannot be observed against one process; this instance
+      is the deny half of the comparison scripts/e2e.py makes.
+
+        mvn -Pdemo,deny-e2e -Dmaven.repo.local=.m2repo spring-boot:run
+
+      See src/demo/resources/application-deny-e2e.yaml.
+    -->
+    <profile>
+      <id>deny-e2e</id>
+      <properties>
+        <dbsc.demo.profiles>,deny-e2e</dbsc.demo.profiles>
+      </properties>
+    </profile>
+
+    <!--
       The OIDC variant of the demo: adds an Entra ID login on top of src/demo and
       turns off the form-login chain (the two cannot coexist on one chain).
 

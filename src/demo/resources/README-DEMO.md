@@ -191,11 +191,12 @@ The browser flow above is the manual check. For a repeatable one, run the suite 
 browser would, plus the ones a browser will not reach on demand (replayed
 challenges, malformed headers, expired challenges).
 
-The one-command form, which starts both instances the suite needs and then runs it:
+The one-command form, which starts the three instances the suite needs and then runs it:
 
 ```sh
 sh scripts/run-demos.sh                # in another shell
-DBSC_CHALLENGE_TTL=2 DBSC_RATE_LIMIT_FAILURES=5 python3 scripts/e2e.py
+DBSC_CHALLENGE_TTL=2 DBSC_RATE_LIMIT_FAILURES=5 DBSC_RATE_LIMIT_WINDOW=90s \
+    DBSC_DENY_BASE=https://localhost:9444 python3 scripts/e2e.py
 ```
 
 It needs the `cryptography` package (for ES256 signing) and prints a per-check
@@ -240,9 +241,28 @@ It listens on 9443 with its own database file, so it cannot disturb the main run
 `DBSC_RATE_LIMIT_FAILURES` must match `dbsc.rate-limit.failure-capacity` in
 `application-ratelimit-e2e.yaml`; nothing reads it from there. The limiter keys on
 client IP and holds counters for a whole window, so a suite run right after another
-may find the instance already throttled — the check reports that as *skipped*
-rather than pretending the attempt count was observed. `scripts/run-demos.sh`
+may find the instance already throttled — the check reports that as *skipped* rather
+than pretending the attempt count was observed. `scripts/run-demos.sh`
 starts both instances for you.
+
+### Testing the `unregistered` policy
+
+`dbsc.unregistered` is a property of the **server**, so its two outcomes cannot both
+be observed against one process, and the checks need a **third** instance started with
+`deny`:
+
+```sh
+mvn -Pdemo,deny-e2e -Dmaven.repo.local=.m2repo \
+    -Dspring-boot.run.jvmArguments="-Ddbsc.challenge-ttl=2s" spring-boot:run
+DBSC_DENY_BASE=https://localhost:9444 python3 scripts/e2e.py
+```
+
+Section L logs in to both instances without ever registering, POSTs the same guarded
+route to each, and asserts that the deny instance answers 403 `DBSC_REQUIRED` while the
+default one answers 200. The allow check is the control — without it, a guard that
+refused *everything* would pass the deny check. It listens on 9444 with its own
+database file, and needs no JVM property: the policy comes from
+`application-deny-e2e.yaml`, which is where an adopter would set it too.
 
 ## Notes on the wiring
 
@@ -254,7 +274,7 @@ of or work around here:
   CSRF disabled. Chromium drives these routes before any user session exists and
   posts no CSRF token with them.
 - `@Order(1)` — the application chain: form login, logout, the `/app` routes. The
-  `dbscGuardFilter` is added here and `/app/payment` is declared as a `GuardedRoute`,
+  `dbscGuardFilter` is added here and `/app/payment` is declared with a `DbscGuardRoutes`
   so it answers 403 `DBSC_REQUIRED` unless the session's tier is currently `dbsc`.
   `/app/whoami` is deliberately left unguarded, so it reports the tier on a bare
   login cookie.

@@ -2,10 +2,10 @@ package click.yukio.dbsc.web;
 
 import click.yukio.dbsc.DbscService;
 import click.yukio.dbsc.config.DbscProperties;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-
-import java.util.List;
+import org.springframework.security.web.util.matcher.RequestMatcher;
 
 /**
  * The DBSC filters as plain beans.
@@ -37,14 +37,20 @@ public class DbscFilterConfiguration {
      * The route guard: refuses a request whose session DBSC does not currently
      * protect.
      *
-     * <p>Built from the application's own {@link GuardedRoute} beans, so it
-     * guards nothing until at least one is declared. An application that wants
-     * the tier check inline instead, on a route that is not worth a filter, can
-     * call {@code sessionFor} and {@code tierFor} directly — this filter exists
-     * so that the common case does not have to repeat that block everywhere.
+     * <p>Built from the application's own {@link DbscGuardRoutes} bean, so it guards
+     * nothing until one is declared. An application that wants the tier check inline
+     * instead, on a route that is not worth a filter, can call {@code sessionFor} and
+     * {@code tierFor} directly — this filter exists so that the common case does not
+     * have to repeat that block everywhere.
+     *
+     * <p>{@code ObjectProvider} rather than a direct dependency: with no bean the
+     * filter must still exist (an application may wire it and find it does nothing),
+     * and a missing guard configuration is the documented default rather than a
+     * context failure.
      */
     @Bean
-    public DbscGuardFilter dbscGuardFilter(DbscService dbsc, List<GuardedRoute> guardedRoutes) {
-        return new DbscGuardFilter(dbsc, guardedRoutes);
+    public DbscGuardFilter dbscGuardFilter(DbscService dbsc, ObjectProvider<DbscGuardRoutes> routes) {
+        RequestMatcher matcher = routes.getIfAvailable();
+        return new DbscGuardFilter(dbsc, matcher == null ? request -> false : matcher);
     }
 }

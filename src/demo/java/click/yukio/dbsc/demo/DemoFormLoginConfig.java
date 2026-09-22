@@ -3,7 +3,7 @@ package click.yukio.dbsc.demo;
 import click.yukio.dbsc.DbscService;
 import click.yukio.dbsc.web.DbscFilter;
 import click.yukio.dbsc.web.DbscGuardFilter;
-import click.yukio.dbsc.web.GuardedRoute;
+import click.yukio.dbsc.web.DbscGuardRoutes;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
@@ -179,10 +179,14 @@ public class DemoFormLoginConfig {
      * The routes whose session must currently be DBSC-protected. Declaring none
      * leaves the guard filter a no-op, which is the library's default: DBSC
      * protects nothing until the application says which requests matter.
+     *
+     * <p>The pattern is what the application decides, not the library: a wider
+     * matcher does not mean a stricter application, because a client that never
+     * registered is allowed through either way ({@code dbsc.unregistered}).
      */
     @Bean
-    GuardedRoute paymentRequiresDbsc() {
-        return GuardedRoute.at("/app/payment");
+    DbscGuardRoutes dbscGuardRoutes() {
+        return DbscGuardRoutes.of(new AntPathRequestMatcher("/app/payment"));
     }
 
     /**

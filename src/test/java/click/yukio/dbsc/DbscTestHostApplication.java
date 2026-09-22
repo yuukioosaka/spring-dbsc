@@ -6,7 +6,7 @@ import click.yukio.dbsc.core.ProtectionTier;
 import click.yukio.dbsc.core.Session;
 import click.yukio.dbsc.web.DbscFilter;
 import click.yukio.dbsc.web.DbscGuardFilter;
-import click.yukio.dbsc.web.GuardedRoute;
+import click.yukio.dbsc.web.DbscGuardRoutes;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -114,8 +114,8 @@ public class DbscTestHostApplication {
          * request that DBSC enforces against one it only observes.
          */
         @Bean
-        GuardedRoute hostPaymentRequiresDbsc() {
-            return GuardedRoute.at("/host/payment");
+        DbscGuardRoutes hostGuardRoutes() {
+            return DbscGuardRoutes.of(new AntPathRequestMatcher("/host/payment"));
         }
     }
 

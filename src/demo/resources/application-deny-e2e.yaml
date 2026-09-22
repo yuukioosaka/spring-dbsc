@@ -1,0 +1,32 @@
+# A third demo instance for the dbsc.unregistered checks in scripts/e2e.py.
+#
+# dbsc.unregistered is a property of the *server*, not of the client, so the two
+# outcomes cannot both be observed against one process. The main demo runs the
+# default (allow) and this one runs deny; section L asks both the same question and
+# asserts they disagree, which is what pins the knob.
+#
+# Run alongside the main demo:
+#
+#   mvn -Pdemo,deny-e2e -Dmaven.repo.local=.m2repo spring-boot:run
+#   DBSC_DENY_BASE=https://localhost:9444 python3 scripts/e2e.py
+#
+# scripts/run-demos.sh starts it for you.
+
+server:
+  port: 9444
+
+spring:
+  datasource:
+    # Its own file. H2 takes an exclusive lock, so sharing data/demo.mv.db with the
+    # running main demo fails at startup.
+    url: jdbc:h2:file:./data/e2e-deny;DB_CLOSE_DELAY=-1
+
+dbsc:
+  # The whole point of this instance. DENY turns DBSC from an extra layer into a
+  # requirement: a client that has not registered is refused on every guarded route,
+  # which locks out browsers with no DBSC support. Refusals are 403 DBSC_REQUIRED.
+  unregistered: deny
+
+logging:
+  level:
+    click.yukio.dbsc: DEBUG

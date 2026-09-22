@@ -28,6 +28,13 @@ dbsc:
   challenge-ttl: 5m
   refresh-grace: 30s
   session-ttl: 7d
+  # What the route guard does with a client that has no DBSC binding at all.
+  # "allow" keeps DBSC an additional layer: a browser without support for the
+  # protocol, and a client that has logged in but not yet registered, both reach
+  # the application. A session that bound and then lapsed is refused either way.
+  # "deny" makes DBSC a requirement and locks out every unsupported browser, so
+  # only set it when the client population is known to be capable.
+  unregistered: allow
   # Two budgets per client: total requests, and failed attempts. The failure
   # budget is what stops an attacker grinding challenges, since it trips long
   # before ordinary request volume would.
