@@ -4,7 +4,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Names and attributes for the three DBSC cookies (spec 07).
+ * Names and attributes for the DBSC cookies (spec 07).
+ *
+ * <p>Two cookies remain: the binding cookie that names the session, and the
+ * challenge cookie carrying the single-use JTI. The pre-registration cookie
+ * ({@code dbsc-reg}) is gone — the registration route is identified by a
+ * single-use token in its <em>path</em> instead, which is what lets registration
+ * work behind a cross-site callback where a {@code SameSite=Lax} cookie would be
+ * withheld.
  *
  * <p>Cookie names are <strong>never hardcoded</strong>: they are derived from the
  * secure flag and the cookie scope, so the name written into the JSON config's
@@ -14,7 +21,6 @@ public final class CookieScope {
 
     public static final String CHALLENGE_SUFFIX = "dbsc-challenge";
     public static final String BINDING_SUFFIX = "dbsc-session";
-    public static final String REGISTRATION_SUFFIX = "dbsc-reg";
 
     /** How widely the binding cookie is shared. */
     public enum Scope {
@@ -90,10 +96,6 @@ public final class CookieScope {
 
     public String bindingCookieName() {
         return prefix() + BINDING_SUFFIX;
-    }
-
-    public String registrationCookieName() {
-        return prefix() + REGISTRATION_SUFFIX;
     }
 
     public String challengeCookieName() {

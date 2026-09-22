@@ -3,6 +3,7 @@ package click.yukio.dbsc.storage;
 import click.yukio.dbsc.core.DeviceKey;
 import click.yukio.dbsc.core.Challenge;
 import click.yukio.dbsc.core.Json;
+import click.yukio.dbsc.core.RegistrationToken;
 import click.yukio.dbsc.core.Session;
 import click.yukio.dbsc.core.StorageAdapter;
 
@@ -45,14 +46,19 @@ public class JdbcStorageAdapter implements StorageAdapter {
             statement.executeUpdate("""
                     CREATE TABLE IF NOT EXISTS dbsc_sessions (
                         id              VARCHAR(255) PRIMARY KEY,
+                        app_session_id  VARCHAR(255) NOT NULL,
                         user_id         VARCHAR(255) NOT NULL,
                         tier            VARCHAR(16)  NOT NULL,
+                        revoked         BOOLEAN      NOT NULL,
                         created_at      BIGINT       NOT NULL,
                         expires_at      BIGINT       NOT NULL,
                         last_refresh_at BIGINT       NOT NULL
                     )
                     """);
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS dbsc_sessions_user_idx ON dbsc_sessions (user_id)");
+            // At most one binding per application session, and this is the lookup a
+            // guarded route makes when a request arrives with no DBSC cookie.
+            statement.executeUpdate("CREATE UNIQUE INDEX IF NOT EXISTS dbsc_sessions_app_session_idx ON dbsc_sessions (app_session_id)");
             statement.executeUpdate("""
                     CREATE TABLE IF NOT EXISTS dbsc_device_keys (
                         session_id VARCHAR(255) PRIMARY KEY,
@@ -71,6 +77,16 @@ public class JdbcStorageAdapter implements StorageAdapter {
                     )
                     """);
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS dbsc_challenges_session_idx ON dbsc_challenges (session_id)");
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS dbsc_registration_tokens (
+                        token      VARCHAR(255) PRIMARY KEY,
+                        session_id VARCHAR(255) NOT NULL,
+                        created_at BIGINT       NOT NULL,
+                        expires_at BIGINT       NOT NULL,
+                        consumed   BOOLEAN      NOT NULL
+                    )
+                    """);
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS dbsc_registration_tokens_session_idx ON dbsc_registration_tokens (session_id)");
         } catch (SQLException e) {
             throw new StorageException("failed to initialize the DBSC schema", e);
         }
@@ -80,32 +96,43 @@ public class JdbcStorageAdapter implements StorageAdapter {
 
     @Override
     public Optional<Session> getSession(String id) {
-        String sql = "SELECT id, user_id, tier, created_at, expires_at, last_refresh_at "
+        String sql = "SELECT id, app_session_id, user_id, tier, revoked, created_at, expires_at, last_refresh_at "
                 + "FROM dbsc_sessions WHERE id = ?";
         return StorageSupport.optional(queryOne(sql, statement -> statement.setString(1, id), this::readSession));
+    }
+
+    @Override
+    public Optional<Session> getSessionByAppSessionId(String appSessionId) {
+        String sql = "SELECT id, app_session_id, user_id, tier, revoked, created_at, expires_at, last_refresh_at "
+                + "FROM dbsc_sessions WHERE app_session_id = ?";
+        return StorageSupport.optional(queryOne(
+                sql, statement -> statement.setString(1, appSessionId), this::readSession));
     }
 
     @Override
     public void setSession(Session session) {
         String sql = """
                 MERGE INTO dbsc_sessions
-                    (id, user_id, tier, created_at, expires_at, last_refresh_at)
+                    (id, app_session_id, user_id, tier, revoked, created_at, expires_at, last_refresh_at)
                 KEY (id)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         update(sql, statement -> {
             statement.setString(1, session.id());
-            statement.setString(2, session.userId());
-            statement.setString(3, session.tier().wireValue());
-            statement.setLong(4, session.createdAt());
-            statement.setLong(5, session.expiresAt());
-            statement.setLong(6, session.lastRefreshAt());
+            statement.setString(2, session.appSessionId());
+            statement.setString(3, session.userId());
+            statement.setString(4, session.tier().wireValue());
+            statement.setBoolean(5, session.revoked());
+            statement.setLong(6, session.createdAt());
+            statement.setLong(7, session.expiresAt());
+            statement.setLong(8, session.lastRefreshAt());
         });
     }
 
     @Override
     public void deleteSession(String id) {
         update("DELETE FROM dbsc_challenges WHERE session_id = ?", s -> s.setString(1, id));
+        update("DELETE FROM dbsc_registration_tokens WHERE session_id = ?", s -> s.setString(1, id));
         update("DELETE FROM dbsc_device_keys WHERE session_id = ?", s -> s.setString(1, id));
         update("DELETE FROM dbsc_sessions WHERE id = ?", s -> s.setString(1, id));
     }
@@ -188,11 +215,59 @@ public class JdbcStorageAdapter implements StorageAdapter {
         }
     }
 
+    // ---- Registration tokens ----
+
+    @Override
+    public Optional<RegistrationToken> getRegistrationToken(String token) {
+        String sql = "SELECT token, session_id, created_at, expires_at, consumed "
+                + "FROM dbsc_registration_tokens WHERE token = ?";
+        return StorageSupport.optional(queryOne(
+                sql, statement -> statement.setString(1, token), this::readRegistrationToken));
+    }
+
+    @Override
+    public void setRegistrationToken(RegistrationToken token) {
+        String sql = """
+                MERGE INTO dbsc_registration_tokens (token, session_id, created_at, expires_at, consumed)
+                KEY (token)
+                VALUES (?, ?, ?, ?, ?)
+                """;
+        update(sql, statement -> {
+            statement.setString(1, token.token());
+            statement.setString(2, token.sessionId());
+            statement.setLong(3, token.createdAt());
+            statement.setLong(4, token.expiresAt());
+            statement.setBoolean(5, token.consumed());
+        });
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>The conditional update writes only when the row is still unconsumed and
+     * reports the affected-row count: exactly one concurrent caller observes
+     * {@code true}.
+     */
+    @Override
+    public boolean consumeRegistrationToken(String token) {
+        String sql = "UPDATE dbsc_registration_tokens SET consumed = true WHERE token = ? AND consumed = false";
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, token);
+            return statement.executeUpdate() == 1;
+        } catch (SQLException e) {
+            throw new StorageException("consumeRegistrationToken failed for token", e);
+        }
+    }
+
     // ---- Revocation ----
 
     @Override
     public void revokeSession(String sessionId) {
-        deleteSession(sessionId);
+        // Marked, not deleted: a later request carrying the same application session
+        // id without its DBSC cookies must still be recognisable as bound.
+        update("UPDATE dbsc_sessions SET revoked = true WHERE id = ?",
+                statement -> statement.setString(1, sessionId));
     }
 
     // ---- Row mapping ----
@@ -200,8 +275,10 @@ public class JdbcStorageAdapter implements StorageAdapter {
     private Session readSession(ResultSet rs) throws SQLException {
         return new Session(
                 rs.getString("id"),
+                rs.getString("app_session_id"),
                 rs.getString("user_id"),
                 click.yukio.dbsc.core.ProtectionTier.fromWire(rs.getString("tier")),
+                rs.getBoolean("revoked"),
                 rs.getLong("created_at"),
                 rs.getLong("expires_at"),
                 rs.getLong("last_refresh_at"));
@@ -221,6 +298,15 @@ public class JdbcStorageAdapter implements StorageAdapter {
     private Challenge readChallenge(ResultSet rs) throws SQLException {
         return new Challenge(
                 rs.getString("jti"),
+                rs.getString("session_id"),
+                rs.getLong("created_at"),
+                rs.getLong("expires_at"),
+                rs.getBoolean("consumed"));
+    }
+
+    private RegistrationToken readRegistrationToken(ResultSet rs) throws SQLException {
+        return new RegistrationToken(
+                rs.getString("token"),
                 rs.getString("session_id"),
                 rs.getLong("created_at"),
                 rs.getLong("expires_at"),

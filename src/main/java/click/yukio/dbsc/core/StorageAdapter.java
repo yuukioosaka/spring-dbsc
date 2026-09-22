@@ -18,6 +18,16 @@ public interface StorageAdapter {
 
     Optional<Session> getSession(String id);
 
+    /**
+     * The session bound to an application session id, if any.
+     *
+     * <p>This is what lets a guarded route tell a browser that never registered
+     * apart from one that registered and then dropped its DBSC cookies: the
+     * application's own session id is the one identifier a request cannot omit.
+     * At most one record exists per application session id.
+     */
+    Optional<Session> getSessionByAppSessionId(String appSessionId);
+
     /** Create or replace. */
     void setSession(Session session);
 
@@ -55,8 +65,35 @@ public interface StorageAdapter {
      */
     boolean consumeChallenge(String jti);
 
+    // ---- Registration tokens ----
+
+    /**
+     * Look up the registration token a registration POST presented in its path.
+     */
+    Optional<RegistrationToken> getRegistrationToken(String token);
+
+    void setRegistrationToken(RegistrationToken token);
+
+    /**
+     * Atomically mark the token consumed and report whether <em>this</em> call was
+     * the one that consumed it.
+     *
+     * <p>Returns {@code true} if the token was unconsumed and this call consumed
+     * it; {@code false} if it was already consumed or does not exist.
+     *
+     * <p>Same rule as {@link #consumeChallenge}: this MUST NOT be a read followed
+     * by a separate write. The token is single-use precisely so that a registration
+     * POST captured from a log or a proxy cannot be replayed into a second binding.
+     */
+    boolean consumeRegistrationToken(String token);
+
     // ---- Revocation ----
 
-    /** Invalidate one session's binding. Called on logout. */
+    /**
+     * Ends one session's binding, called on logout. The record is kept and marked
+     * revoked rather than deleted, so a later request that presents the same
+     * application session id without its DBSC cookies can still be recognised as
+     * having had a binding.
+     */
     void revokeSession(String sessionId);
 }

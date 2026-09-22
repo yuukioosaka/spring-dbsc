@@ -54,10 +54,10 @@ class FilterStandaloneTest {
     @Test
     @DisplayName("a DBSC path never reaches the rest of the chain")
     void dbscRouteTerminatesTheChain() throws Exception {
-        Mockito.when(dbsc.handleRegistration(Mockito.any(), Mockito.any()))
+        Mockito.when(dbsc.handleRegistration(Mockito.any(), Mockito.any(), Mockito.any()))
                 .thenReturn(java.util.Map.of("session_identifier", "sess_1"));
 
-        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/dbsc/registration");
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/dbsc/regist/tok_1");
         MockHttpServletResponse response = new MockHttpServletResponse();
         MockFilterChain chain = new MockFilterChain();
 
@@ -71,11 +71,11 @@ class FilterStandaloneTest {
     @Test
     @DisplayName("a DBSC failure is 403 with a JSON error, emitted by the filter itself")
     void dbscFailureIsForbidden() throws Exception {
-        Mockito.when(dbsc.handleRegistration(Mockito.any(), Mockito.any()))
+        Mockito.when(dbsc.handleRegistration(Mockito.any(), Mockito.any(), Mockito.any()))
                 .thenThrow(new click.yukio.dbsc.core.DbscException(
                         click.yukio.dbsc.core.DbscErrorCode.SIGNATURE_INVALID, "bad signature"));
 
-        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/dbsc/registration");
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/dbsc/regist/tok_1");
         MockHttpServletResponse response = new MockHttpServletResponse();
         MockFilterChain chain = new MockFilterChain();
 

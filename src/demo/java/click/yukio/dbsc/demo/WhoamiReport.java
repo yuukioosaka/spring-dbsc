@@ -25,10 +25,10 @@ import java.util.Optional;
  *       "broken" and "this browser will never support it".</li>
  * </ul>
  *
- * <p>Note that {@code dbscSessionId} is expected to equal {@code httpSessionId}:
- * that equality is the whole point of passing the application's own session id to
- * {@code bind()}. If they ever diverge, the DBSC binding has been coupled to a
- * session the application no longer uses.
+ * <p>{@code dbscSessionId} and {@code httpSessionId} are two independent
+ * identifiers: the first is minted by the login route and identifies the DBSC
+ * binding, the second belongs to the application's own session. They are shown
+ * side by side precisely because they are <em>not</em> expected to match.
  */
 record WhoamiReport(
         String httpSessionId,
@@ -68,7 +68,6 @@ record WhoamiReport(
         map.put("tier", tier);
         map.put("deviceKey", deviceKey);
         map.put("skippedReason", skippedReason);
-        map.put("coupled", java.util.Objects.equals(httpSessionId, dbscSessionId));
         return map;
     }
 

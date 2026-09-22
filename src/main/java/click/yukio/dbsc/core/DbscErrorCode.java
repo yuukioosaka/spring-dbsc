@@ -22,6 +22,17 @@ public enum DbscErrorCode {
     RATE_LIMITED,
 
     /**
+     * The registration path carried a token that has already been used. Separate
+     * from {@link #SESSION_NOT_FOUND} because the two mean very different things: an
+     * unknown token is a path that was never ours, while a consumed one is a
+     * captured registration POST being replayed.
+     */
+    REGISTRATION_TOKEN_CONSUMED,
+
+    /** The registration token's TTL passed before the browser registered. */
+    REGISTRATION_TOKEN_EXPIRED,
+
+    /**
      * A structurally incomplete request: a missing cookie or body field. Spec 08
      * maps this to 400 rather than 403, because it is a client bug and not a
      * rejected signature.

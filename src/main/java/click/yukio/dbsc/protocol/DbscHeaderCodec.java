@@ -22,7 +22,7 @@ public final class DbscHeaderCodec {
 
     /**
      * Builds the {@code Secure-Session-Registration} value:
-     * {@code (ES256);path="/dbsc/registration";challenge="<jti>"}.
+     * {@code (ES256);path="/dbsc/regist/<token>";challenge="<jti>"}.
      *
      * <p>Segments are joined with {@code ;} and <strong>no spaces</strong>, the
      * values are double-quoted, and there is deliberately <strong>no

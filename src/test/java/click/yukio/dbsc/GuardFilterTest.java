@@ -1,7 +1,6 @@
 package click.yukio.dbsc;
 
-import click.yukio.dbsc.core.ProtectionTier;
-import click.yukio.dbsc.core.Session;
+import click.yukio.dbsc.core.GuardDecision;
 import click.yukio.dbsc.web.DbscGuardFilter;
 import click.yukio.dbsc.web.GuardedRoute;
 import org.junit.jupiter.api.BeforeEach;
@@ -11,25 +10,23 @@ import org.mockito.Mockito;
 import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.mock.web.MockHttpSession;
 
 import java.util.List;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The tier guard, at the filter boundary.
+ * The guard filter at the boundary: what it refuses, what it lets through, and
+ * what it hands to the decision.
  *
- * <p>These pin the contract an application depends on: a guarded route refuses
- * with 403 and {@code DBSC_REQUIRED} whenever the session is not currently
- * protected, and passes through untouched when it is. Everything else in the
- * chain — authentication, authorization, the route itself — is unchanged, which
- * is what {@link DbscGuardFilter} existing as a filter rather than as a
- * replacement for the application's own authorization is meant to guarantee.
+ * <p>The decision itself lives in {@link DbscService#guardDecision}, which needs the
+ * session store; here it is stubbed so these pin the filter's own contract. The
+ * rules themselves are covered in {@link GuardDecisionTest}.
  */
 class GuardFilterTest {
 
@@ -48,9 +45,8 @@ class GuardFilterTest {
         return new MockHttpServletRequest("POST", path);
     }
 
-    private static Session session(String id, ProtectionTier tier) {
-        long now = System.currentTimeMillis();
-        return new Session(id, "user_1", tier, now, now + 60_000, 0);
+    private void decide(GuardDecision decision) {
+        Mockito.when(dbsc.guardDecision(Mockito.any(), Mockito.any())).thenReturn(decision);
     }
 
     @Test
@@ -67,11 +63,9 @@ class GuardFilterTest {
     }
 
     @Test
-    @DisplayName("a guarded route passes when the session is at tier dbsc")
-    void boundSessionIsAllowed() throws Exception {
-        Mockito.when(dbsc.sessionFor(Mockito.any()))
-                .thenReturn(Optional.of(session("sess_1", ProtectionTier.DBSC)));
-        Mockito.when(dbsc.tierFor("sess_1")).thenReturn(ProtectionTier.DBSC);
+    @DisplayName("a guarded route passes when the decision allows it")
+    void allowedSessionReachesTheHandler() throws Exception {
+        decide(GuardDecision.allow(GuardDecision.Reason.PROTECTED));
 
         MockHttpServletRequest request = request(GUARDED);
         MockHttpServletResponse response = new MockHttpServletResponse();
@@ -79,20 +73,30 @@ class GuardFilterTest {
 
         guard.doFilter(request, response, chain);
 
-        assertNotNull(chain.getRequest(), "a bound session must reach the handler");
-        assertNull(chain.getRequest().getAttribute("dbsc.denied"));
+        assertNotNull(chain.getRequest(), "an allowed session must reach the handler");
+        assertEquals(200, response.getStatus());
     }
 
     @Test
-    @DisplayName("a guarded route refuses when no DBSC session is on the request")
-    void missingSessionIsRefused() throws Exception {
-        Mockito.when(dbsc.sessionFor(Mockito.any())).thenReturn(Optional.empty());
+    @DisplayName("an unregistered client is allowed: DBSC is additive")
+    void unregisteredClientIsAllowed() throws Exception {
+        decide(GuardDecision.allow(GuardDecision.Reason.UNREGISTERED));
 
-        MockHttpServletRequest request = request(GUARDED);
+        MockFilterChain chain = new MockFilterChain();
+        guard.doFilter(request(GUARDED), new MockHttpServletResponse(), chain);
+
+        assertNotNull(chain.getRequest(),
+                "a browser that never registered must still be able to use the route");
+    }
+
+    @Test
+    @DisplayName("a lapsed session is refused")
+    void lapsedSessionIsRefused() throws Exception {
+        decide(GuardDecision.deny(GuardDecision.Reason.LAPSED));
+
         MockHttpServletResponse response = new MockHttpServletResponse();
         MockFilterChain chain = new MockFilterChain();
-
-        guard.doFilter(request, response, chain);
+        guard.doFilter(request(GUARDED), response, chain);
 
         assertEquals(403, response.getStatus());
         assertNull(chain.getRequest(), "a refused request must not reach the handler");
@@ -101,19 +105,13 @@ class GuardFilterTest {
     }
 
     @Test
-    @DisplayName("a guarded route refuses a session that has been demoted to none")
-    void demotedSessionIsRefused() throws Exception {
-        // The key is still registered — this is the theft case, where the stored
-        // key proves nothing because the refreshes stopped.
-        Mockito.when(dbsc.sessionFor(Mockito.any()))
-                .thenReturn(Optional.of(session("sess_1", ProtectionTier.NONE)));
-        Mockito.when(dbsc.tierFor("sess_1")).thenReturn(ProtectionTier.NONE);
+    @DisplayName("a binding whose cookies were not sent is refused")
+    void missingCookieIsRefused() throws Exception {
+        decide(GuardDecision.deny(GuardDecision.Reason.COOKIE_MISSING));
 
-        MockHttpServletRequest request = request(GUARDED);
         MockHttpServletResponse response = new MockHttpServletResponse();
         MockFilterChain chain = new MockFilterChain();
-
-        guard.doFilter(request, response, chain);
+        guard.doFilter(request(GUARDED), response, chain);
 
         assertEquals(403, response.getStatus());
         assertNull(chain.getRequest());
@@ -122,9 +120,22 @@ class GuardFilterTest {
     }
 
     @Test
+    @DisplayName("a revoked binding is refused")
+    void revokedSessionIsRefused() throws Exception {
+        decide(GuardDecision.deny(GuardDecision.Reason.REVOKED));
+
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+        guard.doFilter(request(GUARDED), response, chain);
+
+        assertEquals(403, response.getStatus());
+        assertNull(chain.getRequest());
+    }
+
+    @Test
     @DisplayName("the refusal is 403, never 401")
     void refusalIsForbiddenNotUnauthorized() throws Exception {
-        Mockito.when(dbsc.sessionFor(Mockito.any())).thenReturn(Optional.empty());
+        decide(GuardDecision.deny(GuardDecision.Reason.LAPSED));
 
         MockHttpServletResponse response = new MockHttpServletResponse();
         guard.doFilter(request(GUARDED), response, new MockFilterChain());
@@ -136,16 +147,17 @@ class GuardFilterTest {
     }
 
     @Test
-    @DisplayName("the guard asks about the tier, not about the key")
-    void tierIsWhatMatters() throws Exception {
-        Mockito.when(dbsc.sessionFor(Mockito.any()))
-                .thenReturn(Optional.of(session("sess_1", ProtectionTier.NONE)));
-        Mockito.when(dbsc.tierFor("sess_1")).thenReturn(ProtectionTier.NONE);
+    @DisplayName("the application's session id is offered to the decision")
+    void appSessionIdIsPassedToTheDecision() throws Exception {
+        decide(GuardDecision.allow(GuardDecision.Reason.PROTECTED));
 
-        guard.doFilter(request(GUARDED), new MockHttpServletResponse(), new MockFilterChain());
+        MockHttpServletRequest request = request(GUARDED);
+        MockHttpSession session = new MockHttpSession();
+        request.setSession(session);
 
-        Mockito.verify(dbsc).tierFor("sess_1");
-        Mockito.verify(dbsc, Mockito.never()).hasDeviceKey(Mockito.anyString());
+        guard.doFilter(request, new MockHttpServletResponse(), new MockFilterChain());
+
+        Mockito.verify(dbsc).guardDecision(request, session.getId());
     }
 
     @Test

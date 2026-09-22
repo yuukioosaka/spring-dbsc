@@ -27,7 +27,7 @@ and the theft is reported as `session_stolen`.
 | Hardware-backed key binding (TPM / Secure Enclave) | ✅ `ES256` + `RS256` |
 | Atomic challenge consumption | ✅ in-memory + JDBC |
 | Tier model + demotion-on-failure | ✅ `dbsc` / `none` |
-| Route guard | ✅ opt-in per route, refuses anything not currently `dbsc` |
+| Route guard | ✅ opt-in per route; refuses anything not currently `dbsc`, and a bound session that omits its DBSC cookies |
 | Telemetry events | ✅ 6 event types |
 | Rate limiting | ✅ per-IP, with a separate failure budget |
 
@@ -99,7 +99,7 @@ Spring Boot 3.x.x, 4.x.x are the tested versions.
 <dependency>
   <groupId>click.yukio.dbsc</groupId>
   <artifactId>spring-dbsc</artifactId>
-  <version>0.5.0</version>
+  <version>0.6.0</version>
 </dependency>
 ```
 
@@ -234,7 +234,13 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
             .formLogin(form -> form
                     .loginPage("/login")
                     .successHandler((request, response, auth) -> {
-                        dbsc.bind(request.getSession().getId(), auth.getName(),
+                        // The DBSC session id is minted here, independent of the
+                        // application's session id, which is passed as the second
+                        // argument. Keep the value if you want to call terminate()
+                        // by value; otherwise read it back from the binding cookie
+                        // with sessionFor(request).
+                        dbsc.bind(UUID.randomUUID().toString(),
+                                  request.getSession().getId(), auth.getName(),
                                   86_400_000L, request, response);
                         response.sendRedirect("/");
                     }))
@@ -252,15 +258,10 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
 #### OIDC / `oauth2Login()`
 
 DBSC binds a session that already exists, so it composes with any authentication
-mechanism. For OIDC and SAML, however, **the obvious place to bind does not work**, and
-the fix is application code. The example below already applies it; the reasoning is in
-[Binding behind OIDC or SAML](#binding-behind-oidc-or-saml-why-the-first-offer-fails)
-near the end of this document.
-
-The shape below is the fix: the callback's response is a small page that navigates, and
-the route it navigates to does the binding. Both parts are in the same config class on
-purpose — the handler that puts the browser on the route and the route itself are one
-mechanism.
+mechanism — including OIDC, whose callback is cross-site. `bind()` names the session
+with a single-use token in the registration URL rather than a cookie, so the
+registration POST Chromium issues needs no session cookie and the cross-site initiator
+does not matter. There is nothing extra to wire:
 
 ```java
 @Configuration
@@ -276,43 +277,33 @@ public class OidcSecurityConfig {
                         .requestMatchers("/api/transfer").authenticated()
                         .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) -> {
-                    // No bind() here: this response is cross-site, so the registration
-                    // POST it would trigger loses its SameSite=Lax session cookie.
-                    request.getSession();
-                    // A navigation the browser issues itself is the only thing that
-                    // re-originates the request on this site. Serve a page that makes
-                    // one — a redirect would not, because it keeps this response's
-                    // initiator.
-                    //
-                    // text/html, not text/javascript: a navigation response is only
-                    // executed when the browser reads it as a document.
-                    response.setContentType("text/html");
-                    response.setCharacterEncoding("UTF-8");
-                    response.getWriter().write(
-                            "<script>location.replace('/post-login/bind');</script>");
+                    // Force the session to exist: a login always has one, and the id is
+                    // passed to bind() so the guard can tell a client that never
+                    // registered apart from one that dropped its DBSC cookies.
+                    String appSessionId = request.getSession().getId();
+                    dbsc.bind(UUID.randomUUID().toString(), appSessionId,
+                              auth.getName(), 86_400_000L, request, response);
+                    response.sendRedirect("/");
                 }))
                 .addFilterBefore(dbscFilter, CsrfFilter.class);
         return http.build();
     }
-
-    /**
-     * The one route the binding runs on. Reached by the navigation above, so this
-     * request is same-site and its session cookie comes with it.
-     */
-    @Bean
-    RouterFunction<ServerResponse> bindRoute(DbscService dbsc) {
-        return route().GET("/post-login/bind", request -> {
-            HttpServletRequest req = request.servletRequest();
-            HttpServletResponse res =
-                    ((ServletRequestAttributes) RequestContextHolder.currentRequestAttributes())
-                            .getResponse();
-            dbsc.bind(req.getSession().getId(), req.getUserPrincipal().getName(),
-                      86_400_000L, req, res);
-            return ServerResponse.temporaryRedirect(URI.create("/")).build();
-        }).build();
-    }
 }
 ```
+
+Historically this did not work, and the reasoning is worth knowing because it explains
+why the token is in the URL at all — see
+[Binding behind OIDC or SAML](#binding-behind-oidc-or-saml-why-the-first-offer-fails).
+`src/demo/java-oidc` is this example, runnable.
+
+**The user id must not come from a mutable claim.** Whichever claim you read, do not
+take it from `preferred_username` or `email`: the binding would change owner if the
+address did. The OIDC `sub` claim is the stable choice — for `oauth2Login()` that
+means setting `user-name-attribute: sub`, which is what `auth.getName()` then returns.
+
+If your app has no `HttpSession`, pass whatever opaque id you already mint per client
+for that session — `bind()` takes the application-session id as an argument and does
+not care where it came from — rather than inventing one for this.
 
 ## Architecture
 
@@ -322,7 +313,7 @@ controllers:
 | Component | Responsibility |
 |---|---|
 | `DbscFilter` | Owns every protocol route (`/dbsc/*`, `/.well-known/device-bound-sessions`). Terminates the chain for those paths; passes everything else through untouched. |
-| `DbscGuardFilter` | Refuses a request whose session is not currently at tier `dbsc`, for the routes the application declared. Passes everything else through untouched. |
+| `DbscGuardFilter` | Decides whether a request to a route the application declared may proceed, via `DbscService.guardDecision`. Refuses with `403` + `DBSC_REQUIRED`; passes everything else through untouched. |
 
 `DbscService` sits below both as the HTTP facade, and `DbscProtocolEngine` below that as
 the protocol itself — neither depends on Spring Security. See
@@ -332,6 +323,10 @@ The two filters answer different questions and belong in different chains. `Dbsc
 is about the browser's protocol flow, which runs before any session exists;
 `DbscGuardFilter` is about your routes, which have one. Neither one inspects the other's
 paths.
+
+The guard is not a tier comparison, though the tier is most of it — the decision also
+covers the session that dropped its DBSC cookies, which no tier check can see. See
+[What the guard actually decides](#what-the-guard-actually-decides).
 
 ## Wiring it into your own app
 
@@ -360,19 +355,23 @@ work is a worse failure mode than an absent one.
 DBSC does not authenticate. It **binds a session that already exists**, so the call goes
 at the end of your existing login handler — see
 [The application API](#the-application-api) for what `bind()` does and why the call is
-required:
+required: the id you pass is the DBSC session id, which you mint, and your application's
+own session id goes alongside it so the guard can find the binding later:
 
 ```java
 @PostMapping("/login")
 public Session login(HttpServletRequest request, HttpServletResponse response) {
     Session session = authenticate(request);       // your own auth
-    dbsc.bind(session.id(), session.userId(), 86_400_000L, request, response);
+    dbsc.bind(UUID.randomUUID().toString(), request.getSession().getId(),
+              session.userId(), 86_400_000L, request, response);
     return session;
 }
 ```
 
 On logout, call `dbsc.terminate(...)` so the browser forgets the binding immediately
-instead of retrying against a dead session:
+instead of retrying against a dead session. The record is **kept and marked revoked**, not
+deleted: that is what lets a later request from the same session still be recognised as
+"was bound" rather than treated as a first-time visitor:
 
 ```java
 @PostMapping("/logout")
@@ -402,14 +401,14 @@ flowchart TD
     C --> C2[terminates:<br/>writes status + headers + body]
     B -- no --> D[your authentication<br/>and authorization]
     D --> G{guarded route?}
-    G -- yes --> H[DbscGuardFilter<br/>tier must be dbsc]
-    H -- ok --> F[your controller]
+    G -- yes --> H[DbscGuardFilter<br/>guardDecision]
+    H -- allow --> F[your controller]
     G -- no --> F
 ```
 
 Each branch is independent. The protocol paths are served and stop there; a guarded
-route additionally has to be at tier `dbsc`; everything else is your application's
-chain, unchanged. Gating a single endpoint inline on the tier is equally valid — see
+route additionally has to pass the guard's decision; everything else is your
+application's chain, unchanged. Gating a single endpoint inline is equally valid — see
 [Act on the tier](#act-on-the-tier).
 
 The reasons for filters rather than controllers:
@@ -454,7 +453,7 @@ bean, so defining your own replaces the default. The ones most worth replacing:
 
 | Bean | Default | Replace when |
 |---|---|---|
-| `StorageAdapter` | JDBC when a `DataSource` is present, else in-memory | You already have a key/session store — implement the interface; the only hard requirement is an **atomic** `consumeChallenge` |
+| `StorageAdapter` | JDBC when a `DataSource` is present, else in-memory | You already have a key/session store — implement the interface. The hard requirements are an **atomic** `consumeChallenge`, and `getSessionByAppSessionId` honouring the one-binding-per-application-session rule (the guard relies on it to spot an omitted cookie) |
 | `RateLimiter` | In-memory, per-IP | You run more than one process (the in-memory limiter is per-JVM) — or you use a gateway/bucket you already have |
 | `CookieScope` | Resolved from `secure` / `cookie-scope` / `cookie-domain` | You build cookie names or attributes yourself |
 | `ChallengeService`, `DbscProtocolEngine`, `TelemetryPublisher` | Library defaults | You need different challenge or telemetry behaviour |
@@ -477,20 +476,37 @@ this is what they do.
 
 | Call | When |
 |---|---|
-| `dbsc.bind(sessionId, userId, ttlMillis, request, response)` | From an authenticated request, usually at the end of your login flow |
+| `dbsc.bind(sessionId, appSessionId, userId, ttlMillis, request, response)` | From an authenticated request, usually at the end of your login flow. `sessionId` is the **DBSC** session id, which you mint; `appSessionId` is your application's own session id |
 | `dbsc.terminate(sessionId, request, response)` | On logout, so the browser forgets the binding instead of retrying against a dead session |
 | `dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)` | Whenever your own code wants to know whether this browser is bound |
+| `dbsc.guardDecision(request, appSessionId)` | When you want the guard's decision without the filter, e.g. to branch on *why* a request was refused |
 | `GuardedRoute.at(path)` | To have the filter enforce the tier on a whole route instead |
 
-**`bind()` is the only thing that starts a binding.** It persists the session record,
-sets the registration + challenge cookies, and adds `Secure-Session-Registration`;
-Chromium then calls `/dbsc/registration` on its own within about a second, with no
-client code to write. `DbscFilter` never adds that header to your application's own
-responses, so a login flow that never calls `bind()` produces no binding at all.
+**The two ids are different concepts and the library never conflates them.** `sessionId`
+identifies the DBSC session and the stored device key; `appSessionId` identifies *your*
+session, and it is only recorded so the guard can spot a request that dropped its DBSC
+cookies. Nothing requires them to match, and nothing derives one from the other:
 
-The call is idempotent per session and cheap but not free — one challenge and two
-cookie writes — so a route that binds on every request is fine, and keeping it off hot
-paths is better.
+```
+JSESSIONID=72234F6E…             your session   -> appSessionId
+__Host-dbsc-session=3D99F29D…    the binding    -> sessionId
+```
+
+Mint the DBSC id however you like — a UUID is the obvious choice — and pass your own
+session id alongside it. Keep the DBSC id if you want to call `terminate()` by value;
+otherwise read it back from the binding cookie with `sessionFor(request)`.
+
+**`bind()` is the only thing that starts a binding.** It persists the session record,
+mints a single-use registration token, sets the challenge + binding cookies, and adds
+`Secure-Session-Registration` naming `/dbsc/regist/<token>`; Chromium then calls that
+route on its own within about a second, with no client code to write. `DbscFilter` never
+adds that header to your application's own responses, so a login flow that never calls
+`bind()` produces no binding at all.
+
+The call is cheap but not free — one challenge and two cookie writes — so a route that
+binds on every request is fine, and keeping it off hot paths is better. It is **not**
+idempotent: each call writes a record, and a second call under the same `sessionId`
+replaces the first. That is deliberate, so a re-login can re-key an existing session.
 
 ### Act on the tier
 
@@ -520,7 +536,33 @@ public ResponseEntity<?> transfer(@RequestBody Transfer body, HttpServletRequest
 }
 ```
 
-Both forms make the same decision, so these three hold for either:
+#### What the guard actually decides
+
+The tier check above is necessary but not sufficient, because "tier is `none`" covers two
+situations that must be answered differently:
+
+| Situation | Decision |
+|---|---|
+| Registered, currently proving possession | allow |
+| Registered once, then demoted (or revoked) | **refuse** |
+| Bound, but the record is gone | **refuse** — it was bound and is not any more |
+| `bind()` ran, registration has not completed yet | allow — the pre-registration window |
+| No DBSC cookie, and no binding for this application session | allow — DBSC is additive |
+| No DBSC cookie, but a binding exists for this application session | **refuse** |
+
+`DbscGuardFilter` therefore delegates to `dbsc.guardDecision(request, appSessionId)`
+rather than comparing tiers itself. Use the same call if you want to branch on the reason
+(`GuardDecision.Reason` tells you which row above applied) instead of getting a flat
+`403`.
+
+The last two rows are the point. **Dropping the DBSC cookies is something the client
+controls**, so "no cookie" must not be read as "no binding" — otherwise a stolen
+`JSESSIONID` could regain unbound access just by not presenting the cookie it stole. That
+is why `bind()` records your application's session id, and why the guard reads it:
+without it, a first-time visitor and a client that deliberately omitted its cookies are
+indistinguishable.
+
+Both forms make the same decision, so these hold for either:
 
 - **It is a step-up decision, not an authentication one.** A `dbsc` tier never
   substitutes for being authenticated; read it *in addition to* your own checks, as
@@ -533,11 +575,12 @@ Both forms make the same decision, so these three hold for either:
   refreshing reads `none` — which is the demotion you are actually trying to surface.
   A session with a perfectly good registered key reads `none` too, once it has
   lapsed.
-- **Expect `none` to be normal.** A browser without DBSC support (or a user who has
-  just logged in, before registration completes) is legitimately unbound, so decide in
-  advance whether that is a hard refusal or a softer "verify again" prompt. Inside a
-  handler you can branch; through the guard, every unbound session gets the same
-  `DBSC_REQUIRED`.
+- **An unregistered client is allowed through, by design.** A browser without DBSC
+  support (or a user who has just logged in, before registration completes) is
+  legitimately unbound. This is what lets one application serve both populations:
+  DBSC-capable clients get the binding enforced, everyone else runs on the plain
+  session as before. Deciding that a browser which *cannot* do DBSC is refused is a
+  policy choice the library deliberately does not make for you.
 
 If your application cannot act on a weaker tier — for example a compliance rule that
 says a stolen cookie must never be usable — say so explicitly rather than assuming the
@@ -554,10 +597,10 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `secure` | `true` | `__Host-` cookies + `Secure`. **Turn off only for localhost HTTP** |
 | `cookie-scope` | `host` | `site` enables multi-subdomain and requires `cookie-domain` |
 | `cookie-domain` | — | e.g. `example.com`; required for `site` scope |
-| `registration-path` | `/dbsc/registration` | what the registration header advertises |
+| `registration-path` | `/dbsc/regist` | **prefix** for the registration route, not a full path: the advertised route is `<prefix>/<token>` |
 | `refresh-path` | `/dbsc/refresh` | also the `refresh_url` in the JSON config |
 | `binding-cookie-ttl` | `10m` | lifetime of the binding cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
-| `registration-cookie-ttl` | `24h` | lifetime of the pre-registration cookie carrying the session id |
+| `registration-cookie-ttl` | `24h` | lifetime of the single-use registration token. The token is consumed by a successful registration; this is only the ceiling for one that never completes |
 | `challenge-ttl` | `5m` | lifetime of a challenge JTI |
 | `refresh-grace` | `30s` | softens the freshness poll across a refresh |
 | `session-ttl` | `7d` | default lifetime applied by `bind()` when the caller does not set one |
@@ -604,9 +647,41 @@ The DDL is shipped for exactly that, at
 
 | Table | Contents |
 |---|---|
-| `dbsc_sessions` | one row per bound session (`id` PK, `user_id`, `tier`, timestamps) |
+| `dbsc_sessions` | one row per bound session (`id` PK, `app_session_id`, `user_id`, `tier`, `revoked`, timestamps). `app_session_id` is uniquely indexed, so there is at most one binding per application session |
 | `dbsc_device_keys` | the registered hardware key it holds — `session_id` PK, so **one key per session** |
 | `dbsc_challenges` | outstanding JTIs, with the `consumed` flag that makes consumption atomic |
+
+The `dbsc_sessions` table references the DBSC session id (`id`) and your application's
+session id (`app_session_id`) as two independent columns — see
+[The application API](#the-application-api). Only `id` is a foreign key target;
+`app_session_id` exists solely to answer "is there a binding for this application
+session?" when a request arrives without DBSC cookies.
+
+> **Upgrading from a build before 0.6.0:** `dbsc_sessions` gained `app_session_id`
+> (`NOT NULL`) and `revoked` (`BOOLEAN NOT NULL`), plus a unique index on
+> `app_session_id`. `CREATE TABLE IF NOT EXISTS` will **not** add them to an existing
+> table — it silently skips it, and the app then fails at runtime on the missing column.
+> Apply an `ALTER TABLE` before deploying:
+>
+> ```sql
+> ALTER TABLE dbsc_sessions ADD COLUMN app_session_id VARCHAR(255);
+> ALTER TABLE dbsc_sessions ADD COLUMN revoked BOOLEAN NOT NULL DEFAULT false;
+> UPDATE dbsc_sessions SET app_session_id = id WHERE app_session_id IS NULL;
+> ALTER TABLE dbsc_sessions ALTER COLUMN app_session_id SET NOT NULL;
+>
+> > CREATE UNIQUE INDEX dbsc_sessions_app_session_idx ON dbsc_sessions (app_session_id);
+> ```
+>
+> The same release added a new table, `dbsc_registration_tokens`, which holds the
+> single-use registration tokens. `CREATE TABLE IF NOT EXISTS` creates it on its own, so
+> no manual step is needed for it — but note that `__Host-dbsc-reg` no longer exists, so
+> any code or test of yours referencing that cookie name must be updated.
+>
+> Existing rows are backfilled with their own DBSC id as the application session id,
+> which is a safe placeholder: it preserves the "a binding exists" answer for those
+> sessions and can never collide, since `id` is already unique. Those sessions will be
+> refused once by the guard and recover on the next login, which re-binds them with the
+> real application session id.
 
 The file is a plain `CREATE TABLE IF NOT EXISTS` migration: drop it into your
 migration tool's directory, or run its statements however you already run schema
@@ -625,8 +700,9 @@ yourself from a schema-management hook — the DDL statements are quoted at the 
 
 ## Binding behind OIDC or SAML: why the first offer fails
 
-This is the one part of DBSC integration that is not a one-liner, and it fails in a way
-that looks like a server bug. Worth understanding before wiring OIDC or SAML up.
+This section explains why the registration token travels in the URL rather than in a
+cookie. The failure it describes is real and worth understanding — it is what the design
+solves — but with the current library there is nothing for you to do about it.
 
 Chromium makes a DBSC request inherit the **initiator** of the request that produced
 it. For an OIDC or SAML login, the response carrying your `Secure-Session-Registration`
@@ -636,51 +712,54 @@ not your site. So the registration POST Chromium fires in response counts as
 
 ```
 GET  /login/oauth2/code/entraid   302   session cookie set
-POST /dbsc/registration           403   session cookie NOT sent
+POST /dbsc/regist/<token>         200   session cookie NOT sent
 ```
-
-Your registration route sees a request with no session and answers `403`. Worse,
-Chromium records that failure as permanent and does not retry for the rest of that
-login, so the session stays at `tier: none` no matter how long it lives.
 
 A server-side redirect does **not** help: `302`/`303` to your own page keeps the
 callback as the initiator. Only a navigation the *browser* issues on its own — a
-click, a page load, a script-driven location change — resets it. This is the part that
-surprises people: the page you redirect to after the callback is *still* cross-site,
-so binding there fails exactly like binding in the callback did.
+click, a page load, a script-driven location change — resets it.
 
-**This library does not work around it.** `bind()` advertises the header on whatever
-request you call it from and does not inspect `Sec-Fetch-Site`; deciding where to call
-it from is application policy, and it depends on your login flow. The pattern below is
-the app's code, not the library's, and it is the one that always works.
+### How the token in the path removes the problem
 
-### Let the callback answer with a navigation
+An earlier design named the session with a `__Host-dbsc-reg` cookie. Cross-site, that
+cookie was withheld along with `JSESSIONID`, so the registration route saw a request
+with no session and answered `403` — and Chromium records that failure as permanent and
+does not retry for the rest of that login, leaving the session at `tier: none` no matter
+how long it lives.
 
-Shown in full in [the OIDC example](#oidc--oauth2login) above. The two rules to take
-away: do not call `bind()` on the callback's response, and do not call it from a route
-a `302` led to either — both carry the identity provider as their initiator. Serve a
-page that navigates instead, and bind on the route that navigation reaches.
+`bind()` no longer sets that cookie. It mints a **single-use registration token** and
+advertises the session's identity in the registration **URL**:
 
-The cost is one extra request. Two details worth copying: use `location.replace` rather
-than `location.href`, so the hop does not enter the history and Back from the app does
-not trigger a second binding; and serve the script as `text/html`, since a navigation
-response is only executed when the browser reads it as a document.
+```
+POST /dbsc/regist/1234-56789-01234-56789
+```
 
-Why not bind from some route the user navigated to themselves, saving the hop? Because
-you cannot rely on one existing. A flow that ends in `sendRedirect("/")` reaches `/` as
-the callback's navigation — still cross-site — so `bind()` there looks like it should
-work and silently never does, leaving the session at `tier: none` while every request
-appears to succeed. The relay route is the only navigation you control.
+The POST is resolvable from the path alone, so it does not matter that the session
+cookie was withheld and the cross-site initiator stops being a problem. Binding in the
+OIDC success handler — the obvious place — now works, with no relay hop and no
+application-side workaround.
 
-Whichever route you bind on, `bind()` is safe to call more than once: it is idempotent
-per session, and it costs one challenge plus two cookie writes each time. Chromium
-ignores the offer once the session has registered. Keep it off hot paths, and never call
-it from an unauthenticated route — `bind()` trusts its arguments, and the authenticated
-principal is what makes the session id trustworthy.
+Two consequences worth knowing:
 
-For form login none of this applies. Form login owns the POST the browser made to your
-own origin, so the success handler *is* same-site and a single `bind()` there is
+- **The token is single-use**, consumed by a successful registration. A second
+  registration on an already-registered session is an error
+  (`SESSION_ALREADY_REGISTERED`) — that is the protocol, not a limitation.
+- **`registration-path` is a prefix**, not a fixed path. The concrete route is
+  `<prefix>/<token>`. Never build the header yourself; `bind()` does it, and
+  `DbscService.registrationPathFor(token)` is the accessor if you need it.
+
+The challenge cookie is unaffected and still required: it is how the server knows which
+JTI was signed.
+
+For form login none of this ever applied. Form login owns the POST the browser made to
+your own origin, so the success handler *is* same-site and a single `bind()` there is
 complete.
+
+`bind()` is safe to call more than once: it costs one challenge plus two cookie writes
+and a fresh token each time, and Chromium ignores the offer once the session has
+registered. Each call writes its own session record, so a second call under the same id
+replaces the first. Keep it off hot paths, and never call it from an unauthenticated
+route — `bind()` trusts its arguments.
 
 ## Things worth knowing
 

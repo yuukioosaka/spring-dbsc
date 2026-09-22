@@ -40,8 +40,12 @@ public class DbscProperties {
      */
     private String cookieDomain;
 
-    /** Path Chromium POSTs a registration JWS to. */
-    private String registrationPath = "/dbsc/registration";
+    /**
+     * Path prefix Chromium POSTs a registration JWS to. The registration header
+     * advertises {@code <prefix>/<token>}, where the token names the session, so
+     * the route is dynamic rather than a single fixed path.
+     */
+    private String registrationPath = "/dbsc/regist";
 
     /** Path Chromium POSTs a refresh JWS to, and the value of {@code refresh_url}. */
     private String refreshPath = "/dbsc/refresh";
@@ -51,7 +55,7 @@ public class DbscProperties {
      */
     private Duration bindingCookieTtl = Duration.ofMinutes(10);
 
-    /** Lifetime of the pre-registration cookie that carries the session id. */
+    /** Lifetime of a registration token, and so of the registration opportunity. */
     private Duration registrationCookieTtl = Duration.ofHours(24);
 
     /** Lifetime of a challenge JTI. */

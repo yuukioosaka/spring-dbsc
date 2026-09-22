@@ -19,7 +19,6 @@ import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
-import jakarta.servlet.http.HttpSession;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.logout.LogoutHandler;
 import org.springframework.security.web.csrf.CsrfFilter;
@@ -27,6 +26,8 @@ import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.security.web.util.matcher.OrRequestMatcher;
+
+import java.util.UUID;
 
 /**
  * The application's own security chains, with the DBSC filters inside them.
@@ -116,17 +117,24 @@ public class DemoFormLoginConfig {
                     .formLogin(form -> form
                             .loginPage("/login")
                             .successHandler((request, response, authentication) -> {
-                                // The demo asserts the session id is stable; forcing
-                                // creation here means a login always has one, even if
-                                // nothing touched it earlier. bind() keys the DBSC
-                                // session on exactly this id, so a DBSC binding and a
-                                // login session cannot drift apart.
-                                HttpSession session = request.getSession();
+                                // The DBSC session id is minted here and is
+                                // deliberately unrelated to the application's own
+                                // session id: it identifies the binding and keys the
+                                // device's public key, so the two identifiers are
+                                // free to be independent. Nothing needs to be held
+                                // on to it — the logout handler reads it back from
+                                // the binding cookie.
+                                String dbscSessionId = UUID.randomUUID().toString();
+
+                                // The application's own session id is passed too, so
+                                // the guard can tell a client that never registered
+                                // apart from one that dropped its DBSC cookies. Force
+                                // the session to exist first: a login always has one,
+                                // even if nothing touched it earlier.
+                                String appSessionId = request.getSession().getId();
 
                                 // The TTL is the application's policy, not DBSC's.
-                                // Pass the same lifetime the login session gets, or
-                                // the two expire on different clocks.
-                                dbsc.bind(session.getId(), authentication.getName(),
+                                dbsc.bind(dbscSessionId, appSessionId, authentication.getName(),
                                         SESSION_TTL_MS, request, response);
 
                                 response.sendRedirect("/app");
@@ -159,10 +167,11 @@ public class DemoFormLoginConfig {
      */
     private static LogoutHandler demoLogoutHandler(DbscService dbsc) {
         return (request, response, authentication) -> {
-            HttpSession session = request.getSession(false);
-            if (session != null) {
-                dbsc.terminate(session.getId(), request, response);
-            }
+            // The DBSC session id is not the application's session id, so it is
+            // read back from the binding cookie rather than from the HttpSession.
+            // Ending the HttpSession alone would leave the binding alive.
+            dbsc.sessionFor(request).ifPresent(session ->
+                    dbsc.terminate(session.id(), request, response));
         };
     }
 

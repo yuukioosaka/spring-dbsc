@@ -393,8 +393,8 @@ class ProtocolBehaviourTest {
     }
 
     private void seedSession(String sessionId) {
-        storage.setSession(new Session(sessionId, "user_1", ProtectionTier.NONE,
-                VECTOR_NOW_MS, VECTOR_NOW_MS + 3_600_000, 0));
+        storage.setSession(new Session(sessionId, "app_" + sessionId, "user_1", ProtectionTier.NONE,
+                false, VECTOR_NOW_MS, VECTOR_NOW_MS + 3_600_000, 0));
     }
 
     private void seedChallenge(String jti) {

@@ -137,8 +137,11 @@ public class DbscTestHostApplication {
             String sessionId = "sess_" + UUID.randomUUID().toString().replace("-", "");
             String userId = userIdFrom(rawBody);
 
-            // The one DBSC call a login route needs to make.
-            dbsc.bind(sessionId, userId, HOST_SESSION_TTL_MS, request, response);
+            // The one DBSC call a login route needs to make. The second argument
+            // is the application's own session id, which the guard uses to spot a
+            // request that presents no DBSC cookie while a binding exists.
+            dbsc.bind(sessionId, request.getSession().getId(), userId,
+                    HOST_SESSION_TTL_MS, request, response);
 
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("userId", userId);

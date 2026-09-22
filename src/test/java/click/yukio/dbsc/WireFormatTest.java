@@ -38,7 +38,6 @@ class WireFormatTest {
             CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.HOST, null);
 
             assertEquals("__Host-dbsc-session", scope.bindingCookieName());
-            assertEquals("__Host-dbsc-reg", scope.registrationCookieName());
             assertEquals("__Host-dbsc-challenge", scope.challengeCookieName());
             assertEquals("Path=/; Secure; HttpOnly; SameSite=Lax", scope.attributesString());
         }
@@ -60,7 +59,6 @@ class WireFormatTest {
             CookieScope scope = CookieScope.resolve(false, CookieScope.Scope.HOST, null);
 
             assertEquals("dbsc-session", scope.bindingCookieName());
-            assertEquals("dbsc-reg", scope.registrationCookieName());
             assertEquals("dbsc-challenge", scope.challengeCookieName());
         }
 
@@ -114,9 +112,11 @@ class WireFormatTest {
         @Test
         @DisplayName("format is (alg);path=\"...\";challenge=\"...\" with no spaces and no id")
         void exactFormat() {
+            // A token path, which is what the caller actually passes: the session is
+            // named by the token, not by a cookie.
             assertEquals(
-                    "(ES256);path=\"/dbsc/registration\";challenge=\"abc\"",
-                    DbscHeaderCodec.buildRegistrationHeader("ES256", "/dbsc/registration", "abc"));
+                    "(ES256);path=\"/dbsc/regist/tok\";challenge=\"abc\"",
+                    DbscHeaderCodec.buildRegistrationHeader("ES256", "/dbsc/regist/tok", "abc"));
         }
 
         @Test

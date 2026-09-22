@@ -80,19 +80,19 @@ class AutoConfigurationIntegrationTest {
         assertEquals(200, response.getStatus());
         String registration = response.getHeader("Secure-Session-Registration");
         assertNotNull(registration, "bind() must advertise the registration path to Chromium");
-        assertTrue(registration.contains("path=\"/dbsc/registration\""), registration);
+        assertTrue(registration.contains("path=\"/dbsc/regist/"), registration);
         assertTrue(registration.contains("challenge=\""), registration);
 
-        assertNotNull(response.getCookie(cookieScope.registrationCookieName()),
-                "bind() must set the registration cookie that identifies the session");
         assertNotNull(response.getCookie(cookieScope.challengeCookieName()),
                 "bind() must set the challenge cookie the registration JWS is validated against");
+        assertNotNull(response.getCookie(cookieScope.bindingCookieName()),
+                "bind() must set the binding cookie, so omitting it later is detectable");
 
         String sessionId = response.getContentAsString()
                 .replaceAll(".*\"sessionId\":\"([^\"]+)\".*", "$1");
         assertEquals(sessionId, storage.getSession(sessionId).orElseThrow().id());
-        assertEquals(sessionId, response.getCookie(cookieScope.registrationCookieName()).getValue(),
-                "the registration cookie must name the session");
+        assertEquals(sessionId, response.getCookie(cookieScope.bindingCookieName()).getValue(),
+                "the binding cookie must name the session");
     }
 
     /**
@@ -136,7 +136,7 @@ class AutoConfigurationIntegrationTest {
         @PostMapping(path = "/login", produces = MediaType.APPLICATION_JSON_VALUE)
         String login(HttpServletRequest request, HttpServletResponse response) {
             String sessionId = "sess_" + UUID.randomUUID().toString().replace("-", "");
-            dbsc.bind(sessionId, "user_1", 86_400_000L, request, response);
+            dbsc.bind(sessionId, request.getSession().getId(), "user_1", 86_400_000L, request, response);
             return "{\"sessionId\":\"" + sessionId + "\"}";
         }
     }

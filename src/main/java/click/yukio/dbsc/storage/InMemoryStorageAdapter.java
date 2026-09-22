@@ -2,6 +2,7 @@ package click.yukio.dbsc.storage;
 
 import click.yukio.dbsc.core.DeviceKey;
 import click.yukio.dbsc.core.Challenge;
+import click.yukio.dbsc.core.RegistrationToken;
 import click.yukio.dbsc.core.Session;
 import click.yukio.dbsc.core.StorageAdapter;
 
@@ -27,10 +28,18 @@ public class InMemoryStorageAdapter implements StorageAdapter {
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
     private final Map<KeyId, DeviceKey> deviceKeys = new ConcurrentHashMap<>();
     private final Map<String, Challenge> challenges = new ConcurrentHashMap<>();
+    private final Map<String, RegistrationToken> registrationTokens = new ConcurrentHashMap<>();
 
     @Override
     public Optional<Session> getSession(String id) {
         return Optional.ofNullable(sessions.get(id));
+    }
+
+    @Override
+    public Optional<Session> getSessionByAppSessionId(String appSessionId) {
+        return sessions.values().stream()
+                .filter(session -> session.appSessionId().equals(appSessionId))
+                .findFirst();
     }
 
     @Override
@@ -43,6 +52,7 @@ public class InMemoryStorageAdapter implements StorageAdapter {
         sessions.remove(id);
         deviceKeys.keySet().removeIf(key -> key.sessionId().equals(id));
         challenges.values().removeIf(challenge -> challenge.sessionId().equals(id));
+        registrationTokens.values().removeIf(token -> token.sessionId().equals(id));
     }
 
     @Override
@@ -86,8 +96,35 @@ public class InMemoryStorageAdapter implements StorageAdapter {
     }
 
     @Override
+    public Optional<RegistrationToken> getRegistrationToken(String token) {
+        return Optional.ofNullable(registrationTokens.get(token));
+    }
+
+    @Override
+    public void setRegistrationToken(RegistrationToken token) {
+        registrationTokens.put(token.token(), token);
+    }
+
+    @Override
+    public boolean consumeRegistrationToken(String token) {
+        boolean[] consumed = {false};
+        registrationTokens.computeIfPresent(token, (key, existing) -> {
+            if (existing.consumed()) {
+                return existing;
+            }
+            consumed[0] = true;
+            return new RegistrationToken(
+                    existing.token(), existing.sessionId(), existing.createdAt(),
+                    existing.expiresAt(), true);
+        });
+        return consumed[0];
+    }
+
+    @Override
     public void revokeSession(String sessionId) {
-        deleteSession(sessionId);
+        // Keep the record: a later request carrying the same application session id
+        // must still be recognisable as having had a binding.
+        getSession(sessionId).ifPresent(session -> setSession(session.withRevoked(true)));
     }
 
     /** Package-visible for tests that assert cleanup behavior. */

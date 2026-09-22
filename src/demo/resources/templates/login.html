@@ -34,9 +34,9 @@
         prefixed and <code>Secure</code>, so they are invisible over plain HTTP and the
         flow cannot be exercised at all.</p>
     <p>Sign in with <code>demo</code> / <code>demo</code>. On success the server calls
-        <code>dbsc.bind()</code> with the servlet session id, which sets
+        <code>dbsc.bind()</code> with a freshly minted DBSC session id, which sets
         <code>Secure-Session-Registration</code> plus two short-lived cookies.</p>
-    <p><strong>Chromium 145+</strong> then POSTs <code>/dbsc/registration</code> on its
+    <p><strong>Chromium 145+</strong> then POSTs <code>/dbsc/regist/&lt;token&gt;</code> on its
         own within about a second — no JavaScript involved. Watch the network tab for it.</p>
 </div>
 </body>

@@ -1,13 +1,13 @@
 package click.yukio.dbsc.web;
 
 import click.yukio.dbsc.DbscService;
+import click.yukio.dbsc.core.GuardDecision;
 import click.yukio.dbsc.core.Json;
-import click.yukio.dbsc.core.ProtectionTier;
-import click.yukio.dbsc.core.Session;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -17,7 +17,6 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 /**
  * Requires the requests it guards to ride a session DBSC currently protects.
@@ -29,24 +28,38 @@ import java.util.Optional;
  *
  * <p>The check is deliberately about the <em>tier</em>, not the presence of a
  * key. A session has a key from the moment the browser registers, but
- * {@link ProtectionTier} demotes it to {@code none} the moment a refresh window
+ * {@code ProtectionTier} demotes it to {@code none} the moment a refresh window
  * passes without a successful signature — which is what a session hijacked away
  * from its device looks like from here. Reading the stored key instead would
  * report protection that has already lapsed.
  *
+ * <p>The decision itself is made by {@link DbscService#guardDecision}, which also
+ * covers the case a tier check alone cannot: a request that presents no DBSC
+ * cookie at all, while a binding exists for its application session. Dropping a
+ * cookie is something the client controls, so "no cookie" must not silently mean
+ * "no binding" — otherwise a stolen session id could escape its binding by
+ * omitting the DBSC cookies, and a client that never registered would be
+ * indistinguishable from one that did.
+ *
  * <p>Which session is being asked about comes from the DBSC cookies, not from the
- * application's own session cookie:
+ * application's own session cookie. The two are different identifiers on purpose:
  *
  * <pre>
- * JSESSIONID=72234F6E…        the application's session
- * __Host-dbsc-reg=72234F6E…   pre-registration, carries the session id
- * __Host-dbsc-session=72234F6E…  the binding, established at registration
+ * JSESSIONID=72234F6E…             the application's session
+ * __Host-dbsc-session=3D99F29D…    the binding
+ * __Host-dbsc-challenge=<jti>      the single-use JTI to sign
  * </pre>
  *
- * <p>In the common case all three carry the same id, because {@code bind()} is
- * called with the application's session id. The DBSC cookie is what is read
- * because that is the one bound to the key; the application cookie is only
- * presumed to match.
+ * <p>The registration route is not in this list on purpose: it names its session
+ * with a single-use token in the <em>path</em> ({@code /dbsc/regist/<token>}), not
+ * with a cookie, so that it keeps working when the browser's registration POST is
+ * issued from a cross-site navigation context.
+ *
+ * <p>The DBSC id is what identifies the session record and the device key, and it
+ * is whatever the login route passed to {@code bind()} — it carries no relationship
+ * to the application's session id, so nothing here assumes they match. The
+ * application's session id is read too, but only as a second way to find a binding
+ * the request failed to present.
  *
  * <p><strong>A refusal here is a step-up prompt, not a login redirect.</strong>
  * The response is a 403 carrying {@code DBSC_REQUIRED}, so the application can
@@ -83,32 +96,38 @@ public class DbscGuardFilter extends OncePerRequestFilter {
             HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
 
-        Optional<Session> session = dbsc.sessionFor(request);
-        if (session.isEmpty()) {
-            // No DBSC cookie at all. The session may still be perfectly valid —
-            // this browser simply never bound one, which is normal for a browser
-            // without DBSC support, or for the window between login and the
-            // browser's registration POST.
-            deny(response, "no DBSC session on the request", null);
+        // The decision itself lives in DbscService.guardDecision: it needs the
+        // session store and the storage contract, and keeping it out of the filter
+        // means an application that checks the tier inline gets the same answer.
+        GuardDecision decision = dbsc.guardDecision(request, appSessionId(request));
+        if (!decision.allowed()) {
+            deny(response, decision);
             return;
         }
 
-        String sessionId = session.get().id();
-        ProtectionTier tier = dbsc.tierFor(sessionId);
-        if (tier == ProtectionTier.NONE) {
-            deny(response, "the session is not currently device bound", sessionId);
-            return;
-        }
-
-        log.debug("DBSC guard: {} {} allowed at tier {}", request.getMethod(),
-                request.getRequestURI(), tier);
+        log.debug("DBSC guard: {} {} allowed ({})", request.getMethod(),
+                request.getRequestURI(), decision.reason());
         chain.doFilter(request, response);
     }
 
-    private void deny(HttpServletResponse response, String message, String sessionId)
-            throws IOException {
-        log.debug("DBSC guard -> 403: {} (session {})", message,
-                sessionId == null ? "none" : sessionId);
+    /**
+     * The application's own session id, used to recognise a client that has a
+     * binding but sent no DBSC cookie.
+     *
+     * <p>This deliberately reads the servlet session rather than the authenticated
+     * principal: the id must be the one the login route passed to {@code bind()},
+     * and that is the {@code HttpSession} id. A request with no session simply has
+     * no id to look up, and the decision falls back to treating it as unregistered.
+     */
+    private static String appSessionId(HttpServletRequest request) {
+        HttpSession session = request.getSession(false);
+        return session == null ? null : session.getId();
+    }
+
+    private void deny(HttpServletResponse response, GuardDecision decision) throws IOException {
+        if (log.isDebugEnabled()) {
+            log.debug("DBSC guard -> 403: {}", decision.reason());
+        }
         if (response.isCommitted()) {
             return;
         }
@@ -118,7 +137,18 @@ public class DbscGuardFilter extends OncePerRequestFilter {
         response.setHeader("Cache-Control", "no-store");
         response.getWriter().write(Json.write(Map.of(
                 "error", REQUIRED_CODE,
-                "message", message)));
+                "message", message(decision.reason()))));
         response.flushBuffer();
+    }
+
+    private static String message(GuardDecision.Reason reason) {
+        return switch (reason) {
+            case LAPSED -> "the session is not currently device bound";
+            case COOKIE_MISSING -> "a DBSC binding exists for this session but the request carried no DBSC cookie";
+            case REVOKED -> "the DBSC binding was terminated";
+            // Neither is reachable from the filter, which only ever sees a refusal;
+            // listed so the switch stays exhaustive without a default.
+            case PROTECTED, UNREGISTERED -> "the session is not currently device bound";
+        };
     }
 }

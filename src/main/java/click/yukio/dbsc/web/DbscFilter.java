@@ -49,13 +49,13 @@ public class DbscFilter extends OncePerRequestFilter {
 
     private final DbscService dbsc;
     private final DbscProperties properties;
-    private final List<Route> routes;
+    private final List<RouteMatcher> routes;
 
     public DbscFilter(DbscService dbsc, DbscProperties properties) {
         this.dbsc = dbsc;
         this.properties = properties;
         this.routes = List.of(
-                new Route("POST", properties.getRegistrationPath(), this::registration),
+                new PrefixRoute("POST", properties.getRegistrationPath(), this::registration),
                 new Route("POST", properties.getRefreshPath(), this::refresh),
                 new Route("GET", "/.well-known/device-bound-sessions", this::wellKnownDocument));
     }
@@ -65,13 +65,13 @@ public class DbscFilter extends OncePerRequestFilter {
             HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
 
-        for (Route route : routes) {
+        for (RouteMatcher route : routes) {
             if (!route.matches(request)) {
                 continue;
             }
             log.debug("DBSC route {} {} entered", request.getMethod(), request.getRequestURI());
             // A DBSC route owns its response completely; the chain stops here.
-            handle(route, request, response);
+            handle(route.handler(), request, response);
             return;
         }
 
@@ -90,10 +90,10 @@ public class DbscFilter extends OncePerRequestFilter {
         return false;
     }
 
-    private void handle(Route route, HttpServletRequest request, HttpServletResponse response)
+    private void handle(Handler handler, HttpServletRequest request, HttpServletResponse response)
             throws IOException {
         try {
-            route.handler().handle(request, response);
+            handler.handle(request, response);
         } catch (DbscException e) {
             // Every rejected proof is charged to the client's failure budget, so a
             // client that keeps presenting invalid proofs is throttled even when
@@ -119,8 +119,26 @@ public class DbscFilter extends OncePerRequestFilter {
 
     private void registration(HttpServletRequest request, HttpServletResponse response)
             throws IOException {
-        Map<String, Object> config = dbsc.handleRegistration(request, response);
+        Map<String, Object> config = dbsc.handleRegistration(
+                registrationToken(request), request, response);
         writeJson(response, HttpStatus.OK, config);
+    }
+
+    /**
+     * The token segment of the registration path, i.e. everything after the
+     * configured prefix. Returns {@code null} when the path is the bare prefix
+     * with nothing after it.
+     */
+    private String registrationToken(HttpServletRequest request) {
+        String uri = request.getRequestURI();
+        String prefix = properties.getRegistrationPath();
+        if (prefix.endsWith("/")) {
+            prefix = prefix.substring(0, prefix.length() - 1);
+        }
+        if (uri.length() <= prefix.length() + 1) {
+            return null;
+        }
+        return uri.substring(prefix.length() + 1);
     }
 
     private void refresh(HttpServletRequest request, HttpServletResponse response)
@@ -207,17 +225,60 @@ public class DbscFilter extends OncePerRequestFilter {
         return new String(RequestBodies.readBounded(request), StandardCharsets.UTF_8);
     }
 
+    /** A route that recognizes a request; the two shapes differ only in matching. */
+    private interface RouteMatcher {
+
+        boolean matches(HttpServletRequest request);
+
+        Handler handler();
+    }
+
     /**
      *
      * @param method  the HTTP method to match
      * @param path    the exact path to match
      * @param handler what to do when it matches
      */
-    private record Route(String method, String path, Handler handler) {
+    private record Route(String method, String path, Handler handler) implements RouteMatcher {
 
-        boolean matches(HttpServletRequest request) {
+        @Override
+        public boolean matches(HttpServletRequest request) {
             return method.equalsIgnoreCase(request.getMethod())
                     && path.equals(request.getRequestURI());
+        }
+
+        @Override
+        public Handler handler() {
+            return handler;
+        }
+    }
+
+    /**
+     * A route matching any path under a prefix, for the registration route: its
+     * path carries the single-use token, so it is {@code <prefix>/<token>} rather
+     * than one fixed path.
+     *
+     * <p>A bare prefix with no token still matches, and is rejected by the service
+     * as an unknown token — reporting that as {@code SESSION_NOT_FOUND} is more
+     * useful than letting it fall through to the application's 404.
+     */
+    private record PrefixRoute(String method, String prefix, Handler handler) implements RouteMatcher {
+
+        @Override
+        public boolean matches(HttpServletRequest request) {
+            if (!method.equalsIgnoreCase(request.getMethod())) {
+                return false;
+            }
+            String uri = request.getRequestURI();
+            String normalized = prefix.endsWith("/")
+                    ? prefix.substring(0, prefix.length() - 1)
+                    : prefix;
+            return uri.equals(normalized) || uri.startsWith(normalized + "/");
+        }
+
+        @Override
+        public Handler handler() {
+            return handler;
         }
     }
 

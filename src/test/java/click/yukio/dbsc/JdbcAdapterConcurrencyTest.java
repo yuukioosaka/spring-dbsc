@@ -115,7 +115,8 @@ class JdbcAdapterConcurrencyTest {
     @DisplayName("JDBC storage: a session round-trips through the database")
     void sessionRoundTrip() {
         long now = System.currentTimeMillis();
-        storage.setSession(new Session("sess_jdbc", "user_1", ProtectionTier.DBSC, now, now + 60_000, now));
+        storage.setSession(new Session("sess_jdbc", "app_jdbc", "user_1",
+                ProtectionTier.DBSC, false, now, now + 60_000, now));
 
         Session loaded = storage.getSession("sess_jdbc").orElseThrow();
         assertEquals(ProtectionTier.DBSC, loaded.tier());

@@ -14,11 +14,16 @@ dbsc:
   # jdbc when the host has a DataSource and the state must survive a restart;
   # memory otherwise. An in-memory store breaks live sessions across a restart.
   storage: jdbc
-  registration-path: /dbsc/registration
+  # The registration route is a prefix, not one fixed path: the token that names
+  # the session is appended to it, giving /dbsc/regist/<token>. The token is in
+  # the path (rather than in a cookie) so that registration also works when the
+  # browser's registration POST is issued from a cross-site navigation context.
+  registration-path: /dbsc/regist
   refresh-path: /dbsc/refresh
   # Grace window past the binding cookie's expiry: a freshness poll that lands
   # while the browser's next refresh is in flight still reads the old tier.
   binding-cookie-ttl: 10m
+  # Lifetime of a registration token, and so of the registration opportunity.
   registration-cookie-ttl: 24h
   challenge-ttl: 5m
   refresh-grace: 30s

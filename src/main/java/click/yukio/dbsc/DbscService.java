@@ -1,10 +1,13 @@
 package click.yukio.dbsc;
 
 import click.yukio.dbsc.config.DbscProperties;
+import click.yukio.dbsc.core.Base64Url;
 import click.yukio.dbsc.core.Challenge;
 import click.yukio.dbsc.core.DbscErrorCode;
 import click.yukio.dbsc.core.DbscException;
+import click.yukio.dbsc.core.GuardDecision;
 import click.yukio.dbsc.core.ProtectionTier;
+import click.yukio.dbsc.core.RegistrationToken;
 import click.yukio.dbsc.core.Session;
 import click.yukio.dbsc.core.SkippedEntry;
 import click.yukio.dbsc.core.StorageAdapter;
@@ -74,58 +77,117 @@ public class DbscService {
     // ------------------------------------------------------------------
 
     /**
-     * Starts a DBSC session: persists the session record and primes the browser
-     * with the registration header plus the two short-lived cookies. Chromium
-     * then POSTs the registration JWS on its own, with no client-side code.
+     * Starts a DBSC session: persists the session record, mints a single-use
+     * registration token, and primes the browser with the registration header and
+     * the challenge cookie. Chromium then POSTs the registration JWS on its own,
+     * with no client-side code.
      *
-     * <p>Call it from any authenticated request. It is idempotent, and it is
-     * deliberately <strong>speculative</strong>: the server cannot know whether
-     * this browser supports DBSC, whether the response will be withheld from it,
-     * or whether the offer will simply be ignored. Nothing here inspects
-     * {@code Sec-Fetch-Site}: an earlier revision withheld the header on
-     * cross-site responses, on the theory that the registration POST would lose
-     * its {@code SameSite=Lax} cookie — but that made the offer depend on the
-     * browser re-initiating the request, which no server-side redirect can force,
-     * so behind an OIDC or SAML callback the header was never sent at all.
-     * Whether a registration succeeds is the browser's business.
+     * <p>Call it from any authenticated request. It is deliberately
+     * <strong>speculative</strong>: the server cannot know whether this browser
+     * supports DBSC, whether the response will be withheld from it, or whether the
+     * offer will simply be ignored. Nothing here inspects {@code Sec-Fetch-Site},
+     * and nothing about the offer depends on a cookie surviving the trip: the
+     * session is named by a token in the registration <em>path</em>, so the offer
+     * works even when the browser's registration POST is issued from a cross-site
+     * navigation context where a {@code SameSite=Lax} cookie is withheld. That was
+     * the whole reason the token exists — see "Binding behind OIDC or SAML" in the
+     * README.
      *
-     * <p>Whether a registration succeeds is the browser's business. If you have
-     * reason to believe the response will not reach the browser as a binding
-     * opportunity — an OIDC or SAML callback is the common case — call this again
-     * from a later, same-site request. See "Binding behind OIDC or SAML" in the
-     * README; retrying is a strategy the caller owns, not something this library
-     * does on your behalf.
+     * <p>Calling this twice is not merged or rejected: each call writes a session
+     * record and issues a fresh challenge, so a second call under the same id
+     * replaces the first. Whether that is wanted is the caller's decision.
      *
-     * @param sessionId the application's session id (its own authenticated id)
-     * @param userId    the authenticated user
-     * @param ttlMs     lifetime of the coupled application session in ms; a
-     *                  non-positive value falls back to the configured default
+     * @param sessionId    the <strong>DBSC</strong> session id. It is not the
+     *                     application's own session id and is deliberately
+     *                     independent of it: this value is the key the device's
+     *                     public key is stored under, and it is what the binding
+     *                     cookie carries. Mint whatever you like —
+     *                     {@code UUID.randomUUID().toString()} is a fine choice —
+     *                     and keep it if you want to call {@link #terminate} or
+     *                     {@link #tierFor} by value; otherwise read it back from the
+     *                     binding cookie with {@link #sessionFor}
+     * @param appSessionId the application's own session id ({@code JSESSIONID} or
+     *                     equivalent). It is recorded so that
+     *                     {@link #guardDecision} can tell a client that never
+     *                     registered apart from one that registered and then
+     *                     dropped its DBSC cookies
+     * @param userId       the authenticated user
+     * @param ttlMs        lifetime of the session record in ms; a non-positive value
+     *                     falls back to the configured default
      */
-    public void bind(String sessionId, String userId, long ttlMs,
+    public void bind(String sessionId, String appSessionId, String userId, long ttlMs,
                      HttpServletRequest request, HttpServletResponse response) {
         long now = clock.millis();
         long effectiveTtlMs = ttlMs > 0 ? ttlMs : properties.sessionTtlMs();
         Session session = new Session(
-                sessionId, userId, ProtectionTier.NONE, now, now + effectiveTtlMs, 0);
+                sessionId, appSessionId, userId, ProtectionTier.NONE, false, now, now + effectiveTtlMs, 0);
         storage.setSession(session);
 
         Challenge challenge = challenges.issue(session.id());
+        String registrationToken = issueRegistrationToken(session.id());
 
         response.addHeader(DbscHeaders.REGISTRATION, DbscHeaderCodec.buildRegistrationHeader(
-                "ES256", properties.getRegistrationPath(), challenge.jti()));
+                "ES256", registrationPathFor(registrationToken), challenge.jti()));
         // Some Chromium builds straddle the header rename, so emit the legacy name too.
         response.addHeader(DbscHeaders.LEGACY_REGISTRATION, DbscHeaderCodec.buildRegistrationHeader(
-                "ES256", properties.getRegistrationPath(), challenge.jti()));
+                "ES256", registrationPathFor(registrationToken), challenge.jti()));
 
-        setCookie(response, cookieScope.registrationCookieName(), session.id(),
-                properties.registrationCookieTtlMs());
         setCookie(response, cookieScope.challengeCookieName(), challenge.jti(),
                 properties.challengeTtlMs());
+        // The binding cookie is sent from the start, not only after registration.
+        // The session is not protected until registration completes (tier is
+        // "none" and lastRefreshAt is 0), but having the cookie present means a
+        // request that omits it is distinguishable from a browser that never
+        // bound at all — see guardDecision().
+        setCookie(response, cookieScope.bindingCookieName(), session.id(),
+                properties.bindingCookieTtlMs());
+    }
+
+    /**
+     * Mints and persists a single-use registration token for the session.
+     *
+     * <p>The token is a 43-character base64url value from the same generator as a
+     * challenge JTI, and it is deliberately <em>not</em> the session id: it travels
+     * in a URL, which is written to access logs, proxy logs, and referrers, so it
+     * must not be a credential that is useful anywhere else. Its only power is to
+     * name the session for one registration POST.
+     */
+    public String issueRegistrationToken(String sessionId) {
+        long now = clock.millis();
+        RegistrationToken token = new RegistrationToken(
+                Base64Url.randomJti(),
+                sessionId,
+                now,
+                now + properties.registrationCookieTtlMs(),
+                false);
+        storage.setRegistrationToken(token);
+        return token.token();
+    }
+
+    /** The path Chromium is told to POST a registration JWS to. */
+    public String registrationPathFor(String registrationToken) {
+        String prefix = properties.getRegistrationPath();
+        if (prefix.endsWith("/")) {
+            prefix = prefix.substring(0, prefix.length() - 1);
+        }
+        return prefix + "/" + registrationToken;
+    }
+
+    /**
+     * The configured registration path prefix, e.g. {@code /dbsc/regist}.
+     */
+    public String registrationPathPrefix() {
+        return properties.getRegistrationPath();
     }
 
     /**
      * Terminates a session, e.g. on logout. The response tells Chromium to forget
      * the binding immediately, and the binding cookie is cleared.
+     *
+     * <p>The record is <strong>kept</strong>, marked revoked. Deleting it would
+     * make the next request that still carries the application's session id look
+     * like a client that never bound, so a logged-out session would silently fall
+     * back to cookie-only access.
      */
     public Map<String, Object> terminate(String sessionId, HttpServletRequest request,
                                          HttpServletResponse response) {
@@ -142,26 +204,72 @@ public class DbscService {
     // ------------------------------------------------------------------
 
     /**
-     * Handles {@code POST /dbsc/registration}.
+     * Handles {@code POST /dbsc/regist/<token>}.
      *
+     * <p>The session is named by the token in the path, not by a cookie. That is
+     * the point: the registration POST is issued by Chromium from whatever
+     * navigation context produced the registration header, and behind an OIDC or
+     * SAML callback that context is cross-site, so a {@code SameSite=Lax} cookie is
+     * withheld and cookie-based discovery fails with {@code SESSION_NOT_FOUND}. A
+     * path segment is not subject to any of that.
+     *
+     * <p>Failure modes are ordered as in spec 03: the token is validated first
+     * (it is what selects the session), then the challenge, and finally the
+     * token is consumed atomically on the success path so a replayed
+     * registration POST cannot bind a second key.
+     *
+     * @param registrationToken the path segment naming the session
      * @return the JSON session config
      */
     public Map<String, Object> handleRegistration(
-            HttpServletRequest request, HttpServletResponse response) {
+            String registrationToken, HttpServletRequest request, HttpServletResponse response) {
         checkRegistrationRateLimit(request);
 
-        String sessionId = requireBinderSession(request);
+        String sessionId = requireSessionForToken(registrationToken);
         String responseHeader = readResponseHeader(request);
         String expectedJti = readCookie(request, cookieScope.challengeCookieName())
                 .orElseThrow(DbscException::challengeNotFound);
 
         engine.handleRegistration(sessionId, responseHeader, expectedJti);
 
-        // The challenge cookie has served its purpose; clear it.
+        // The token has now done its job. Consuming it — not deleting it — leaves
+        // the record for the failure path to report a replay as
+        // REGISTRATION_TOKEN_CONSUMED rather than as an unknown token, which is
+        // the difference between "you are replaying a captured POST" and "this URL
+        // was never ours".
+        storage.consumeRegistrationToken(registrationToken);
+
+        // The challenge cookie carried the JTI the browser signed and is spent.
         response.addHeader("Set-Cookie", cookieScope.deleteCookieValue(cookieScope.challengeCookieName()));
         setCookie(response, cookieScope.bindingCookieName(), sessionId, properties.bindingCookieTtlMs());
 
         return sessionConfig(request, sessionId);
+    }
+
+    /**
+     * Resolves and validates a registration token, returning the session it names.
+     *
+     * @throws DbscException {@code SESSION_NOT_FOUND} when the token is unknown,
+     *         {@code REGISTRATION_TOKEN_CONSUMED} when it was already used, and
+     *         {@code REGISTRATION_TOKEN_EXPIRED} when its TTL has passed
+     */
+    private String requireSessionForToken(String registrationToken) {
+        if (registrationToken == null || registrationToken.isBlank()) {
+            throw new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
+                    "the registration path carries no token");
+        }
+        RegistrationToken token = storage.getRegistrationToken(registrationToken)
+                .orElseThrow(() -> new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
+                        "unknown registration token"));
+        if (token.consumed()) {
+            throw new DbscException(DbscErrorCode.REGISTRATION_TOKEN_CONSUMED,
+                    "this registration token has already been used");
+        }
+        if (token.isExpired(clock.millis())) {
+            throw new DbscException(DbscErrorCode.REGISTRATION_TOKEN_EXPIRED,
+                    "this registration token has expired");
+        }
+        return token.sessionId();
     }
 
     // ------------------------------------------------------------------
@@ -238,20 +346,17 @@ public class DbscService {
     // ------------------------------------------------------------------
 
     /**
-     * Resolves the session identifier from the binding cookie.
+     * Resolves the DBSC session identifier from the binding cookie.
      *
      * <p>A cookie proves nothing: it is attacker-supplied on any unauthenticated
      * request, so this only names a candidate session. The caller's proof check is
-     * what admits or rejects it. The pre-registration cookie carries the session id
-     * as written by {@link #bind}, and is the candidate the registration route
-     * resolves when no binding cookie exists yet.
+     * what admits or rejects it. Session discovery on the registration route does
+     * <em>not</em> go through here — that route names its session with a token in
+     * the path, because it is the one route that runs from a cross-site context
+     * where this cookie would be withheld.
      */
     public Optional<String> resolveBinderSession(HttpServletRequest request) {
-        Optional<String> binding = readCookie(request, cookieScope.bindingCookieName());
-        if (binding.isPresent()) {
-            return binding;
-        }
-        return readCookie(request, cookieScope.registrationCookieName());
+        return readCookie(request, cookieScope.bindingCookieName());
     }
 
     private String requireBinderSession(HttpServletRequest request) {
@@ -274,6 +379,81 @@ public class DbscService {
     /** The session's tier as reported to the application. */
     public ProtectionTier tierFor(String sessionId) {
         return storage.getSession(sessionId).map(engine::effectiveTier).orElse(ProtectionTier.NONE);
+    }
+
+    /**
+     * Decides whether a request may proceed under DBSC's rules.
+     *
+     * <p>The rule the caller gets, and the reason it is more than a tier check:
+     *
+     * <ul>
+     *   <li>DBSC cookies present and the session is protected - allowed.</li>
+     *   <li>DBSC cookies present and the session is registered but lapsed (or
+     *       revoked) - refused.</li>
+     *   <li>DBSC cookies present and the session has not registered yet (the window
+     *       between {@code bind()} and the browser's registration POST) - allowed.
+     *       Calling this a refusal would break every browser that has not finished
+     *       registering.</li>
+     *   <li>No DBSC cookies, but a binding exists for this application session -
+     *       refused. This is the case a bare tier check cannot see: dropping the
+     *       DBSC cookies is something the client controls, so it must not be a way
+     *       to escape a binding that exists.</li>
+     *   <li>No DBSC cookies and no binding for this application session - allowed.
+     *       Nothing was ever bound, so DBSC has nothing to add.</li>
+     * </ul>
+     *
+     * <p>Note what this deliberately does <em>not</em> do: it never consults
+     * {@link #hasDeviceKey}. A stored key is what a session can reach, not what it
+     * currently proves, and a demoted session keeps its key on purpose.
+     *
+     * @param request   the request under test
+     * @param appSessionId the application's own session id for this request, or
+     *                  {@code null} when the caller has none. With no id there is
+     *                  nothing to look a binding up by, so the no-cookie case is
+     *                  treated as unregistered
+     */
+    public GuardDecision guardDecision(HttpServletRequest request, String appSessionId) {
+        Optional<String> dbscSessionId = resolveBinderSession(request);
+
+        if (dbscSessionId.isPresent()) {
+            Optional<Session> session = storage.getSession(dbscSessionId.get());
+            if (session.isEmpty()) {
+                // The cookie names a session that no longer exists: a binding once
+                // existed and is gone, which is a lapse, not a fresh client.
+                return GuardDecision.deny(GuardDecision.Reason.LAPSED);
+            }
+
+            Session found = session.get();
+            if (found.isRevoked()) {
+                return GuardDecision.deny(GuardDecision.Reason.REVOKED);
+            }
+            if (engine.effectiveTier(found) == ProtectionTier.DBSC) {
+                return GuardDecision.allow(GuardDecision.Reason.PROTECTED);
+            }
+            if (found.isDemoted()) {
+                return GuardDecision.deny(GuardDecision.Reason.LAPSED);
+            }
+            // Tier none with lastRefreshAt 0: bind() ran but registration has not
+            // completed. The browser is still unregistered, not lapsed.
+            return GuardDecision.allow(GuardDecision.Reason.UNREGISTERED);
+        }
+
+        if (appSessionId == null || appSessionId.isBlank()) {
+            return GuardDecision.allow(GuardDecision.Reason.UNREGISTERED);
+        }
+
+        Optional<Session> byAppSession = storage.getSessionByAppSessionId(appSessionId);
+        if (byAppSession.isEmpty()) {
+            return GuardDecision.allow(GuardDecision.Reason.UNREGISTERED);
+        }
+
+        // A binding exists for this application session yet the request carried no
+        // DBSC cookie. The client dropped them, or never sent them; either way a
+        // binding exists, so this is not a fresh client.
+        if (byAppSession.get().isRevoked()) {
+            return GuardDecision.deny(GuardDecision.Reason.REVOKED);
+        }
+        return GuardDecision.deny(GuardDecision.Reason.COOKIE_MISSING);
     }
 
     public Optional<Session> sessionFor(HttpServletRequest request) {

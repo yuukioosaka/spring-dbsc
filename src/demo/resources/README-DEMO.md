@@ -27,28 +27,35 @@ Then open <https://localhost:8443/login> and sign in with `demo` / `demo`.
 
 ## 3. What to expect
 
-After login the server calls `dbsc.bind()` with the **servlet session id**, so the
-DBSC binding and the login session are the same session. The login response
-carries:
+After login the server calls `dbsc.bind()` with a **freshly minted DBSC session id**,
+so the DBSC binding and the login session are two independent sessions coupled only by
+the authenticated user. The login response carries:
 
-- `Secure-Session-Registration: (ES256);path="/dbsc/registration";challenge="…"`
-- `__Host-dbsc-reg` and `__Host-dbsc-challenge` cookies
+- `Secure-Session-Registration: (ES256);path="/dbsc/regist/<token>";challenge="…"`
+- a `__Host-dbsc-challenge` cookie
 
-On **Chromium 145+** the browser then POSTs `/dbsc/registration` by itself within
-about a second, with a freshly generated key. No client code is involved. On
-success it receives the third cookie, `__Host-dbsc-session` (the binding), and the
-session tier becomes `dbsc`.
+The `path` carries a single-use **registration token**, which is what names the DBSC
+session on this route. That is why it is in the URL rather than in a cookie: the
+browser's registration POST is issued from whatever navigation context produced the
+login response, and a cookie would be withheld across a cross-site callback. The
+token is not the session id, and the registration response does not clear anything —
+the token is simply spent.
+
+On **Chromium 145+** the browser then POSTs that path by itself within about a
+second, with a freshly generated key. No client code is involved. On success it
+receives `__Host-dbsc-session` (the binding), and the session tier becomes `dbsc`.
+From then on that binding cookie is the only thing naming the session on the client.
 
 `GET /app` serves the demo page, and `GET /app/whoami` reports the live state as JSON:
 
 ```json
 {"httpSessionId":"…","dbscSessionId":"…","userId":"demo",
- "tier":"none","deviceKey":false,"skippedReason":null,"coupled":true}
+ "tier":"none","deviceKey":false,"skippedReason":null}
 ```
 
-`httpSessionId` and `dbscSessionId` are expected to be equal: that equality is the
-whole point of passing the application's own session id to `bind()`. `coupled` is
-that comparison, pre-computed for you.
+`httpSessionId` and `dbscSessionId` are deliberately different identifiers: the
+first belongs to the application's own session, the second was minted by the login
+route and keys the DBSC binding. Neither implies the other.
 
 ### What to look at in the browser DevTools network tab
 
@@ -58,7 +65,7 @@ written by any JavaScript in this demo:
 
 | Request | When | What to check |
 |---|---|---|
-| `POST /dbsc/registration` | about a second after the login response, once, automatically | it carries `Sec-Session-Response` (a JWS signed by the new hardware key) and the `__Host-dbsc-reg` / `__Host-dbsc-challenge` cookies; the response sets `__Host-dbsc-session` — the binding |
+| `POST /dbsc/regist/<token>` | about a second after the login response, once, automatically | it carries `Sec-Session-Response` (a JWS signed by the new hardware key) and the `__Host-dbsc-challenge` cookie; the response sets `__Host-dbsc-session` — the binding |
 | `POST /dbsc/refresh` | on the binding cookie's cadence (`binding-cookie-ttl`, 10 min by default) | the same header, plus `Sec-Session-Id` naming the existing session; a successful refresh pushes the cookie's expiry out |
 
 `GET /.well-known/device-bound-sessions` is **not** in the network tab: Chromium
@@ -135,49 +142,37 @@ redirect URI to register on the app is Spring Security's callback path, **not**
 https://localhost:8443/login/oauth2/code/entraid
 ```
 
-The callback itself does not call `bind()`; it answers with a one-line script that
-navigates to `/oidc/bind`, where the binding happens. See the next section for why.
+The callback itself calls `bind()`. It responds with a plain `302` to `/app`; there is
+no relay route. See the next section for why that is enough.
 
 `entraid` is only a local registration name; it is what appears in that callback
 URL. For a non-Entra provider, change the name (here and in the redirect URI) and
 set `ENTRA_ISSUER_URI`. The `user-name-attribute: sub` default suits any provider
 that issues a stable subject claim.
 
-### Why the binding happens on `/oidc/bind`
+### Why the callback can bind directly
 
 The OIDC callback response is **cross-site**: Chromium makes DBSC requests inherit the
 initiator of the request that caused them, and the initiator here is the identity
-provider. A registration header returned straight from the callback therefore
-produces a registration POST whose `SameSite=Lax` session cookie is withheld, and
-Chromium records that failure as permanent and never retries for the rest of the
-login.
+provider. The registration POST Chromium issues after the callback therefore arrives
+**without** the `SameSite=Lax` session cookie.
 
-The trap is that this does **not** stop at the callback. A server-side redirect keeps
-the original initiator, so an earlier revision of this demo redirected to `/oidc` and
-bound there — and `bind()` set `__Host-dbsc-reg` correctly, yet the very next
-`POST /dbsc/registration` still arrived without it and was refused with
-`SESSION_NOT_FOUND`. `/oidc` was a redirect target, so it was cross-site too.
+That used to be fatal. The session was named by the `__Host-dbsc-reg` cookie, which was
+withheld along with `JSESSIONID`, so the POST was refused with `SESSION_NOT_FOUND` and
+Chromium recorded the failure as permanent. The workaround was a browse-issued
+navigation through a script relay, which re-originated the request on this site.
 
-What works is a navigation the browser issues on its own. So the success handler answers
-the callback with a one-line `text/html` document whose script calls
-`location.replace('/oidc/bind')`, and the binding is made on the route it reaches.
+The current design removes the problem at its root: `bind()` names the session with a
+**single-use token in the registration URL path** (`/dbsc/regist/<token>`) rather than
+with a cookie. The POST needs no cookie to be resolved, so the cross-site initiator
+stops mattering and the success handler binds directly.
 
-There is no relay route and no template: it is one line of script, so it lives inline in
-the handler. It has to be HTML rather than bare JavaScript — a navigation response is
-only executed when the browser reads it as a document, so serving `text/javascript`
-here would get it downloaded or shown as text instead of run. The document needs no
-`<html>` wrapper or doctype; a served page whose only content is the script is enough.
+`scripts/probe_crosssite.py` is the regression test for exactly this property: it logs
+in, discards the cookie jar, and registers with only the token path and the challenge
+cookie. It must answer `200`.
 
-This is the pattern the README describes under "Binding behind OIDC or SAML", and it is
-the variant that works unconditionally; hanging the binding on a route the user happened
-to navigate to needs that navigation to exist, which a redirect chain never provides.
-
-`DbscFilter` plays no part in any of this. It serves the protocol routes only and never
-advertises the registration header on an application response, so the `bind()` calls in
-`DemoOidcConfig.oidcBindRoute` and `DemoFormLoginConfig` are the whole mechanism.
-
-Form login never hits any of this: it binds from a POST the browser made to this
-origin, so the success handler is the right and only place.
+Form login never hit this in the first place: it binds from a POST the browser made to
+this origin, so its success handler was always the right and only place.
 
 ### Resetting a poisoned browser
 

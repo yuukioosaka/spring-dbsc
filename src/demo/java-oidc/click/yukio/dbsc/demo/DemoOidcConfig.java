@@ -2,8 +2,6 @@ package click.yukio.dbsc.demo;
 
 import click.yukio.dbsc.DbscService;
 import click.yukio.dbsc.web.DbscFilter;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -23,16 +21,9 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.csrf.CsrfFilter;
 import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.security.web.util.matcher.OrRequestMatcher;
-import org.springframework.web.context.request.RequestContextHolder;
-import org.springframework.web.context.request.ServletRequestAttributes;
-import org.springframework.web.servlet.function.RouterFunction;
-import org.springframework.web.servlet.function.ServerResponse;
-
-import java.net.URI;
 import java.util.LinkedHashSet;
 import java.util.Set;
-
-import static org.springframework.web.servlet.function.RouterFunctions.route;
+import java.util.UUID;
 
 /**
  * The OIDC variant of the demo's security setup, active only under the
@@ -45,10 +36,6 @@ import static org.springframework.web.servlet.function.RouterFunctions.route;
  * <p>The form-login chains live in {@link DemoFormLoginConfig} and are switched
  * off here, because two chains matching {@code /**} would leave the winner up to
  * bean ordering.
- *
- * <p>The binding route is a {@link RouterFunction} bean here rather than a controller
- * class: it is four lines, and it only makes sense next to the success handler that
- * sends the browser to it.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableWebSecurity
@@ -89,10 +76,12 @@ public class DemoOidcConfig {
      * the refresh route and responds to by terminating the session.
      *
      * <p>The filter does <em>not</em> advertise the registration header on ordinary
-     * responses; the application does that by calling {@code bind()} itself. In this
-     * demo that call lives in {@link #oidcBindRoute}, reached by a navigation the
-     * callback's own response issues — because the callback and every server-side
-     * redirect after it are cross-site.
+     * responses; the application does that by calling {@code bind()} itself, which
+     * this demo does directly in the success handler below. That works even though
+     * the callback is cross-site, because the registration token travels in the URL
+     * rather than in a cookie: the POST Chromium issues arrives without a session
+     * cookie and the path alone names the session. See "Binding behind OIDC or SAML"
+     * in README.md.
      *
      * <p>Anchored on {@link CsrfFilter} for the same reason as the protocol chain:
      * the browser's registration POST must reach the filter before anything can
@@ -103,29 +92,33 @@ public class DemoOidcConfig {
     SecurityFilterChain appChain(
             HttpSecurity http,
             @Qualifier("dbscFilter") DbscFilter dbscFilter,
-            ClientRegistrationRepository clientRegistrationRepository) throws Exception {
+            ClientRegistrationRepository clientRegistrationRepository,
+            DbscService dbsc) throws Exception {
 
         http
                 .securityMatcher(new AntPathRequestMatcher("/**"))
                 .authorizeHttpRequests(auth -> auth
-                        // /oidc/bind is authenticated on purpose: the binding needs
-                        // a principal to key the session on.
                         .requestMatchers("/oauth2/**", "/login/**", "/error").permitAll()
                         .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2
                         .userInfoEndpoint(userInfo -> userInfo.oidcUserService(subjectAsName()))
-                        // No bind() here: this response is the callback's, so Chromium
-                        // treats it as cross-site and the registration POST it would
-                        // trigger loses its SameSite=Lax session cookie. What is needed
-                        // is a navigation the browser issues on its own, so answer with
-                        // a page that makes one. See "Binding behind OIDC or SAML" in
-                        // README.md.
+                        // The callback's response is cross-site, but that no longer
+                        // matters: bind() names the session with a single-use token in
+                        // the registration URL, so the POST Chromium issues carries no
+                        // session cookie and still resolves. No relay hop is needed.
                         .successHandler((request, response, authentication) -> {
-                            response.setContentType("text/html");
-                            // location.replace, not location.href: the hop stays out of
-                            // the history, so Back from the app does not land here and
-                            // bind a second time.
-                            response.getWriter().write("<script>location.replace('/oidc/bind');</script>");
+                            // Force the session to exist: a login always has one, even
+                            // if nothing touched it earlier, and the id is passed to
+                            // bind() so the guard can tell a client that never
+                            // registered apart from one that dropped its DBSC cookies.
+                            String appSessionId = request.getSession().getId();
+                            // The DBSC session id is minted here and is deliberately
+                            // unrelated to the application's own session id. Nothing
+                            // needs to retain it: logout reads it back from the
+                            // binding cookie.
+                            dbsc.bind(UUID.randomUUID().toString(), appSessionId,
+                                    authentication.getName(), 86_400_000L, request, response);
+                            response.sendRedirect("/app");
                         }))
                 .csrf(csrf -> csrf.disable())
                 .addFilterBefore(dbscFilter, CsrfFilter.class);
@@ -146,61 +139,5 @@ public class DemoOidcConfig {
             authorities.add(new SimpleGrantedAuthority("ROLE_USER"));
             return new DefaultOidcUser(authorities, user.getIdToken(), user.getUserInfo(), "sub");
         };
-    }
-
-    /**
-     * The one route the OIDC binding runs on, declared as a {@link RouterFunction} so it
-     * lives beside the chain that calls it rather than in a class of its own.
-     *
-     * <p>The OIDC callback's response is <strong>cross-site</strong>: Chromium makes
-     * DBSC requests inherit the initiator of the request that produced them, and that
-     * initiator is the identity provider. Two things follow, and together they are why
-     * this route exists at all:
-     *
-     * <ol>
-     *   <li>A registration header on the callback response is useless — the
-     *       registration POST it triggers arrives without the {@code SameSite=Lax}
-     *       session cookie.</li>
-     *   <li>A server-side redirect does not escape this. A {@code 302} to another route
-     *       still carries the callback as its initiator, so binding there fails the same
-     *       way. Only a navigation the browser issues on its own re-originates the
-     *       request on this site.</li>
-     * </ol>
-     *
-     * <p>So the success handler answers the callback with a small HTML document whose
-     * script navigates here. That navigation is one the browser issues itself, which is
-     * what makes the request arriving here same-site and carries the session cookie with
-     * it.
-     *
-     * <p>This is the pattern the README describes under "Binding behind OIDC or SAML",
-     * and it is the variant that works unconditionally — hanging the binding on a
-     * route the user happened to navigate to needs that navigation to exist, which a
-     * pure redirect chain never provides.
-     *
-     * <p>{@code DbscFilter} plays no part in this: it serves the protocol routes and
-     * never advertises the registration header on an application response.
-     */
-    @Bean
-    RouterFunction<ServerResponse> oidcBindRoute(DbscService dbsc) {
-        return route().GET("/oidc/bind", request -> {
-            // Reached only via the script the callback returned, so this request is
-            // same-site and its session cookie travels with it. That is what makes the
-            // bind() below succeed where the same call on the callback's response did
-            // not.
-            //
-            // bind() writes headers and cookies, so it needs the real ServletResponse.
-            // RouterFunction gives no access to it: the response has not been created
-            // yet when the handler runs, so it is reached through the request context
-            // instead. A controller method taking the response as a parameter is the
-            // cleaner shape, and the README shows both.
-            HttpServletRequest servletRequest = request.servletRequest();
-            HttpServletResponse servletResponse =
-                    ((ServletRequestAttributes) RequestContextHolder.currentRequestAttributes())
-                            .getResponse();
-            dbsc.bind(servletRequest.getSession().getId(),
-                    servletRequest.getUserPrincipal().getName(),
-                    86_400_000L, servletRequest, servletResponse);
-            return ServerResponse.temporaryRedirect(URI.create("/app")).build();
-        }).build();
     }
 }
