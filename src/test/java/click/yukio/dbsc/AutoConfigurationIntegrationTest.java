@@ -85,8 +85,8 @@ class AutoConfigurationIntegrationTest {
         assertTrue(registration.contains("path=\"/dbsc/regist/"), registration);
         assertTrue(registration.contains("challenge=\""), registration);
 
-        assertNotNull(response.getCookie(cookieScope.challengeCookieName()),
-                "bind() must set the challenge cookie the registration JWS is validated against");
+        assertNotNull(response.getHeader("Secure-Session-Challenge"),
+                "bind() must offer the challenge the registration JWS is validated against");
         assertNull(response.getCookie("session_identifier"),
                 "bind() must NOT set a cookie under session_identifier: it is a key into the "
                         + "browser's session store, not a cookie name, and the session id stays "

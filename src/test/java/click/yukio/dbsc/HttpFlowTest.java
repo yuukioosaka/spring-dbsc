@@ -69,7 +69,7 @@ class HttpFlowTest {
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("login: bind() sets the registration header (both names) and the challenge cookie")
+    @DisplayName("login: bind() sets the registration header and the challenge header (both names)")
     void loginBinds() throws Exception {
         MvcResult result = login();
         var response = result.getResponse();
@@ -84,13 +84,21 @@ class HttpFlowTest {
         // Some Chromium builds straddle the rename, so the legacy name is emitted too.
         assertEquals(registration, response.getHeader("Sec-Session-Registration"));
 
+        // The challenge travels as a response header naming the session (spec §8.7, §9.2),
+        // not as a cookie: the browser is not asked to hold the server's state, and the
+        // registration POST is resolved from the path alone.
+        String challengeHeader = response.getHeader("Secure-Session-Challenge");
+        assertNotNull(challengeHeader, "bind() must offer the challenge the browser will sign");
+        assertTrue(challengeHeader.matches("\"[A-Za-z0-9_-]{43}\";id=\"[^\"]+\""), challengeHeader);
+        assertEquals(challengeHeader, response.getHeader("Sec-Session-Challenge"));
+
         List<String> cookies = response.getHeaders("Set-Cookie");
-        assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.challengeCookieName() + "=")),
-                "the challenge cookie must be set: " + cookies);
         assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.credentialCookieName() + "=")),
                 "the credential cookie is set from the start: " + cookies);
         assertTrue(cookies.stream().noneMatch(c -> c.contains("dbsc-reg")),
                 "the pre-registration cookie is gone; the path carries the token now: " + cookies);
+        assertTrue(cookies.stream().noneMatch(c -> c.contains("dbsc-challenge")),
+                "the challenge cookie is gone; the challenge is held server-side: " + cookies);
         // The session id is echoed in the JSON config as session_identifier, but never as
         // a cookie: it is a value the browser stores and returns in a header, not a
         // credential a cookie jar could leak.
@@ -112,8 +120,7 @@ class HttpFlowTest {
         String jws = key.registrationJws(login.challenge(), login.sessionId());
 
         MvcResult result = mvc.perform(post(login.registrationPath())
-                        .header("Secure-Session-Response", jws)
-                        .cookie(login.challengeCookie()))
+                        .header("Secure-Session-Response", jws))
                 .andReturn();
 
         var response = result.getResponse();
@@ -149,9 +156,6 @@ class HttpFlowTest {
         assertTrue(cookies.stream().noneMatch(
                         c -> c.startsWith("session_identifier" + "=")),
                 "nothing is set under session_identifier: " + cookies);
-        assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.challengeCookieName() + "=;")
-                        && c.contains("Max-Age=0")),
-                "the challenge cookie must be cleared: " + cookies);
 
         assertEquals(ProtectionTier.DBSC, storage.getSession(login.sessionId()).orElseThrow().tier());
     }
@@ -181,8 +185,7 @@ class HttpFlowTest {
         LoginState login = loginWithState();
 
         MvcResult result = mvc.perform(post("/dbsc/regist/" + "A".repeat(43))
-                        .header("Secure-Session-Response", "x.y.z")
-                        .cookie(login.challengeCookie()))
+                        .header("Secure-Session-Response", "x.y.z"))
                 .andReturn();
 
         assertEquals(403, result.getResponse().getStatus());
@@ -200,8 +203,7 @@ class HttpFlowTest {
                 dbscClock.millis() - 10_000, dbscClock.millis() - 1, false));
 
         MvcResult result = mvc.perform(post(login.registrationPath())
-                        .header("Secure-Session-Response", "x.y.z")
-                        .cookie(login.challengeCookie()))
+                        .header("Secure-Session-Response", "x.y.z"))
                 .andReturn();
 
         assertEquals(403, result.getResponse().getStatus());
@@ -214,8 +216,7 @@ class HttpFlowTest {
     void registrationWithoutProof() throws Exception {
         LoginState login = loginWithState();
 
-        MvcResult result = mvc.perform(post(login.registrationPath())
-                        .cookie(login.challengeCookie()))
+        MvcResult result = mvc.perform(post(login.registrationPath()))
                 .andReturn();
 
         assertEquals(403, result.getResponse().getStatus(),
@@ -248,8 +249,8 @@ class HttpFlowTest {
         assertEquals(challengeHeader, response.getHeader("Sec-Session-Challenge"));
 
         assertTrue(response.getHeaders("Set-Cookie").stream()
-                        .anyMatch(c -> c.startsWith(cookieScope.challengeCookieName() + "=")),
-                "a challenge cookie must be set");
+                        .noneMatch(c -> c.contains("dbsc-challenge")),
+                "no challenge cookie: it is issued again on every leg and held server-side");
     }
 
     @Test
@@ -265,14 +266,12 @@ class HttpFlowTest {
                 .andReturn();
         String challengeHeader = firstLeg.getResponse().getHeader("Secure-Session-Challenge");
         String jti = challengeHeader.substring(1, challengeHeader.indexOf('"', 1));
-        var challengeCookie = firstLeg.getResponse().getCookie(cookieScope.challengeCookieName());
-        assertNotNull(challengeCookie);
 
-        // Leg 2: sign the new JTI with the same key.
+        // Leg 2: sign the new JTI with the same key. Nothing else is carried: the
+        // challenge is looked up server-side by the session the header names.
         MvcResult secondLeg = mvc.perform(post("/dbsc/refresh")
                         .header("Sec-Secure-Session-Id", login.sessionId())
-                        .header("Secure-Session-Response", key.refreshJws(jti))
-                        .cookie(challengeCookie))
+                        .header("Secure-Session-Response", key.refreshJws(jti)))
                 .andReturn();
 
         assertEquals(200, secondLeg.getResponse().getStatus());
@@ -306,15 +305,13 @@ class HttpFlowTest {
                 .andReturn();
         String challengeHeader = firstLeg.getResponse().getHeader("Secure-Session-Challenge");
         String jti = challengeHeader.substring(1, challengeHeader.indexOf('"', 1));
-        var challengeCookie = firstLeg.getResponse().getCookie(cookieScope.challengeCookieName());
 
         // A well-formed refresh JWS from a different key.
         String foreignJws = TestKey.generate().refreshJws(jti);
 
         MvcResult result = mvc.perform(post("/dbsc/refresh")
                         .header("Sec-Secure-Session-Id", login.sessionId())
-                        .header("Secure-Session-Response", foreignJws)
-                        .cookie(challengeCookie))
+                        .header("Secure-Session-Response", foreignJws))
                 .andReturn();
 
         assertEquals(403, result.getResponse().getStatus());
@@ -370,7 +367,7 @@ class HttpFlowTest {
         MvcResult result = mvc.perform(post("/host/payment")
                         .contentType("application/json")
                         .content("{\"amount\":1000}")
-                        .cookie(login.challengeCookie()))
+                        .cookie(login.preRegistrationCookie()))
                 .andReturn();
 
         assertEquals(200, result.getResponse().getStatus(),
@@ -439,7 +436,7 @@ class HttpFlowTest {
         // being opt-in per route rather than a blanket filter.
         LoginState login = loginWithState();
 
-        MvcResult result = mvc.perform(get("/host/whoami").cookie(login.challengeCookie()))
+        MvcResult result = mvc.perform(get("/host/whoami").cookie(login.preRegistrationCookie()))
                 .andReturn();
 
         assertEquals(200, result.getResponse().getStatus());
@@ -462,20 +459,20 @@ class HttpFlowTest {
         private final String sessionId;
         private final String challenge;
         private final String registrationToken;
-        private final jakarta.servlet.http.Cookie challengeCookie;
         private final MockHttpSession appSession;
+        private final jakarta.servlet.http.Cookie preRegistrationCookie;
         private jakarta.servlet.http.Cookie bindingCookie;
 
         LoginState(String sessionId, String challenge, String registrationToken,
-                   jakarta.servlet.http.Cookie challengeCookie,
                    MockHttpSession appSession,
-                   jakarta.servlet.http.Cookie bindingCookie) {
+                   jakarta.servlet.http.Cookie bindingCookie,
+                   jakarta.servlet.http.Cookie preRegistrationCookie) {
             this.sessionId = sessionId;
             this.challenge = challenge;
             this.registrationToken = registrationToken;
-            this.challengeCookie = challengeCookie;
             this.appSession = appSession;
             this.bindingCookie = bindingCookie;
+            this.preRegistrationCookie = preRegistrationCookie;
         }
 
         String sessionId() {
@@ -489,7 +486,7 @@ class HttpFlowTest {
          */
         LoginState withSessionId(String newSessionId) {
             return new LoginState(newSessionId, challenge, registrationToken,
-                    challengeCookie, appSession, bindingCookie);
+                    appSession, bindingCookie, preRegistrationCookie);
         }
 
         /**
@@ -517,12 +514,17 @@ class HttpFlowTest {
             return "/dbsc/regist/" + registrationToken;
         }
 
-        jakarta.servlet.http.Cookie challengeCookie() {
-            return challengeCookie;
-        }
-
         jakarta.servlet.http.Cookie bindingCookie() {
             return bindingCookie;
+        }
+
+        /**
+         * The credential cookie {@code bind()} set before registration completed.
+         * Its ticket resolves to the session, so a request carrying it is recognised
+         * as an unregistered browser rather than as one that never bound.
+         */
+        jakarta.servlet.http.Cookie preRegistrationCookie() {
+            return preRegistrationCookie;
         }
 
         /**
@@ -566,15 +568,15 @@ class HttpFlowTest {
         Matcher tokenMatcher = Pattern.compile("path=\"/dbsc/regist/([^\"]+)\"").matcher(registration);
         assertTrue(tokenMatcher.find(), "the registration header must carry a token path: " + registration);
 
-        var challengeCookie = response.getCookie(cookieScope.challengeCookieName());
-        assertNotNull(challengeCookie);
-
         // The binding cookie is already present from bind(), and is re-issued by
         // the registration response with a fresh lifetime.
         MockHttpSession appSession = (MockHttpSession) result.getRequest().getSession(false);
         assertNotNull(appSession, "bind() must have created the application session");
+        var preRegistrationCookie = response.getCookie(cookieScope.credentialCookieName());
+        assertNotNull(preRegistrationCookie,
+                "bind() sets the credential cookie before any registration happens");
         return new LoginState(sessionId, matcher.group(1), tokenMatcher.group(1),
-                challengeCookie, appSession, null);
+                appSession, null, preRegistrationCookie);
     }
 
     private LoginState register(LoginState login, TestKey key) throws Exception {
@@ -592,8 +594,7 @@ class HttpFlowTest {
     static LoginState register(MockMvc mvc, CookieScope cookieScope, LoginState login, TestKey key)
             throws Exception {
         MvcResult result = mvc.perform(post(login.registrationPath())
-                        .header("Secure-Session-Response", key.registrationJws(login.challenge(), login.sessionId()))
-                        .cookie(login.challengeCookie()))
+                        .header("Secure-Session-Response", key.registrationJws(login.challenge(), login.sessionId())))
                 .andReturn();
         assertEquals(200, result.getResponse().getStatus(),
                 "registration failed: " + result.getResponse().getContentAsString());

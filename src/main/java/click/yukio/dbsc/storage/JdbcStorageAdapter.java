@@ -269,8 +269,6 @@ public class JdbcStorageAdapter implements StorageAdapter {
         }
     }
 
-    // ---- Registration tokens ----
-
     @Override
     public Optional<RegistrationToken> getRegistrationToken(String token) {
         String sql = "SELECT token, session_id, created_at, expires_at, consumed "

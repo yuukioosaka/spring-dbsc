@@ -533,13 +533,14 @@ session id alongside it. The id is never handed to the browser, so `sessionFor(r
 is the way to read it back rather than any cookie value.
 
 **`bind()` is the only thing that starts a binding.** It persists the session record,
-mints a single-use registration token, sets the challenge and credential cookies, and adds
-`Secure-Session-Registration` naming `/dbsc/regist/<token>`; Chromium then calls that
+mints a single-use registration token, stores a challenge and sets the credential cookie,
+and adds `Secure-Session-Registration` naming `/dbsc/regist/<token>` plus a
+`Secure-Session-Challenge` header carrying the JTI to sign; Chromium then calls that
 route on its own within about a second, with no client code to write. `DbscFilter` never
 adds that header to your application's own responses, so a login flow that never calls
 `bind()` produces no binding at all.
 
-The call is cheap but not free — one challenge and two cookie writes — so a route that
+The call is cheap but not free — one challenge and one cookie write — so a route that
 binds on every request is fine, and keeping it off hot paths is better. It is **not**
 idempotent: each call writes a record, and a second call under the same `sessionId`
 replaces the first. That is deliberate, so a re-login can re-key an existing session.
@@ -1085,8 +1086,10 @@ Two consequences worth knowing:
   `<prefix>/<token>`. Never build the header yourself; `bind()` does it, and
   `DbscService.registrationPathFor(token)` is the accessor if you need it.
 
-The challenge cookie is unaffected and still required: it is how the server knows which
-JTI was signed.
+The challenge is unaffected and still required: it is how the server knows which
+JTI was signed. The challenge no longer travels in a cookie — `bind()` offers it in
+the `Secure-Session-Challenge` header, and the server keeps it against the session
+and looks it up when the registration POST arrives.
 
 For form login none of this ever applied. Form login owns the POST the browser made to
 your own origin, so the success handler *is* same-site and a single `bind()` there is

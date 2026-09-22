@@ -99,7 +99,7 @@ class ProtocolBehaviourTest {
         seedSession();
         seedChallenge(CHALLENGE);
 
-        DeviceKey key = engine.handleRegistration(SESSION_ID, jws, CHALLENGE);
+        DeviceKey key = engine.handleRegistration(SESSION_ID, jws);
 
         assertEquals("ES256", key.algorithm());
         assertEquals(SESSION_ID, key.sessionId());
@@ -121,7 +121,7 @@ class ProtocolBehaviourTest {
         seedChallenge(CHALLENGE);
 
         DbscException failure = assertThrows(DbscException.class,
-                () -> engine.handleRegistration(SESSION_ID, null, CHALLENGE));
+                () -> engine.handleRegistration(SESSION_ID, null));
         assertEquals(DbscErrorCode.MISSING_RESPONSE_HEADER, failure.code());
     }
 
@@ -132,11 +132,14 @@ class ProtocolBehaviourTest {
         String jws = TestVectors.string(vector, "secureSessionResponse");
         seedSession();
         seedChallenge(CHALLENGE);
-        engine.handleRegistration(SESSION_ID, jws, CHALLENGE);
+        engine.handleRegistration(SESSION_ID, jws);
 
+        // Re-arm with a fresh token: the vector always signs the same jti, so a
+        // pre-consumed record is what makes the second attempt hit the
+        // already-registered rule rather than the consumed-challenge one.
         seedChallenge(CHALLENGE);
         DbscException failure = assertThrows(DbscException.class,
-                () -> engine.handleRegistration(SESSION_ID, jws, CHALLENGE));
+                () -> engine.handleRegistration(SESSION_ID, jws));
         assertEquals(DbscErrorCode.SESSION_ALREADY_REGISTERED, failure.code());
     }
 
@@ -148,7 +151,7 @@ class ProtocolBehaviourTest {
 
         DbscException failure = assertThrows(DbscException.class,
                 () -> engine.handleRegistration(SESSION_ID,
-                        TestVectors.string(vector, "secureSessionResponse"), CHALLENGE));
+                        TestVectors.string(vector, "secureSessionResponse")));
         assertEquals(DbscErrorCode.CHALLENGE_NOT_FOUND, failure.code());
     }
 
@@ -163,7 +166,7 @@ class ProtocolBehaviourTest {
 
         DbscException failure = assertThrows(DbscException.class,
                 () -> engine.handleRegistration(SESSION_ID,
-                        TestVectors.string(vector, "secureSessionResponse"), CHALLENGE));
+                        TestVectors.string(vector, "secureSessionResponse")));
         assertEquals(DbscErrorCode.CHALLENGE_CONSUMED, failure.code());
     }
 
@@ -177,7 +180,7 @@ class ProtocolBehaviourTest {
 
         DbscException failure = assertThrows(DbscException.class,
                 () -> engine.handleRegistration(SESSION_ID,
-                        TestVectors.string(vector, "secureSessionResponse"), CHALLENGE));
+                        TestVectors.string(vector, "secureSessionResponse")));
         assertEquals(DbscErrorCode.CHALLENGE_EXPIRED, failure.code());
     }
 
@@ -191,7 +194,7 @@ class ProtocolBehaviourTest {
 
         DbscException failure = assertThrows(DbscException.class,
                 () -> engine.handleRegistration(SESSION_ID,
-                        TestVectors.string(vector, "secureSessionResponse"), CHALLENGE));
+                        TestVectors.string(vector, "secureSessionResponse")));
         assertEquals(DbscErrorCode.JTI_MISMATCH, failure.code());
     }
 
@@ -208,7 +211,7 @@ class ProtocolBehaviourTest {
         seedChallenge(CHALLENGE);
 
         var outcome = engine.handleRefresh(
-                SESSION_ID, TestVectors.string(vector, "secureSessionResponse"), CHALLENGE);
+                SESSION_ID, TestVectors.string(vector, "secureSessionResponse"));
 
         assertEquals(SESSION_ID, outcome.sessionId());
         assertEquals(CHALLENGE, outcome.jti());
@@ -232,7 +235,7 @@ class ProtocolBehaviourTest {
         String foreignJws = registrationJwsFromFreshKey();
 
         DbscException failure = assertThrows(DbscException.class,
-                () -> engine.handleRefresh(SESSION_ID, foreignJws, CHALLENGE));
+                () -> engine.handleRefresh(SESSION_ID, foreignJws));
         assertEquals(DbscErrorCode.SIGNATURE_INVALID, failure.code());
 
         // Demotion-on-failure is the security mechanism.
@@ -259,7 +262,7 @@ class ProtocolBehaviourTest {
 
         DbscException failure = assertThrows(DbscException.class,
                 () -> engine.handleRefresh(SESSION_ID,
-                        TestVectors.string(vector, "secureSessionResponse"), CHALLENGE));
+                        TestVectors.string(vector, "secureSessionResponse")));
         assertEquals(DbscErrorCode.KEY_NOT_FOUND, failure.code());
     }
 
@@ -274,7 +277,7 @@ class ProtocolBehaviourTest {
 
         DbscException failure = assertThrows(DbscException.class,
                 () -> engine.handleRefresh(SESSION_ID,
-                        TestVectors.string(vector, "secureSessionResponse"), CHALLENGE));
+                        TestVectors.string(vector, "secureSessionResponse")));
         assertEquals(DbscErrorCode.CHALLENGE_EXPIRED, failure.code());
     }
 

@@ -185,20 +185,19 @@ class WireFormatTest {
     class Cookies {
 
         @Test
-        @DisplayName("host scope: __Host- names and the exact attributes string")
+        @DisplayName("host scope: the credential name is verbatim and the attributes exact")
         void hostScope() {
             CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.HOST, null);
 
-            assertEquals("__Host-dbsc-challenge", scope.challengeCookieName());
+            assertEquals(CookieScope.DEFAULT_CREDENTIAL_COOKIE, scope.credentialCookieName());
             assertEquals("Path=/; Secure; HttpOnly; SameSite=Lax", scope.attributesString());
         }
 
         @Test
-        @DisplayName("site scope: __Secure- names, Domain appended without a leading dot")
+        @DisplayName("site scope: Domain appended without a leading dot")
         void siteScope() {
             CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.SITE, "example.com");
 
-            assertEquals("__Secure-dbsc-challenge", scope.challengeCookieName());
             assertEquals(
                     "Path=/; Secure; HttpOnly; SameSite=Lax; Domain=example.com",
                     scope.attributesString());
@@ -213,7 +212,7 @@ class WireFormatTest {
             // The name is a deployer choice: no prefix is added, and it is independent
             // of the cookie session_identifier refers to -- which is not a cookie at all.
             assertEquals("__Host-auth_cookie", scope.credentialCookieName());
-            assertNotEquals("__Host-dbsc-challenge", scope.credentialCookieName());
+            assertNotEquals("__Host-dbsc-session", scope.credentialCookieName());
         }
 
         @Test
@@ -225,11 +224,12 @@ class WireFormatTest {
         }
 
         @Test
-        @DisplayName("insecure dev: no prefix")
+        @DisplayName("insecure dev: no prefix is applied to a configured name")
         void insecureDev() {
-            CookieScope scope = CookieScope.resolve(false, CookieScope.Scope.HOST, null);
+            CookieScope scope = CookieScope.resolve(
+                    false, CookieScope.Scope.HOST, null, "auth_cookie");
 
-            assertEquals("dbsc-challenge", scope.challengeCookieName());
+            assertEquals("auth_cookie", scope.credentialCookieName());
         }
 
         @Test

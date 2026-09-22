@@ -124,13 +124,11 @@ class SessionRotationTest {
                 .andReturn();
         String challengeHeader = firstLeg.getResponse().getHeader("Secure-Session-Challenge");
         String jti = challengeHeader.substring(1, challengeHeader.indexOf('"', 1));
-        Cookie challengeCookie = firstLeg.getResponse().getCookie(cookieScope.challengeCookieName());
 
         MvcResult result = mvc.perform(post("/dbsc/refresh")
                         .header("Sec-Secure-Session-Id", login.sessionId())
                         .header("Secure-Session-Response",
-                                HttpFlowTest.TestKey.generate().refreshJws(jti))
-                        .cookie(challengeCookie))
+                                HttpFlowTest.TestKey.generate().refreshJws(jti)))
                 .andReturn();
 
         assertEquals(403, result.getResponse().getStatus());
@@ -181,13 +179,10 @@ class SessionRotationTest {
         String challengeHeader = firstLeg.getResponse().getHeader("Secure-Session-Challenge");
         assertNotNull(challengeHeader, "leg 1 must issue a challenge");
         String jti = challengeHeader.substring(1, challengeHeader.indexOf('"', 1));
-        Cookie challengeCookie = firstLeg.getResponse().getCookie(cookieScope.challengeCookieName());
-        assertNotNull(challengeCookie);
 
         return mvc.perform(post("/dbsc/refresh")
                         .header("Sec-Secure-Session-Id", presentedId)
-                        .header("Secure-Session-Response", key.refreshJws(jti))
-                        .cookie(challengeCookie))
+                        .header("Secure-Session-Response", key.refreshJws(jti)))
                 .andReturn();
     }
 }

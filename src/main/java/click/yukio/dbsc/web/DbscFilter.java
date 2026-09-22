@@ -145,8 +145,8 @@ public class DbscFilter extends OncePerRequestFilter {
             throws IOException {
         Map<String, Object> config = dbsc.handleRefresh(request, response);
         if (config == null) {
-            // The 403, its challenge header and its cookie are already written by
-            // the service, which had to decide the status before returning.
+            // The 403 and its challenge header are already written by the
+            // service, which had to decide the status before returning.
             return;
         }
         writeJson(response, HttpStatus.OK, config);

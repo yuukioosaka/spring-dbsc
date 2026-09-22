@@ -139,8 +139,8 @@ def request(opener, method, path, body=None, headers=None, form=True, base=None,
     while keeping every other cookie the jar holds. Pass a plain ``Cookie`` header
     instead and you lose the rest: CookieJar.add_cookie_header only appends when
     the request has no Cookie header at all, so the explicit value wins and the
-    jar's cookies are dropped. Tests that pin one cookie to a stale value while
-    still needing the challenge cookie must come through here.
+    jar's cookies are dropped. Tests that pin the credential cookie to a stale
+    value while still needing the rest of the jar must come through here.
     """
     data = None
     hdrs = dict(headers or {})
@@ -256,6 +256,23 @@ def registration_path(headers):
     return m.group(1) if m else None
 
 
+def registration_jti(headers):
+    """The JTI from the registration header's ``challenge`` parameter, or None.
+
+    bind() names the same challenge in three places on the login response: the
+    registration header's ``challenge`` parameter, which is what Chromium is told
+    to sign, and the ``Secure-Session-Challenge`` header (plus its legacy alias),
+    which is the other side of the same value. This reads the registration header,
+    because that is the copy a browser works from; the challenge header carries the
+    identical JTI.
+    """
+    reg = header(headers, "Secure-Session-Registration")
+    if not reg:
+        return None
+    m = re.search(r'challenge="([^"]+)"', reg)
+    return m.group(1) if m else None
+
+
 def session_id_of(opener, base=None):
     """The DBSC session id, as the application reports it.
 
@@ -308,22 +325,22 @@ def header(headers, name):
     return values[0] if values else None
 
 
-def refresh_jti(headers, jar, name="__Host-dbsc-challenge"):
-    """The JTI to sign for a refresh, taken from the challenge *header*.
+def refresh_jti(headers):
+    """The JTI to sign for a refresh, taken from the challenge header.
 
-    Not from the challenge cookie, which is the obvious source and the wrong one. The
-    cookie's Max-Age is the challenge TTL in seconds, so with the suite's deliberately
-    tiny DBSC_CHALLENGE_TTL (2s) it is emitted as ``Max-Age=0`` and a compliant cookie
-    jar never stores it at all. The header is the durable copy of the same value and is
-    what the spec points a client at, so read it there and fall back to the cookie only
-    when a jar happens to hold one.
+    The header is now the *only* copy: the challenge travels to the browser as the
+    JTI inside ``Secure-Session-Challenge`` and is held server-side against the
+    session, so there is no challenge cookie to fall back to. The first refresh leg
+    (no proof) is what re-arms the session, so this reads the header from that 403.
+
+    The value is ``"<jti>"``, or ``"<jti>";id="<sessionId>"`` when the server named
+    the session, which is what bind() and the refresh leg both emit.
     """
     raw = header(headers, "Secure-Session-Challenge")
-    if raw:
-        m = re.match(r'\s*"([^"]+)"', raw)
-        if m:
-            return m.group(1)
-    return cookie_value(jar, name)
+    if not raw:
+        return None
+    m = re.match(r'\s*"([^"]+)"', raw)
+    return m.group(1) if m else None
 
 
 def refresh_jws(key, jti):
@@ -335,14 +352,18 @@ def refresh_jws(key, jti):
     return key.jws({"jti": jti}, include_jwk=False)
 
 
-def native_register(opener, jar, reg_path, key):
+def native_register(opener, reg_path, key, login_headers):
     """Runs native registration off the path the login response advertised.
+
+    The JTI comes from the login response's registration header, which is the value
+    bind() asked the browser to sign; the server looks it back up by the session the
+    token names, so no cookie carries it. Pass the headers login() returned.
 
     Returns (jti, status, text).
     """
-    jti = cookie_value(jar, "__Host-dbsc-challenge")
+    jti = registration_jti(login_headers)
     if jti is None:
-        return None, None, "no __Host-dbsc-challenge cookie"
+        return None, None, "no challenge in the login response's registration header"
     status, _, text = request(
         opener, "POST", reg_path, body=b"", headers={
             "Secure-Session-Response": key.jws({"jti": jti}),
@@ -374,11 +395,12 @@ def rebind(opener):
 
 
 def native_register_manual(opener, jti, key, base=None, reg_path=None):
-    """Native registration with the JTI and path supplied, not read from the jar.
+    """Native registration with the JTI and path supplied, not read from a response.
 
-    Needed when the JTI must be re-presented after its cookie was cleared or
-    expired, when registration is aimed at the low-budget instance rather than the
-    main demo, and when the path itself is wrong on purpose.
+    Needed when the proof must carry a JTI the server has since forgotten -- expired,
+    consumed, or never issued to this session -- when registration is aimed at the
+    low-budget instance rather than the main demo, and when the path itself is wrong
+    on purpose. The JTI travels in the signed proof and nowhere else.
     Returns (jti, status, text).
     """
     status, _, text = request(
@@ -387,22 +409,6 @@ def native_register_manual(opener, jti, key, base=None, reg_path=None):
             "Content-Type": "application/json"})
     return jti, status, text
 
-
-def challenge_cookie_header(jar, jti):
-    """The cookie values that re-present a JTI the server has since forgotten.
-
-    Returns a {name: value} map for request(replace_cookies=...), not a literal
-    header: sending the raw header would suppress every other cookie the jar holds,
-    because CookieJar.add_cookie_header appends only when no Cookie header is set.
-
-    The server clears the challenge cookie on use and its Max-Age makes a compliant
-    client drop it on expiry, so the only way to exercise the "consumed"/"expired"
-    branches is to name the value in the request by hand.
-    """
-    override = {"__Host-dbsc-challenge": jti}
-    if cookie_value(jar, "JSESSIONID"):
-        override["JSESSIONID"] = cookie_value(jar, "JSESSIONID")
-    return override
 
 
 # The registration path prefix, mirrored from dbsc.registration-path. The suite
@@ -445,8 +451,8 @@ def p_window_seconds():
 def p_tripped(opener, jar):
     """Whether the low-budget instance already refuses this client.
 
-    A dry registration that cannot succeed: it presents no challenge cookie, so it
-    is rejected whether or not the client is throttled. A 429 here means the
+    A dry registration that cannot succeed: it presents a JTI that was never issued,
+    so it is rejected whether or not the client is throttled. A 429 here means the
     failure budget is already spent -- by an earlier run, since the limiter holds
     its counters for a whole window -- and that is exactly the state this section
     has to clear before it can measure anything.
@@ -477,10 +483,25 @@ def main():
           str(reg_path))
     check("legacy Sec-Session-Registration emitted in parallel",
           header(headers, "Sec-Session-Registration") is not None)
-    ch_cookie = cookie(jar, "__Host-dbsc-challenge")
-    check("__Host-dbsc-challenge cookie present", ch_cookie is not None)
+    check("no __Host-dbsc-challenge cookie: the challenge travels in a header now",
+          cookie(jar, "__Host-dbsc-challenge") is None)
     check("no __Host-dbsc-reg cookie: the path carries the token now",
           cookie(jar, "__Host-dbsc-reg") is None)
+    # The challenge is now a response header only. It is emitted twice under two names
+    # (the spec name and the legacy alias bind() straddles), and must not become a
+    # cookie: asking the browser to hold our state is what the header-only design
+    # removed.
+    challenge = refresh_jti(headers)
+    check("Secure-Session-Challenge header carries the challenge JTI",
+          challenge is not None, str(header(headers, "Secure-Session-Challenge")))
+    check("the challenge header names the session it belongs to",
+          'id="' in (header(headers, "Secure-Session-Challenge") or ""),
+          str(header(headers, "Secure-Session-Challenge")))
+    check("legacy Sec-Session-Challenge emitted in parallel",
+          header(headers, "Sec-Session-Challenge") is not None)
+    check("the registration header and the challenge header name the same JTI",
+          registration_jti(headers) == challenge,
+          f"{registration_jti(headers)} != {challenge}")
     # The credential cookie is set from bind(), before registration, so a request that
     # omits it is distinguishable from a browser that never bound at all.
     bind_cookie = cookie(jar, "__Host-auth_cookie")
@@ -492,7 +513,7 @@ def main():
     check("no cookie is set under the name session_identifier",
           cookie(jar, "session_identifier") is None)
     check("__Host- cookies are Secure",
-          bool(bind_cookie and bind_cookie.secure and ch_cookie and ch_cookie.secure))
+          bool(bind_cookie and bind_cookie.secure))
     check("__Host- cookies are HttpOnly and Path=/",
           bool(bind_cookie and bind_cookie.has_nonstandard_attr("HttpOnly")
                and bind_cookie.path == "/"))
@@ -500,7 +521,6 @@ def main():
           session_id_of(opener) != cookie_value(jar, "JSESSIONID")
           and session_id_of(opener) is not None,
           f"{session_id_of(opener)} == {cookie_value(jar, 'JSESSIONID')}")
-    challenge = ch_cookie.value if ch_cookie else None
 
     # ------------------------------------------------- 2. native registration
     print("\n-- 2. native registration (/dbsc/regist/<token>) --")
@@ -519,8 +539,8 @@ def main():
         check("credential cookie set", cookie(jar, "__Host-auth_cookie") is not None)
         check("still no cookie under the name session_identifier",
               cookie(jar, "session_identifier") is None)
-        check("challenge cookie cleared after use",
-              cookie_value(jar, "__Host-dbsc-challenge") is None)
+        check("and no challenge cookie was set by the registration either",
+              cookie(jar, "__Host-dbsc-challenge") is None)
 
         # The token is single-use: replaying the same path must be refused, and
         # refused as a replay rather than as an unknown route.
@@ -563,8 +583,10 @@ def main():
     check("first leg (no proof) -> 403, never 401", status == 403, f"got {status}: {t1[:200]}")
     check("the first leg is refused for want of a proof, not a session",
           "CHALLENGE" not in t1 and "SESSION_NOT_FOUND" not in t1, t1[:200])
-    new_ch = cookie_value(jar, "__Host-dbsc-challenge")
-    check("first leg issues a fresh challenge cookie", new_ch is not None)
+    new_ch = refresh_jti(h1)
+    check("first leg issues a fresh challenge in the header", new_ch is not None)
+    check("first leg sets no challenge cookie",
+          cookie(jar, "__Host-dbsc-challenge") is None)
     check("first leg does not return 401", status != 401)
 
     if new_ch:
@@ -592,12 +614,12 @@ def main():
     print("\n-- 6. a bad refresh signature demotes to none --")
     # Leg 1 first: it both proves the session is still dbsc and hands back a
     # fresh, unconsumed challenge for the bad-signature attempt.
-    request(opener, "POST", "/dbsc/refresh", body=b"",
-            headers={"Content-Type": "application/json",
-                     "Sec-Secure-Session-Id": session_id_of(opener)})
+    status, h6, _ = request(opener, "POST", "/dbsc/refresh", body=b"",
+                            headers={"Content-Type": "application/json",
+                                     "Sec-Secure-Session-Id": session_id_of(opener)})
     _, _, before = request(opener, "GET", "/app/whoami")
     who_before = json.loads(before)
-    ch_now = cookie_value(jar, "__Host-dbsc-challenge")
+    ch_now = refresh_jti(h6)
     check("session starts this step at tier dbsc",
           who_before.get("tier") == "dbsc", str(who_before))
     if ch_now:
@@ -663,7 +685,7 @@ def main():
     # read back rather than inferred from the login response.
     a_sid = session_id_of(a_opener)
     a_key = Key()
-    _, a_status, a_text = native_register(a_opener, a_jar, a_reg, a_key)
+    _, a_status, a_text = native_register(a_opener, a_reg, a_key, a_headers)
     a_cfg = json.loads(a_text) if a_status == 200 else {}
 
     check("native registration returns a JSON body (a 200 with no body is opt-out)",
@@ -733,14 +755,14 @@ def main():
 
     # ------------------------------------------------- B. error ordering
     print("\n-- B. failures are reported in the spec's normative order --")
-    # A missing response header outranks the missing challenge cookie, so the
-    # caller learns the real problem instead of a downstream one.
+    # A missing response header outranks the challenge lookup, so the caller learns
+    # the real problem instead of a downstream one.
     b_opener, b_jar = new_client()
     _, _, b_reg, _ = login(b_opener, b_jar)
     status, _, text = request(
         b_opener, "POST", b_reg, body=b"",
         headers={"Content-Type": "application/json"})
-    check("no response header (and no challenge cookie) -> 403 MISSING_RESPONSE_HEADER",
+    check("no response header (and no proof at all) -> 403 MISSING_RESPONSE_HEADER",
           status == 403 and "MISSING_RESPONSE_HEADER" in text, f"{status} {text[:160]}")
 
     # typ is checked before jwk presence, so a JWS that is wrong in both ways
@@ -776,9 +798,10 @@ def main():
     # A refresh names the session by id, and the login response no longer carries
     # one: it comes from /app/whoami.
     c_sid = session_id_of(c_opener)
-    request(c_opener, "POST", "/dbsc/refresh", body=b"",
-            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": c_sid})
-    c_ch = cookie_value(c_jar, "__Host-dbsc-challenge")
+    _, c_h, _ = request(c_opener, "POST", "/dbsc/refresh", body=b"",
+                        headers={"Content-Type": "application/json",
+                                 "Sec-Secure-Session-Id": c_sid})
+    c_ch = refresh_jti(c_h)
     if c_ch:
         status, _, text = request(
             c_opener, "POST", "/dbsc/refresh", body=b"", headers={
@@ -788,13 +811,14 @@ def main():
         check("refresh before registering a key -> KEY_NOT_FOUND",
               "KEY_NOT_FOUND" in text, f"{status} {text[:160]}")
 
-    # ------------------------------------------------- C. already-registered
+    # C. already-registered
     print("\n-- C. a second registration of the same kind is refused --")
-    # A fresh challenge: the login's cookie was consumed by the first registration,
-    # and the refresh leg is what re-arms the session with another JTI.
-    request(a_opener, "POST", "/dbsc/refresh", body=b"",
-            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": a_sid})
-    a_ch2 = cookie_value(a_jar, "__Host-dbsc-challenge")
+    # A fresh challenge: the login's JTI was consumed by the first registration, and
+    # the refresh leg's 403 header is what re-arms the session with another one.
+    _, a_h2, _ = request(a_opener, "POST", "/dbsc/refresh", body=b"",
+                         headers={"Content-Type": "application/json",
+                                  "Sec-Secure-Session-Id": a_sid})
+    a_ch2 = refresh_jti(a_h2)
     # The registration path is single-use too, so the second registration cannot
     # reuse a_reg. It also cannot come from a fresh login: a login mints a new random
     # DBSC session id, so that would test a *different* session. /app/rebind re-binds
@@ -829,9 +853,9 @@ def main():
     check("a session with no key reads tier none", tier_of(e1) == "none", str(tier_of(e1)))
 
     e2, e2_jar = new_client()
-    _, _, e2_reg, _ = login(e2, e2_jar)
+    _, e2_h, e2_reg, _ = login(e2, e2_jar)
     e2_key = Key()
-    _, e2_status, e2_text = native_register(e2, e2_jar, e2_reg, e2_key)
+    _, e2_status, e2_text = native_register(e2, e2_reg, e2_key, e2_h)
     check("a session that registered natively reads tier dbsc",
           tier_of(e2) == "dbsc", f"{e2_status} {e2_text[:120]}")
 
@@ -847,19 +871,19 @@ def main():
     # ------------------------------------- F. challenge expiry and consumption
     print("\n-- F. challenge lifecycle: single-use and expiry --")
 
-    # A consumed challenge is observable at any TTL, so this always runs. The JTI
-    # is resent explicitly because the server clears the cookie once it is used.
+    # A consumed challenge is observable at any TTL, so this always runs. Nothing is
+    # carried to re-present it: the JTI travels in the signed proof, and the server
+    # looks it up by the session the registration token names.
     #
     # What proves the challenge was consumed has changed with the new design: the
     # registration token is single-use too, so a replay of the *path* is now caught
     # as REGISTRATION_TOKEN_CONSUMED before the challenge store is ever consulted.
     # To reach the challenge's own consumption rule the second attempt therefore
-    # has to carry a *fresh, unconsumed* token, which the refresh leg issues along
-    # with the new challenge it arms the session with.
+    # has to carry a *fresh, unconsumed* token, which /app/rebind mints for the same
+    # session.
     k1_opener, k1_jar = new_client()
-    _, _, k1_reg, _ = login(k1_opener, k1_jar)
-    k1_jti = cookie_value(k1_jar, "__Host-dbsc-challenge")
-    k1_ck = challenge_cookie_header(k1_jar, k1_jti)
+    _, k1_h, k1_reg, _ = login(k1_opener, k1_jar)
+    k1_jti = registration_jti(k1_h)
     k1_key = Key()
     status, _, text = request(
         k1_opener, "POST", k1_reg, body=b"", headers={
@@ -868,33 +892,30 @@ def main():
     check("the first use of a challenge succeeds", status == 200, f"{status} {text[:160]}")
 
     # A fresh token for the same session, so the replay below is refused for its
-    # spent JTI rather than for its spent path. k1_ck re-presents that JTI by hand:
-    # the success above made the server clear the challenge cookie.
+    # spent JTI rather than for its spent path. The proof re-presents k1_jti by hand,
+    # signed with the key that registered, because that JTI is spent server-side.
     request(k1_opener, "POST", "/dbsc/refresh", body=b"",
             headers={"Content-Type": "application/json",
                      "Sec-Secure-Session-Id": session_id_of(k1_opener)})
-    # The refresh leg above wrote a fresh challenge cookie, and the server has just
-    # armed the session with a new JTI. Only bind() mints registration tokens, so the
-    # token has to be re-minted for k1's *own* session: /app/rebind does exactly
-    # that, whereas a re-login would mint a new random session id and make this
-    # attempt a first registration of a different session rather than a *second*
-    # attempt at k1's consumed JTI.
+    # The refresh leg above has just armed the session with a new JTI, and only
+    # bind() mints registration tokens, so the token has to be re-minted for k1's
+    # *own* session: /app/rebind does exactly that, whereas a re-login would mint a
+    # new random session id and make this attempt a first registration of a different
+    # session rather than a *second* attempt at k1's consumed JTI.
     k1_reg2 = rebind(k1_opener)
     check("a fresh registration token is minted for the session with the spent JTI",
           k1_reg2 is not None and k1_reg2 != k1_reg)
     status, _, text = request(
         k1_opener, "POST", k1_reg2 or MAIN_REG_PATH + "/" + "x" * 43, body=b"", headers={
             "Secure-Session-Response": k1_key.jws({"jti": k1_jti}),
-            "Content-Type": "application/json"},
-        replace_cookies=k1_ck)
+            "Content-Type": "application/json"})
     check("reusing a consumed JTI -> CHALLENGE_CONSUMED",
           "CHALLENGE_CONSUMED" in text, f"{status} {text[:160]}")
 
     # The same must hold on the refresh leg: one challenge store, one consumption.
     k2_opener, k2_jar = new_client()
-    _, _, k2_reg, _ = login(k2_opener, k2_jar)
-    k2_jti = cookie_value(k2_jar, "__Host-dbsc-challenge")
-    k2_ck = challenge_cookie_header(k2_jar, k2_jti)
+    _, k2_h, k2_reg, _ = login(k2_opener, k2_jar)
+    k2_jti = registration_jti(k2_h)
     k2_key = Key()
     _, status, text = native_register_manual(k2_opener, k2_jti, k2_key, reg_path=k2_reg)
     check("a challenge works on the native registration route",
@@ -906,8 +927,7 @@ def main():
         k2_opener, "POST", "/dbsc/refresh", body=b"", headers={
             "Sec-Secure-Session-Id": session_id_of(k2_opener),
             "Secure-Session-Response": refresh_jws(k2_key, k2_jti),
-            "Content-Type": "application/json"},
-        replace_cookies=k2_ck)
+            "Content-Type": "application/json"})
     check("the same JTI replayed on the native refresh route -> CHALLENGE_CONSUMED",
           "CHALLENGE_CONSUMED" in text, f"{status} {text[:160]}")
 
@@ -915,11 +935,11 @@ def main():
         skip("expired challenge -> CHALLENGE_EXPIRED",
              "set DBSC_CHALLENGE_TTL and start the demo with a short dbsc.challenge-ttl")
     else:
-        # The challenge cookie's Max-Age equals the challenge TTL, so a client
-        # honouring cookie expiry stops sending the JTI and the server sees a
-        # *missing* challenge, not an expired one. To reach the expiry branch the
-        # stale JTI has to be replayed outside the cookie jar -- which is exactly
-        # what a client with a stale local copy of the challenge does.
+        # The JTI is signed directly with the client's key rather than re-presented
+        # from anywhere: the server holds the challenge against the session, and the
+        # proof names it in its payload. Waiting out the TTL leaves the session's
+        # stored challenge lapsed while the signed proof still names its JTI, so the
+        # lookup finds nothing live and the expiry branch is the one reached.
         #
         # Registration adds a second clock: its token carries a TTL too
         # (registration-cookie-ttl, 24h by default), and the token is checked
@@ -927,16 +947,14 @@ def main():
         # exhaust it, so the path below stays a live one and CHALLENGE_EXPIRED,
         # not REGISTRATION_TOKEN_EXPIRED, is the branch under test.
         k3_opener, k3_jar = new_client()
-        _, _, k3_reg, _ = login(k3_opener, k3_jar)
-        k3_jti = cookie_value(k3_jar, "__Host-dbsc-challenge")
-        k3_ck = challenge_cookie_header(k3_jar, k3_jti)
+        _, k3_h, k3_reg, _ = login(k3_opener, k3_jar)
+        k3_jti = registration_jti(k3_h)
         time.sleep(CHALLENGE_TTL_S + 1.0)
         k3_key = Key()
         status, _, text = request(
             k3_opener, "POST", k3_reg, body=b"", headers={
                 "Secure-Session-Response": k3_key.jws({"jti": k3_jti}),
-                "Content-Type": "application/json"},
-            replace_cookies=k3_ck)
+                "Content-Type": "application/json"})
         check("a stale JTI presented after the TTL -> CHALLENGE_EXPIRED",
               status == 403 and "CHALLENGE_EXPIRED" in text, f"{status} {text[:160]}")
         check("an expired challenge is not reported as missing or consumed",
@@ -957,24 +975,25 @@ def main():
         status, _, text = request(
             k4_opener, "POST", k4_reg, body=b"", headers={
                 "Secure-Session-Response": k3_key.jws({"jti": "n" * 43}),
-                "Content-Type": "application/json"},
-            replace_cookies={"__Host-dbsc-challenge": "n" * 43})
+                "Content-Type": "application/json"})
         check("an unknown JTI -> CHALLENGE_NOT_FOUND",
               "CHALLENGE_NOT_FOUND" in text, f"{status} {text[:160]}")
 
     # ------------------------------------------------- N. INVALID_JWK
     # Only the native route is served now, so the JWK rules are exercised through
     # the JWS header -- the same place a browser's key travels.
+    # Each attempt names a live JTI: the refresh leg's 403 in the loop below re-arms
+    # the session, so the JTI from the re-login's registration header is the live one.
     print("\n-- G. a JWK that breaks the key rules is INVALID_JWK, not a crash --")
     n_opener, n_jar = new_client()
-    login(n_opener, n_jar)
+    _, _, _, _ = login(n_opener, n_jar)
     # The refresh leg names the session by id, which is read from /app/whoami now
     # that the login response carries a registration path instead.
     n_sid = session_id_of(n_opener)
     # Registration is behind the token path now, so the loop needs a fresh token
     # per attempt: a consumed path would be refused before the JWK is looked at.
-    # A refresh leg arms the session with a fresh challenge *and* the login below
-    # issues a fresh token, so each attempt gets both from one re-login.
+    # A refresh leg arms the session with a fresh challenge, and the re-login below
+    # issues a fresh token that names the same JTI, so each attempt gets both.
     # Each of these trips a different rule in Jwk.validate. The signature is real
     # and the challenge is live, so only the key check can reject the request.
     for label, bad_key, expect in [
@@ -988,11 +1007,10 @@ def main():
              {"kty": "RSA", "n": "AQAB"}, "too short")]:
         request(n_opener, "POST", "/dbsc/refresh", body=b"",
                 headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": n_sid})
-        n_jti = cookie_value(n_jar, "__Host-dbsc-challenge")
-        if n_jti is None:
-            check(f"{label}", False, "no challenge cookie to present")
-            continue
-        _, _, n_reg, _ = login(n_opener, n_jar)
+        _, n_h2, n_reg, _ = login(n_opener, n_jar)
+        # The JTI signs the fresh registration header -- the value the server has
+        # just armed the session with. No cookie carries it any more.
+        n_jti = registration_jti(n_h2)
         n_head = {"alg": "ES256", "typ": "dbsc+jwt", "jwk": bad_key}
         n_h = b64u(json.dumps(n_head, separators=(",", ":")).encode())
         n_p = b64u(json.dumps({"jti": n_jti}, separators=(",", ":")).encode())
@@ -1010,63 +1028,53 @@ def main():
     # Jwk.detectAlgorithm(). Without this check UNKNOWN_ALGORITHM has no coverage at
     # all: the only other path to it was the removed bound route's ES256-only rule.
     alg_opener, alg_jar = new_client()
-    _, _, alg_reg, _ = login(alg_opener, alg_jar)
+    _, alg_h, alg_reg, _ = login(alg_opener, alg_jar)
     request(alg_opener, "POST", "/dbsc/refresh", body=b"",
             headers={"Content-Type": "application/json",
                      "Sec-Secure-Session-Id": session_id_of(alg_opener)})
-    alg_jti = cookie_value(alg_jar, "__Host-dbsc-challenge")
-    if alg_jti is None:
-        check("alg disagreeing with the JWK -> UNKNOWN_ALGORITHM", False,
-              "no challenge cookie to present")
-    else:
-        # A fresh token: the login above issued one, and the refresh leg did not
-        # consume a path, but reading it from a fresh login keeps this independent
-        # of the earlier one's state.
-        _, _, alg_reg2, _ = login(alg_opener, alg_jar)
-        alg_key = Key()
-        status, _, text = request(
-            alg_opener, "POST", alg_reg2, body=b"", headers={
-                "Secure-Session-Response": alg_key.jws({"jti": alg_jti}, alg="RS256"),
-                "Content-Type": "application/json"})
-        check("alg disagreeing with the JWK -> UNKNOWN_ALGORITHM",
-              status == 403 and "UNKNOWN_ALGORITHM" in text, f"{status} {text[:160]}")
-        check("  ...and is not reported as INVALID_JWK",
-              "INVALID_JWK" not in text, text[:160])
+    alg_jti = registration_jti(alg_h)
+    # A fresh token: the login above issued one, and the refresh leg did not
+    # consume a path, but reading it from a fresh login keeps this independent
+    # of the earlier one's state.
+    _, _, alg_reg2, _ = login(alg_opener, alg_jar)
+    alg_key = Key()
+    status, _, text = request(
+        alg_opener, "POST", alg_reg2, body=b"", headers={
+            "Secure-Session-Response": alg_key.jws({"jti": alg_jti}, alg="RS256"),
+            "Content-Type": "application/json"})
+    check("alg disagreeing with the JWK -> UNKNOWN_ALGORITHM",
+          status == 403 and "UNKNOWN_ALGORITHM" in text, f"{status} {text[:160]}")
+    check("  ...and is not reported as INVALID_JWK",
+          "INVALID_JWK" not in text, text[:160])
 
     # ------------------------------------------------- H. JTI_MISMATCH
     print("\n-- H. a challenge presented by the wrong session --")
     # A JTI is bound to the session it was issued for. Two sessions are set up and
-    # one's challenge is presented on the other, which is the case a stolen or
-    # replayed challenge hits. The signature is made by the *right* key for the
-    # presenting session, so the session binding is the only thing rejecting it.
+    # one's challenge JTI is signed onto a proof for the other, which is the case a
+    # stolen or replayed challenge hits. The signature is made by the *right* key for
+    # the presenting session, so the session binding is the only thing rejecting it.
     q1, q1_jar = new_client()
-    login(q1, q1_jar)
+    _, _, _, _ = login(q1, q1_jar)
     q1_sid = session_id_of(q1)
-    request(q1, "POST", "/dbsc/refresh", body=b"",
-            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": q1_sid})
-    q1_ch = cookie_value(q1_jar, "__Host-dbsc-challenge")
 
     q2, q2_jar = new_client()
-    _, _, q2_reg, _ = login(q2, q2_jar)
+    _, q2_h, q2_reg, _ = login(q2, q2_jar)
     q2_sid = session_id_of(q2)
-    request(q2, "POST", "/dbsc/refresh", body=b"",
-            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": q2_sid})
-    # The registration below is what consumes q2's challenge, and it spends q2_reg --
-    # the path is single-use. q2's *first* challenge is the one presented later, so
-    # the token is read before the registration and the JTI is kept from here.
-    q2_reg_first = q2_reg
-    q2_ch = cookie_value(q2_jar, "__Host-dbsc-challenge")
-    q2_key = Key()
     # q2 must hold a real key, or the key lookup would reject the request before
-    # the session binding is ever compared.
-    native_register_manual(q2, q2_ch, q2_key, reg_path=q2_reg_first)
+    # the session binding is ever compared. Registering spends q2_reg -- the path is
+    # single-use -- so the token is kept from here.
+    q2_ch = registration_jti(q2_h)
+    q2_key = Key()
+    native_register_manual(q2, q2_ch, q2_key, reg_path=q2_reg)
 
-    # The challenge q1 was issued has since been consumed by the registration
-    # above, so it is spent before the session binding is even compared. Re-arm
-    # q1 with a live challenge and present *that* from the other session.
-    request(q1, "POST", "/dbsc/refresh", body=b"",
-            headers={"Content-Type": "application/json", "Sec-Secure-Session-Id": q1_sid})
-    q1_live = cookie_value(q1_jar, "__Host-dbsc-challenge")
+    # The challenge q1 was issued has since been consumed, so it is spent before the
+    # session binding is even compared. Re-arm q1 with a live challenge and present
+    # *that* from the other session. The JTI comes from the refresh leg's own
+    # challenge header; nothing about it is in the cookie jar.
+    _, q1_h2, _ = request(q1, "POST", "/dbsc/refresh", body=b"",
+                          headers={"Content-Type": "application/json",
+                                   "Sec-Secure-Session-Id": q1_sid})
+    q1_live = refresh_jti(q1_h2)
     check("q1 holds a live challenge to present from the other session",
           q1_live is not None)
 
@@ -1076,8 +1084,7 @@ def main():
         q2, "POST", "/dbsc/refresh", body=b"", headers={
             "Sec-Secure-Session-Id": q2_sid,
             "Secure-Session-Response": refresh_jws(q2_key, q1_live),
-            "Content-Type": "application/json"},
-        replace_cookies={"__Host-dbsc-challenge": q1_live})
+            "Content-Type": "application/json"})
     check("another session's challenge -> JTI_MISMATCH",
           status == 403 and "JTI_MISMATCH" in text, f"{status} {text[:160]}")
     check("it is not reported as missing or expired",
@@ -1089,8 +1096,8 @@ def main():
     print("\n-- I. logout terminates the binding --")
     l_opener, l_jar = new_client()
     login(l_opener, l_jar)
-    # Logout clears both DBSC cookies by expiring them, so check the Set-Cookie
-    # header rather than the jar: a jar may simply drop an expired cookie.
+    # Logout expires the DBSC credential cookie, so check the Set-Cookie header
+    # rather than the jar: a jar may simply drop an expired cookie.
     status, lh, _ = request(
         l_opener, "POST", "/logout", body=b"",
         headers={"X-CSRF-TOKEN": current_csrf(l_opener) or "x"})
@@ -1106,8 +1113,11 @@ def main():
     # Set-Cookie here would mean the obsolete cookie had come back.
     check("logout sets no obsolete __Host-dbsc-reg cookie",
           "__Host-dbsc-reg" not in set_cookies, set_cookies[:300])
-    check("logout expires the challenge cookie",
-          "__Host-dbsc-challenge" in set_cookies, set_cookies[:300])
+    # The challenge cookie is gone from the design too: terminate() has only the
+    # credential cookie left to clear, and nothing else may reappear under a
+    # challenge name -- the challenge is held server-side against the session.
+    check("logout sets no obsolete __Host-dbsc-challenge cookie",
+          "__Host-dbsc-challenge" not in set_cookies, set_cookies[:300])
 
     # ---------------------------------- J. unauthenticated access is refused
     print("\n-- J. an anonymous client is refused --")
@@ -1127,14 +1137,13 @@ def main():
         # unreachable there. The limiter counts failures, not just requests, so a
         # loop of rejected registrations is what trips it.
         p_opener, p_jar = new_client()
-        # The third value is the registration path, supplied by the low-budget
-        # instance's own login. The loop below deliberately does *not* post to it:
-        # the path's token is single-use, so spending it on the first rejected
-        # attempt would turn every later attempt into REGISTRATION_TOKEN_CONSUMED,
-        # which is refused by the token check before the challenge (and therefore
-        # before the failure being counted) is ever reached. Holding the real path
-        # here is also what documents that a concrete path exists on this instance.
-        p_status, _, p_reg, _ = login(p_opener, p_jar, base=RATE_BASE)
+        # A login is what proves the instance is up and speaking the same protocol; its
+        # registration path is deliberately *not* used below. The path's token is
+        # single-use, so spending it on the first rejected attempt would turn every
+        # later attempt into REGISTRATION_TOKEN_CONSUMED, which is refused by the token
+        # check before the challenge (and therefore before the failure being counted)
+        # is ever reached. The loop only ever proves a JTI, never a real path.
+        p_status, _, _, _ = login(p_opener, p_jar, base=RATE_BASE)
         if p_status != 302:
             check("the low-budget demo accepts the same login", False,
                   f"login returned {p_status}; is a second instance on {RATE_BASE}?")
@@ -1152,14 +1161,14 @@ def main():
             p_key = Key()
 
             def p_register():
-                # No challenge cookie is ever presented on this leg, so every
+                # No proof that could succeed is ever presented on this leg, so every
                 # attempt is rejected and charged to the client's failure budget.
                 # An unknown, never-consumed JTI is used rather than a replayed one,
                 # because a consumed challenge short-circuits ahead of the failure
-                # accounting entirely. The path is deliberately a *wrong* one: it
+                # accounting entirely. The path is deliberately a *wrong* one too: it
                 # carries an unknown token, so the route reports SESSION_NOT_FOUND
                 # without the challenge ever being consulted -- which keeps every
-                # attempt a clean, countable failure and never spends p_reg's token.
+                # attempt a clean, countable failure.
                 _, status, text = native_register_manual(
                     p_opener, "n" * 43, p_key, base=RATE_BASE)
                 return status, text
@@ -1274,14 +1283,17 @@ def rotation_checks():
     short enough to outwait, and the default grace is a minute.
     """
     opener, jar = new_client()
-    status, _, reg_path, _ = login(opener, jar, base=ROTATION_BASE)
+    status, login_h, reg_path, _ = login(opener, jar, base=ROTATION_BASE)
     if status != 302:
         check("the rotation instance accepts the same login", False,
               f"login returned {status}; is an instance on {ROTATION_BASE}?")
         return
 
     key = Key()
-    jti = cookie_value(jar, "__Host-dbsc-challenge")
+    # The JTI is the one bind() asked the browser to sign, taken from the login
+    # response's registration header; the server finds it again by the session the
+    # token names, so nothing carries it between the two requests.
+    jti = registration_jti(login_h)
     reg_status, _, reg_text = request(
         opener, "POST", reg_path, body=b"", base=ROTATION_BASE, headers={
             "Secure-Session-Response": key.jws({"jti": jti}),
@@ -1303,7 +1315,7 @@ def rotation_checks():
         opener, "POST", "/dbsc/refresh", body=b"", base=ROTATION_BASE,
         headers={"Content-Type": "application/json",
                  "Sec-Secure-Session-Id": session_before})
-    ch = refresh_jti(leg1_headers, jar)
+    ch = refresh_jti(leg1_headers)
     status, _, text = request(
         opener, "POST", "/dbsc/refresh", body=b"", base=ROTATION_BASE, headers={
             "Content-Type": "application/json",
@@ -1350,7 +1362,7 @@ def rotation_checks():
         opener, "POST", "/dbsc/refresh", body=b"", base=ROTATION_BASE,
         headers={"Content-Type": "application/json",
                  "Sec-Secure-Session-Id": session_before})
-    stale_ch = refresh_jti(stale_leg1, jar)
+    stale_ch = refresh_jti(stale_leg1)
     status, _, stale_text = request(
         opener, "POST", "/dbsc/refresh", body=b"", base=ROTATION_BASE, headers={
             "Content-Type": "application/json",
@@ -1402,8 +1414,7 @@ def rotation_checks():
                      request(opener, "POST", "/dbsc/refresh", body=b"",
                              base=ROTATION_BASE,
                              headers={"Content-Type": "application/json",
-                                      "Sec-Secure-Session-Id": session_before})[1],
-                     jar))},
+                                      "Sec-Secure-Session-Id": session_before})[1]))},
         replace_cookies={"__Host-auth_cookie": ticket_before})
     check("the header alone names the session, retired ticket and all",
           header_status == 200, f"got {header_status}: {header_text[:160]}")

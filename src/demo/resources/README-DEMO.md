@@ -32,7 +32,9 @@ so the DBSC binding and the login session are two independent sessions coupled o
 the authenticated user. The login response carries:
 
 - `Secure-Session-Registration: (ES256);path="/dbsc/regist/<token>";challenge="…"`
-- a `__Host-dbsc-challenge` cookie
+
+The `challenge` value names the challenge the server holds against this new DBSC session; the
+browser keeps it internally and signs it, so the login response sets **no** challenge cookie.
 
 The `path` carries a single-use **registration token**, which is what names the DBSC
 session on this route. That is why it is in the URL rather than in a cookie: the
@@ -65,7 +67,7 @@ written by any JavaScript in this demo:
 
 | Request | When | What to check |
 |---|---|---|
-| `POST /dbsc/regist/<token>` | about a second after the login response, once, automatically | it carries `Sec-Session-Response` (a JWS signed by the new hardware key) and the `__Host-dbsc-challenge` cookie; the response sets `__Host-dbsc-session` — the binding |
+| `POST /dbsc/regist/<token>` | about a second after the login response, once, automatically | it carries `Sec-Session-Response` (a JWS signed by the new hardware key, whose `jti` is the challenge the server issued) but no challenge cookie; the response sets `__Host-dbsc-session` — the binding |
 | `POST /dbsc/refresh` | on the binding cookie's cadence (`binding-cookie-ttl`, 10 min by default) | the same header, plus `Sec-Session-Id` naming the existing session; a successful refresh pushes the cookie's expiry out |
 
 `GET /.well-known/device-bound-sessions` is **not** in the network tab: Chromium

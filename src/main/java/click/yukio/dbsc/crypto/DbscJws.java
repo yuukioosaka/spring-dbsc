@@ -133,6 +133,24 @@ public final class DbscJws {
         return decodeJson(Segments.split(token).protectedHeader(), "JWS header");
     }
 
+    /**
+     * Reads the {@code jti} claim without verifying the signature.
+     *
+     * <p>This is <strong>not</strong> an authorisation check and must never be used as
+     * one. It exists because the challenge a proof is checked against has to be found
+     * from the value the client signed, and the only place that value appears is the
+     * unverified payload. Nothing is trusted by reading it here: the resolved challenge
+     * is compared back against the same claim after the signature verifies, so a
+     * tampered {@code jti} fails signature verification, and a mismatch fails as
+     * {@code JTI_MISMATCH}.
+     *
+     * @throws DbscException {@code MALFORMED_JWS} when the token is not a JWS or carries
+     *         no {@code jti}
+     */
+    public static String unverifiedJti(String token) {
+        return requireJti(decodeJson(Segments.split(token).payload(), "JWS payload"));
+    }
+
     private static DbscAlgorithm parseAlgorithm(Map<String, Object> header) {
         String alg = Json.string(header, "alg");
         DbscAlgorithm algorithm = DbscAlgorithm.fromWire(alg);

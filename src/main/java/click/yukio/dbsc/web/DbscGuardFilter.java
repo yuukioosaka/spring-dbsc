@@ -47,8 +47,12 @@ import java.util.Map;
  * <pre>
  * JSESSIONID=72234F6E…             the application's session
  * __Host-auth_cookie=0Jp36T8T…     the rotating credential for the binding
- * __Host-dbsc-challenge=…          the single-use JTI to sign
  * </pre>
+ *
+ * <p>There is no challenge cookie: the challenge is held server-side against the
+ * session and reaches the browser only as the JTI in the
+ * {@code Secure-Session-Challenge} header, so nothing about it has to survive a
+ * cross-site request.
  *
  * <p>The registration route is not in this list on purpose: it names its session
  * with a single-use token in the <em>path</em> ({@code /dbsc/regist/<token>}), not

@@ -7,8 +7,9 @@ cookie-based design that made the request unresolvable (SESSION_NOT_FOUND).
 
 Under the token-in-path design the session is named by the URL, so the cookie
 should not matter. This script proves it: it logs in, throws the cookie jar
-away, then registers using only the token path -- but it does keep the DBSC
-challenge cookie, because that is genuinely needed to know which JTI was signed.
+away, then registers using only the token path. The JTI to sign comes from the
+`Secure-Session-Challenge` header on the login response -- the challenge is held
+server-side against the session, so no cookie is needed for it either.
 
 Usage: python3 scripts/probe_crosssite.py [base-url]
 """
@@ -78,25 +79,22 @@ if not reg:
     sys.exit(1)
 
 path = re.search(r'path="([^"]+)"', reg).group(1)
-jti = None
-for c in jar:
-    if c.name == "__Host-dbsc-challenge":
-        jti = c.value
+challenge_header = headers.get("Secure-Session-Challenge")
+m = re.match(r'"([^"]+)"', challenge_header or "")
+jti = m.group(1) if m else None
 print(f"token path: {path}")
 print(f"challenge jti: {jti}")
 if not jti:
-    print("FAIL: no challenge cookie; the login did not bind")
+    print("FAIL: no Secure-Session-Challenge header; the login did not bind")
     sys.exit(1)
 
 # The point of the probe: a registration POST carrying the token path, but NOT the
 # session cookie. If the design is right this is exactly what a cross-site callback
 # produces, and it must succeed.
 #
-# The challenge cookie is included on the first attempt because it is a separate
-# cookie with its own SameSite policy: it must be readable cross-site, or the server
-# cannot tell which JTI was signed. The second attempt drops it too, to show that a
-# client which withholds everything gets a clean protocol error rather than a
-# confusing one.
+# No cookie is sent on the first attempt at all -- that is the property under test.
+# The second attempt sends the binding cookie back, to show that holding it is not
+# what makes registration work (it never was: the token path names the session).
 key = Key()
 body = key.jws({"jti": jti})
 
@@ -114,11 +112,11 @@ def register(cookie_header):
         return e.code, e.read().decode()
 
 print()
-status, body_text = register(f"__Host-dbsc-challenge={jti}")
-print(f"registration, challenge cookie only (no session cookie) -> {status}")
+status, body_text = register("")
+print(f"registration, no cookies at all -> {status}")
 print(body_text[:200])
 if status != 200:
-    print("\nFAIL: the challenge could not be read without a session cookie.")
+    print("\nFAIL: the token in the path alone did not name the session.")
     sys.exit(1)
-print("PASS: the token in the path named the session, and the challenge cookie")
-print("      came across even though no session cookie did.")
+print("PASS: the token in the path named the session and the challenge was")
+print("      resolved server-side, with no cookie of any kind sent.")

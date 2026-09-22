@@ -58,20 +58,25 @@ public class DbscProtocolEngine {
      * validate the challenge, reject a second registration, atomically consume the
      * challenge, store the key, then move the session to {@code tier: dbsc}.
      */
-    public DeviceKey handleRegistration(String sessionId, String responseHeader, String expectedJti) {
+    public DeviceKey handleRegistration(String sessionId, String responseHeader) {
         if (responseHeader == null || responseHeader.isBlank()) {
             throw DbscException.missingResponseHeader("Secure-Session-Response header is required");
         }
         DbscJws.Parsed parsed = DbscJws.verifyRegistration(responseHeader.trim());
 
-        challenges.validate(expectedJti, sessionId);
+        // The JTI the browser actually signed is the one that has to be validated and
+        // consumed -- not a JTI looked up server-side. Picking the session's newest
+        // outstanding challenge would make a replay of an older, already-consumed JTI
+        // resolve to that newer challenge and register a second key on it, and two
+        // different proofs could race for the same row and both be told they won.
+        Challenge challenge = challenges.validate(parsed.jti(), sessionId);
 
         if (storage.getDeviceKey(sessionId).isPresent()) {
             throw new DbscException(DbscErrorCode.SESSION_ALREADY_REGISTERED,
                     "session already has a device key; cannot register again");
         }
 
-        challenges.consume(expectedJti);
+        challenges.consume(parsed.jti());
 
         long now = clock.millis();
         DeviceKey key = new DeviceKey(sessionId, parsed.jwk(),
@@ -83,6 +88,10 @@ public class DbscProtocolEngine {
 
         telemetry.publish(new DbscTelemetryEvent.Registration(
                 sessionId, currentTier(sessionId), now, key.algorithm(), null));
+
+        // The challenge just spent names the session it will be replaced under: a proof
+        // replayed long after it was consumed must still be answered CHALLENGE_CONSUMED
+        // rather than being re-armed by this very response.
         return key;
     }
 
@@ -102,7 +111,7 @@ public class DbscProtocolEngine {
      *         whether the device key still existed (the {@code session_stolen}
      *         signal)
      */
-    public RefreshOutcome handleRefresh(String sessionId, String responseHeader, String expectedJti) {
+    public RefreshOutcome handleRefresh(String sessionId, String responseHeader) {
         if (responseHeader == null || responseHeader.isBlank()) {
             throw DbscException.missingResponseHeader(
                     "Secure-Session-Response header is required for refresh");
@@ -112,26 +121,31 @@ public class DbscProtocolEngine {
                 .orElseThrow(() -> new DbscException(DbscErrorCode.KEY_NOT_FOUND,
                         "no device key for session"));
 
-        Challenge challenge = challenges.validate(expectedJti, sessionId);
+        // Read the claim without verifying, so the challenge can be resolved from the
+        // signed JTI. The signature covers that claim, and the resolved challenge is
+        // compared back against it below, so a tampered jti is caught as a signature
+        // failure rather than by trusting this read.
+        String signedJti = DbscJws.unverifiedJti(responseHeader.trim());
+        Challenge challenge = challenges.validate(signedJti, sessionId);
 
         try {
             DbscJws.verifyRefresh(responseHeader.trim(), key.jwk(), challenge.jti());
         } catch (DbscException e) {
             if (e.code() == DbscErrorCode.SIGNATURE_INVALID) {
                 // A stolen cookie replayed from a device without the key lands here.
-                demoteOnFailure(sessionId, expectedJti, key, e);
+                demoteOnFailure(sessionId, signedJti, key, e);
             }
             throw e;
         }
 
-        challenges.consume(expectedJti);
+        challenges.consume(signedJti);
         long now = clock.millis();
         storage.getSession(sessionId).ifPresent(session ->
                 setSessionTier(session, ProtectionTier.DBSC, now, "native-refresh"));
 
         telemetry.publish(new DbscTelemetryEvent.Refresh(
                 sessionId, ProtectionTier.DBSC, now, null));
-        return new RefreshOutcome(sessionId, expectedJti);
+        return new RefreshOutcome(sessionId, signedJti);
     }
 
     /**

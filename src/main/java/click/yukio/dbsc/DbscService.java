@@ -79,7 +79,7 @@ public class DbscService {
     /**
      * Starts a DBSC session: persists the session record, mints a single-use
      * registration token, and primes the browser with the registration header and
-     * the challenge cookie. Chromium then POSTs the registration JWS on its own,
+     * the challenge header. Chromium then POSTs the registration JWS on its own,
      * with no client-side code.
      *
      * <p>Call it from any authenticated request. It is deliberately
@@ -132,8 +132,13 @@ public class DbscService {
         response.addHeader(DbscHeaders.LEGACY_REGISTRATION, DbscHeaderCodec.buildRegistrationHeader(
                 "ES256", registrationPathFor(registrationToken), challenge.jti()));
 
-        setChallengeCookie(response, cookieScope.challengeCookieName(), challenge.jti(),
-                properties.challengeTtlMs());
+        // The challenge travels to the browser only as the JTI inside the registration
+        // header the user agent signs; it is already persisted server-side against the
+        // session, so registration finds it by session id rather than by any cookie.
+        // Emitting it here as a challenge header (spec §8.7, §9.2) makes the value the
+        // browser should sign explicit, without asking it to hold state of ours.
+        addChallengeHeader(response, challenge.jti(), session.id());
+
         // One cookie, one job. The credential cookie carries a ticket and is the cookie
         // the protocol actually protects: §8.6 asks whether a cookie of the name in
         // credentials[] is present, and that is the cookie a refresh replaces.
@@ -195,10 +200,6 @@ public class DbscService {
                                          HttpServletResponse response) {
         storage.revokeSession(sessionId);
         response.addHeader("Set-Cookie", cookieScope.deleteCookieValue(cookieScope.credentialCookieName()));
-        // The challenge cookie uses the SameSite=None attribute set, so it must be
-        // deleted with the same attributes or the browser keeps the old one.
-        response.addHeader("Set-Cookie",
-                cookieScope.deleteChallengeCookieValue(cookieScope.challengeCookieName()));
         return SessionConfig.terminated(
                 OriginResolver.resolve(request, trustForwardedHeaders, properties.getScopeOrigin()),
                 properties.getRefreshPath(), sessionId, cookieScope, properties);
@@ -232,10 +233,8 @@ public class DbscService {
 
         String sessionId = requireSessionForToken(registrationToken);
         String responseHeader = readResponseHeader(request);
-        String expectedJti = readCookie(request, cookieScope.challengeCookieName())
-                .orElseThrow(DbscException::challengeNotFound);
 
-        engine.handleRegistration(sessionId, responseHeader, expectedJti);
+        engine.handleRegistration(sessionId, responseHeader);
 
         // The token has now done its job. Consuming it — not deleting it — leaves
         // the record for the failure path to report a replay as
@@ -244,9 +243,6 @@ public class DbscService {
         // was never ours".
         storage.consumeRegistrationToken(registrationToken);
 
-        // The challenge cookie carried the JTI the browser signed and is spent.
-        response.addHeader("Set-Cookie",
-                cookieScope.deleteChallengeCookieValue(cookieScope.challengeCookieName()));
         // Registration is the one place the credential cookie is dropped rather than
         // replaced. Until now the browser held a ticket that predates the binding; the
         // correct move is to stop honouring it, so a pre-registration value cannot
@@ -254,6 +250,13 @@ public class DbscService {
         storage.deleteTicket(readCookie(request, cookieScope.credentialCookieName()).orElse(null));
         setCookie(response, cookieScope.credentialCookieName(), engine.rotateAfterRefresh(sessionId),
                 properties.bindingCookieTtlMs());
+
+        // The session's challenge was consumed by the registration, and the spec has the
+        // server re-issue one on every registration response (§8.7): without it the
+        // session has nothing to refresh against, because there is no challenge cookie
+        // to fall back to and the browser would be asked to sign a value the server no
+        // longer holds.
+        rearmChallenge(response, sessionId);
 
         return sessionConfig(sessionId, request);
     }
@@ -300,8 +303,8 @@ public class DbscService {
         checkRefreshRateLimit(request);
 
         // The binding cookie is gone by the time a refresh runs, so the session
-        // identifier arrives in a header. The challenge cookie is still present
-        // from the first leg and carries the JTI the browser signed.
+        // identifier arrives in a header. The challenge is held server-side against
+        // that session; the browser carries only the signed value, in the proof.
         String sessionId = resolveRefreshSessionId(request);
 
         String responseHeader = readResponseHeader(request);
@@ -311,9 +314,7 @@ public class DbscService {
             return null;
         }
 
-        String expectedJti = readCookie(request, cookieScope.challengeCookieName())
-                .orElseThrow(DbscException::challengeNotFound);
-        engine.handleRefresh(sessionId, responseHeader, expectedJti);
+        engine.handleRefresh(sessionId, responseHeader);
 
         // Rotation happens only now, after the signature verified: this returns the
         // ticket to present, which is always a fresh one. The ticket has no other role
@@ -321,10 +322,14 @@ public class DbscService {
         // on the ticket the browser was carrying.
         String ticket = engine.rotateAfterRefresh(sessionId);
 
-        response.addHeader("Set-Cookie",
-                cookieScope.deleteChallengeCookieValue(cookieScope.challengeCookieName()));
         setCookie(response, cookieScope.credentialCookieName(), ticket,
                 properties.bindingCookieTtlMs());
+
+        // A 200 that carried no challenge would leave the session with nothing to sign
+        // on the next cadence: the challenge just verified was consumed, and there is no
+        // challenge cookie holding the next one. Re-issuing here is what makes the
+        // session refreshable more than once (§8.7).
+        rearmChallenge(response, sessionId);
 
         return sessionConfig(sessionId, request);
     }
@@ -359,16 +364,12 @@ public class DbscService {
     }
 
     /**
-     * Issues a fresh challenge with a 403 and a challenge cookie. The status is
-     * 403 by spec: Chromium ignores 401 here.
+     * Issues a fresh challenge with a 403. The status is 403 by spec:
+     * Chromium ignores 401 here.
      */
     public void issueChallengeAndReject(HttpServletResponse response, String sessionId) {
         Challenge challenge = challenges.issue(sessionId);
-        String challengeHeader = DbscHeaderCodec.buildChallengeHeader(challenge.jti(), sessionId);
-        response.addHeader(DbscHeaders.CHALLENGE, challengeHeader);
-        response.addHeader(DbscHeaders.LEGACY_CHALLENGE, challengeHeader);
-        setChallengeCookie(response, cookieScope.challengeCookieName(), challenge.jti(),
-                properties.challengeTtlMs());
+        addChallengeHeader(response, challenge.jti(), sessionId);
         response.setStatus(HttpServletResponse.SC_FORBIDDEN);
     }
 
@@ -591,12 +592,29 @@ public class DbscService {
     }
 
     /**
-     * Writes the challenge cookie with its own attribute set, which differs from
-     * the binding cookie's in {@code SameSite}. See
-     * {@link CookieScope#challengeAttributesString()}.
+     * Emits the {@code Secure-Session-Challenge} header (and its legacy alias) naming
+     * the JTI and the session it belongs to (spec §9.2). The value is also stored
+     * against the session, which is what registration and refresh look it back up by.
      */
-    private void setChallengeCookie(HttpServletResponse response, String name, String value, long maxAgeMs) {
-        response.addHeader("Set-Cookie", cookieScope.setChallengeCookieValue(name, value, maxAgeMs));
+    private void addChallengeHeader(HttpServletResponse response, String jti, String sessionId) {
+        String challengeHeader = DbscHeaderCodec.buildChallengeHeader(jti, sessionId);
+        response.addHeader(DbscHeaders.CHALLENGE, challengeHeader);
+        response.addHeader(DbscHeaders.LEGACY_CHALLENGE, challengeHeader);
+    }
+
+    /**
+     * Issues a fresh challenge for the session and hands it to the browser in the
+     * {@code Secure-Session-Challenge} header, keeping it server-side.
+     *
+     * <p>This is the only way a client ever learns a JTI, now that there is no challenge
+     * cookie: the server holds the value against the session and re-issues one whenever
+     * the previous one has been spent. Both the registration response and the successful
+     * refresh response call it, which is what lets a session refresh repeatedly rather
+     * than exactly once (§8.7).
+     */
+    private void rearmChallenge(HttpServletResponse response, String sessionId) {
+        Challenge challenge = challenges.issue(sessionId);
+        addChallengeHeader(response, challenge.jti(), sessionId);
     }
 
     private void checkRegistrationRateLimit(HttpServletRequest request) {

@@ -22,7 +22,6 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 
 BASE = "https://localhost:8443"
 COOKIE = "__Host-dbsc-session"
-CHALLENGE_COOKIE = "__Host-dbsc-challenge"
 
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
@@ -125,12 +124,24 @@ def whoami(opener):
     return json.loads(text) if status == 200 else None
 
 
+def challenge_jti(headers):
+    """The JTI to sign, from the Secure-Session-Challenge header.
+
+    The header is `"<jti>";id="<session id>"`; the quoted first value is the JTI.
+    There is no challenge cookie any more -- the challenge is held server-side
+    against the session, and the header is the only copy the client sees.
+    """
+    value = header(headers, "Secure-Session-Challenge")
+    m = re.match(r'"([^"]+)"', value or "")
+    return m.group(1) if m else None
+
+
 def register(opener, jar, key):
     """Completes the native registration, so the server stores the device key."""
     _, headers, _ = login(opener, jar)
     reg = header(headers, "Secure-Session-Registration")
     path = re.search(r'path="([^"]+)"', reg).group(1)
-    jti = cookie_value(jar, CHALLENGE_COOKIE)
+    jti = challenge_jti(headers)
     status, _, text = request(opener, "POST", path, raw=True, body=b"",
                               headers={"Secure-Session-Response": key.jws({"jti": jti})})
     return status, text
@@ -154,9 +165,7 @@ def refresh(opener, jar, key):
     challenge = header(headers, "Secure-Session-Challenge")
     if challenge is None:
         return status, text, headers
-    # The header is `"<jti>";id="<session id>"`. The JTI is the quoted first value.
-    m = re.match(r'"([^"]+)"', challenge)
-    jti = m.group(1) if m else None
+    jti = challenge_jti(headers)
 
     status2, headers2, text2 = request(
         opener, "POST", "/dbsc/refresh", raw=True, body=b"",
