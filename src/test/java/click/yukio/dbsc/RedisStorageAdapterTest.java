@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -229,6 +230,38 @@ class RedisStorageAdapterTest {
         // session id, which is the property the guard's "already bound" answer needs.
         assertEquals(second, storage.getSessionByAppSessionId(app).orElseThrow().id());
         assertNotEquals(first, storage.getSessionByAppSessionId(app).orElseThrow().id());
+    }
+
+    @Test
+    @DisplayName("redis: a ticket resolves to its session, and its TTL is the grace")
+    void ticketResolvesAndExpires() {
+        long now = System.currentTimeMillis();
+        String session = "sess_" + System.nanoTime();
+        storage.setSession(new Session(session, "app_" + session, "user_1",
+                ProtectionTier.DBSC, false, now, now + 300_000, now));
+
+        storage.setTicket("tkt_a", session, 60_000);
+        storage.setTicket("tkt_b", session, 60_000);
+        storage.setTicket("tkt_short", session, 1_000);
+
+        // Two tickets, one session: the session id never moves, only the value the
+        // credential cookie carries does.
+        assertEquals(session, storage.resolveTicket("tkt_a"));
+        assertEquals(session, storage.resolveTicket("tkt_b"));
+        assertNull(storage.resolveTicket("tkt_never_issued"));
+
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (System.currentTimeMillis() < deadline && storage.resolveTicket("tkt_short") != null) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        assertNull(storage.resolveTicket("tkt_short"),
+                "an expired ticket must stop resolving: Redis owns the TTL, and that is "
+                        + "what bounds how long a captured cookie stays useful");
     }
 
     /** Runs {@code work} on {@value #THREADS} threads released from a single latch. */

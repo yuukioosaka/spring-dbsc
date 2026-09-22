@@ -47,6 +47,8 @@ class GuardDecisionTest {
     private static final String SESSION_ID = "sess_guard000000000000000000000000001";
     private static final String APP_SESSION_ID = "72234F6E7E0569EA030946A762211A28";
     private static final String USER_ID = "user_1";
+    /** The credential value a browser would hold: a ticket, never the session id. */
+    private static final String TICKET = "Aq3hZ9ticket0000000000000000000000000000";
 
     private DbscProperties properties;
     private StorageAdapter storage;
@@ -74,9 +76,15 @@ class GuardDecisionTest {
                 new DbscProtocolEngine(storage, properties, challenges, clock, telemetry);
         // Cookie names are derived from the secure flag, never hardcoded (spec 07),
         // so the tests go through the same derivation the service does.
-        cookieScope = CookieScope.resolve(false, CookieScope.Scope.HOST, null);
+        cookieScope = CookieScope.resolve(
+                false, CookieScope.Scope.HOST, null, "__Host-auth_cookie");
         dbsc = new DbscService(properties, storage, challenges, engine, cookieScope,
                 RateLimiter.UNLIMITED, clock, false);
+
+        // The guard resolves the credential cookie through the ticket table, so the ticket
+        // the tests present has to exist. A long TTL keeps it out of the way: these tests
+        // are about the decision, not about rotation.
+        storage.setTicket(TICKET, SESSION_ID, Duration.ofHours(1).toMillis());
     }
 
     // ------------------------------------------------------------------
@@ -88,7 +96,7 @@ class GuardDecisionTest {
     void protectedSessionIsAllowed() {
         storage.setSession(session().withTierAndLastRefreshAt(ProtectionTier.DBSC, NOW_MS));
 
-        GuardDecision decision = decide(bindingCookie());
+        GuardDecision decision = decide(credentialCookie());
 
         assertTrue(decision.allowed());
         assertEquals(GuardDecision.Reason.PROTECTED, decision.reason());
@@ -102,7 +110,7 @@ class GuardDecisionTest {
         // browser that never registered, which is why lastRefreshAt is carried.
         storage.setSession(session().withTierAndLastRefreshAt(ProtectionTier.NONE, NOW_MS));
 
-        GuardDecision decision = decide(bindingCookie());
+        GuardDecision decision = decide(credentialCookie());
 
         assertFalse(decision.allowed());
         assertEquals(GuardDecision.Reason.LAPSED, decision.reason());
@@ -116,7 +124,7 @@ class GuardDecisionTest {
         // session. Refusing here would lock out every browser that cannot do DBSC.
         storage.setSession(session());
 
-        GuardDecision decision = decide(bindingCookie());
+        GuardDecision decision = decide(credentialCookie());
 
         assertTrue(decision.allowed());
         assertEquals(GuardDecision.Reason.UNREGISTERED, decision.reason());
@@ -130,7 +138,7 @@ class GuardDecisionTest {
                 .withTierAndLastRefreshAt(ProtectionTier.DBSC, NOW_MS)
                 .withRevoked(true));
 
-        GuardDecision decision = decide(bindingCookie());
+        GuardDecision decision = decide(credentialCookie());
 
         assertFalse(decision.allowed());
         assertEquals(GuardDecision.Reason.REVOKED, decision.reason());
@@ -142,7 +150,7 @@ class GuardDecisionTest {
         // A binding demonstrably existed, since the browser still holds the cookie,
         // but the server has no record. Treating that as a fresh client would let a
         // session survive by having its record deleted.
-        GuardDecision decision = decide(bindingCookie());
+        GuardDecision decision = decide(credentialCookie());
 
         assertFalse(decision.allowed());
         assertEquals(GuardDecision.Reason.LAPSED, decision.reason());
@@ -156,7 +164,7 @@ class GuardDecisionTest {
         // "never registered".
         storage.setSession(session().withRevoked(true));
 
-        GuardDecision decision = decide(bindingCookie());
+        GuardDecision decision = decide(credentialCookie());
 
         assertFalse(decision.allowed());
         assertEquals(GuardDecision.Reason.REVOKED, decision.reason());
@@ -252,7 +260,7 @@ class GuardDecisionTest {
         storage.setSession(new Session(SESSION_ID, "a-different-app-session", USER_ID,
                 ProtectionTier.NONE, false, NOW_MS, NOW_MS + 3_600_000L, NOW_MS));
 
-        GuardDecision decision = decide(bindingCookie());
+        GuardDecision decision = decide(credentialCookie());
 
         assertFalse(decision.allowed());
         assertEquals(GuardDecision.Reason.LAPSED, decision.reason());
@@ -282,7 +290,7 @@ class GuardDecisionTest {
         properties.setUnregistered(DbscProperties.Unregistered.DENY);
         storage.setSession(session().withTierAndLastRefreshAt(ProtectionTier.NONE, NOW_MS));
 
-        GuardDecision decision = decide(bindingCookie());
+        GuardDecision decision = decide(credentialCookie());
 
         assertFalse(decision.allowed());
         assertEquals(GuardDecision.Reason.LAPSED, decision.reason());
@@ -294,7 +302,7 @@ class GuardDecisionTest {
         properties.setUnregistered(DbscProperties.Unregistered.DENY);
         storage.setSession(session().withTierAndLastRefreshAt(ProtectionTier.DBSC, NOW_MS));
 
-        GuardDecision decision = decide(bindingCookie());
+        GuardDecision decision = decide(credentialCookie());
 
         assertTrue(decision.allowed());
         assertEquals(GuardDecision.Reason.PROTECTED, decision.reason());
@@ -310,25 +318,28 @@ class GuardDecisionTest {
                 false, NOW_MS, NOW_MS + 3_600_000L, 0L);
     }
 
-    private GuardDecision decide(jakarta.servlet.http.Cookie bindingCookie) {
-        return decide(bindingCookie, APP_SESSION_ID);
+    private GuardDecision decide(jakarta.servlet.http.Cookie credentialCookie) {
+        return decide(credentialCookie, APP_SESSION_ID);
     }
 
-    private GuardDecision decide(jakarta.servlet.http.Cookie bindingCookie, String appSessionId) {
+    private GuardDecision decide(jakarta.servlet.http.Cookie credentialCookie, String appSessionId) {
         MockHttpServletRequest request = new MockHttpServletRequest();
         // The cookie is read off the raw Cookie header, not the servlet's parsed
         // array, so set the header the way a browser would send it.
-        if (bindingCookie != null) {
-            request.addHeader("Cookie", bindingCookie.getName() + "=" + bindingCookie.getValue());
+        if (credentialCookie != null) {
+            request.addHeader("Cookie", credentialCookie.getName() + "=" + credentialCookie.getValue());
         }
         return dbsc.guardDecision(request, appSessionId);
     }
 
     /**
-     * The binding cookie as {@code bind()} leaves it: named for the DBSC session id.
-     * The name comes from the scope, because it depends on the secure flag.
+     * The credential cookie as {@code bind()} leaves it: named for the cookie the JSON
+     * config's {@code credentials[]} advertises, carrying a ticket that resolves to the
+     * session. Its value is deliberately not the session id -- the id is never in a
+     * cookie, and the ticket is what the guard has to resolve.
      */
-    private jakarta.servlet.http.Cookie bindingCookie() {
-        return new jakarta.servlet.http.Cookie(cookieScope.bindingCookieName(), SESSION_ID);
+    private jakarta.servlet.http.Cookie credentialCookie() {
+        return new jakarta.servlet.http.Cookie(
+                cookieScope.credentialCookieName(), TICKET);
     }
 }

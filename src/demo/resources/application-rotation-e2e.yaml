@@ -1,0 +1,40 @@
+# A fourth demo instance with a short session-id rotation grace, for the rotation
+# checks in scripts/e2e.py.
+#
+# Rotation itself is not optional -- the DBSC session id is replaced on every successful
+# refresh -- but the *grace* is: it is how long a retired id keeps resolving to its
+# replacement, and it is exactly the window a captured cookie stays useful for.
+#
+# The default is 60s, which is what a deployment wants. It is shortened here because the
+# value is also the window the checks have to watch expire, and waiting out a full minute
+# would make the suite unusable.
+#
+# Run alongside the main demo:
+#
+#   mvn -Pdemo,rotation-e2e -Dmaven.repo.local=.m2repo spring-boot:run
+#   DBSC_ROTATION_BASE=https://localhost:9445 DBSC_ROTATION_GRACE=5 python3 scripts/e2e.py
+#
+# scripts/run-demos.sh starts it for you.
+
+server:
+  port: 9445
+
+spring:
+  datasource:
+    # Its own file, like the other secondary instances: H2 takes an exclusive lock.
+    url: jdbc:h2:file:./data/e2e-rotation;DB_CLOSE_DELAY=-1
+
+dbsc:
+  # Seconds, not the 60s default: the suite waits this out to prove the alias stops
+  # resolving. The value is also read through DBSC_ROTATION_GRACE by the suite.
+  rotation-grace: 5s
+
+  # Rotation makes the default binding-cookie lifetime the *other* half of the
+  # exposure -- a captured cookie is stale after one refresh, but the refresh itself
+  # only happens every binding-cookie-ttl. Shortened here so a demo run exercises
+  # several rotations rather than one.
+  binding-cookie-ttl: 30s
+
+logging:
+  level:
+    click.yukio.dbsc: DEBUG

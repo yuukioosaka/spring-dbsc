@@ -123,7 +123,7 @@ public class DemoFormLoginConfig {
                                 // device's public key, so the two identifiers are
                                 // free to be independent. Nothing needs to be held
                                 // on to it — the logout handler reads it back from
-                                // the binding cookie.
+                                // the DBSC session cookie.
                                 String dbscSessionId = UUID.randomUUID().toString();
 
                                 // The application's own session id is passed too, so
@@ -160,7 +160,7 @@ public class DemoFormLoginConfig {
      * Ends the DBSC binding when the user logs out.
      *
      * <p>{@code terminate()} tells the browser to forget the binding and clears
-     * the binding cookie. Without it the device key outlives the login session:
+     * every DBSC cookie. Without it the device key outlives the login session:
      * the browser keeps refreshing a session the application has already ended,
      * and a later login re-couples to a stale key instead of registering a fresh
      * one.
@@ -168,8 +168,9 @@ public class DemoFormLoginConfig {
     private static LogoutHandler demoLogoutHandler(DbscService dbsc) {
         return (request, response, authentication) -> {
             // The DBSC session id is not the application's session id, so it is
-            // read back from the binding cookie rather than from the HttpSession.
-            // Ending the HttpSession alone would leave the binding alive.
+            // read back from the DBSC session cookie rather than from the
+            // HttpSession. Ending the HttpSession alone would leave the binding
+            // alive.
             dbsc.sessionFor(request).ifPresent(session ->
                     dbsc.terminate(session.id(), request, response));
         };

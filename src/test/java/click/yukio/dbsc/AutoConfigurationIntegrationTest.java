@@ -25,7 +25,9 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 
@@ -85,14 +87,21 @@ class AutoConfigurationIntegrationTest {
 
         assertNotNull(response.getCookie(cookieScope.challengeCookieName()),
                 "bind() must set the challenge cookie the registration JWS is validated against");
-        assertNotNull(response.getCookie(cookieScope.bindingCookieName()),
-                "bind() must set the binding cookie, so omitting it later is detectable");
+        assertNull(response.getCookie(cookieScope.sessionIdentifierName()),
+                "bind() must NOT set a cookie under session_identifier's name: the session id "
+                        + "stays server-side, and only the credential cookie moves");
+
+        assertNotNull(response.getCookie(cookieScope.credentialCookieName()),
+                "bind() must set the credential cookie the protocol actually protects");
 
         String sessionId = response.getContentAsString()
                 .replaceAll(".*\"sessionId\":\"([^\"]+)\".*", "$1");
         assertEquals(sessionId, storage.getSession(sessionId).orElseThrow().id());
-        assertEquals(sessionId, response.getCookie(cookieScope.bindingCookieName()).getValue(),
-                "the binding cookie must name the session");
+        assertEquals(sessionId, storage.resolveTicket(
+                        response.getCookie(cookieScope.credentialCookieName()).getValue()),
+                "the credential cookie must name the session through the ticket table");
+        assertNotEquals(sessionId, response.getCookie(cookieScope.credentialCookieName()).getValue(),
+                "the credential value is a ticket, not the session id");
     }
 
     /**

@@ -1,6 +1,7 @@
 package click.yukio.dbsc.protocol;
 
 import click.yukio.dbsc.config.DbscProperties;
+import click.yukio.dbsc.core.Base64Url;
 import click.yukio.dbsc.core.DeviceKey;
 import click.yukio.dbsc.core.Challenge;
 import click.yukio.dbsc.core.DbscErrorCode;
@@ -15,6 +16,8 @@ import click.yukio.dbsc.telemetry.TelemetryPublisher;
 
 import java.time.Clock;
 import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
 
 /**
  * The protocol algorithms for native registration and native refresh.
@@ -129,6 +132,52 @@ public class DbscProtocolEngine {
         telemetry.publish(new DbscTelemetryEvent.Refresh(
                 sessionId, ProtectionTier.DBSC, now, null));
         return new RefreshOutcome(sessionId, expectedJti);
+    }
+
+    /**
+     * Mints a fresh credential-cookie ticket for a session whose refresh has already
+     * verified, and keeps the value the browser was carrying resolvable for the grace.
+     *
+     * <p>The session id does not move. {@code session_identifier} is the name of the
+     * cookie holding it and Chromium keys the session store by that name (spec §7.2),
+     * so the value behind that name has to stay put for the life of the binding. What
+     * rotates is the value of the credential cookie — the one {@code credentials[]}
+     * names and §8.6 asks about — which is what puts a clock on a copy of it.
+     *
+     * <p>Minting happens on <strong>every</strong> successful refresh and is not a
+     * setting. A cookie can be copied, and a copy is worth only as little as the value's
+     * remaining life; making this optional would mean the safe behaviour is the one you
+     * have to know to ask for.
+     *
+     * <p>Ordering is the whole security argument, and it is the opposite of the obvious
+     * one. The new ticket is minted <strong>after</strong> the signature verified, never
+     * before, and the old value is retired only then. Minting first would let anyone who
+     * can reach the refresh route retire a stranger's credential by posting a refresh
+     * with no proof at all — a denial of service that needs no key and leaves no trace.
+     *
+     * <p>When there is no session record the id is returned unchanged: {@code
+     * handleRefresh} tolerates a session that has gone, and issuing a ticket for one
+     * would resurrect a record the storage layer had already discarded.
+     *
+     * @param sessionId the id the verified refresh arrived with
+     * @return the ticket to set in the credential cookie
+     */
+    public String rotateAfterRefresh(String sessionId) {
+        if (storage.getSession(sessionId).isEmpty()) {
+            return sessionId;
+        }
+
+        String ticket = Base64Url.randomJti();
+        // Both writes are unconditional, and together they are the rotation: the new ticket
+        // starts resolving, and the old one keeps resolving for exactly as long as it takes
+        // the browser to see the new one. Nothing is deleted on the old side -- a tab that
+        // arrives late still has to be recognised, or Chromium records a permanent failure.
+        storage.setTicket(ticket, sessionId, properties.rotationGraceMs());
+
+        telemetry.publish(new DbscTelemetryEvent.SessionRotated(
+                sessionId, storage.getSession(sessionId).map(Session::tier).orElse(ProtectionTier.NONE),
+                clock.millis()));
+        return ticket;
     }
 
     /**

@@ -13,6 +13,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -37,7 +38,7 @@ class WireFormatTest {
         void hostScope() {
             CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.HOST, null);
 
-            assertEquals("__Host-dbsc-session", scope.bindingCookieName());
+            assertEquals("__Host-dbsc-session", scope.sessionIdentifierName());
             assertEquals("__Host-dbsc-challenge", scope.challengeCookieName());
             assertEquals("Path=/; Secure; HttpOnly; SameSite=Lax", scope.attributesString());
         }
@@ -47,10 +48,31 @@ class WireFormatTest {
         void siteScope() {
             CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.SITE, "example.com");
 
-            assertEquals("__Secure-dbsc-session", scope.bindingCookieName());
+            assertEquals("__Secure-dbsc-session", scope.sessionIdentifierName());
             assertEquals(
                     "Path=/; Secure; HttpOnly; SameSite=Lax; Domain=example.com",
                     scope.attributesString());
+        }
+
+        @Test
+        @DisplayName("the credential cookie name is taken verbatim from configuration")
+        void credentialCookieNameIsVerbatim() {
+            CookieScope scope = CookieScope.resolve(
+                    true, CookieScope.Scope.HOST, null, "__Host-auth_cookie");
+
+            // The name is a deployer choice: no prefix is added, and the session
+            // cookie keeps its own, fixed name. The two are independent.
+            assertEquals("__Host-auth_cookie", scope.credentialCookieName());
+            assertEquals("__Host-dbsc-session", scope.sessionIdentifierName());
+            assertNotEquals(scope.sessionIdentifierName(), scope.credentialCookieName());
+        }
+
+        @Test
+        @DisplayName("a blank credential cookie name falls back to the default")
+        void credentialCookieNameDefaults() {
+            CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.HOST, null, "  ");
+
+            assertEquals(CookieScope.DEFAULT_CREDENTIAL_COOKIE, scope.credentialCookieName());
         }
 
         @Test
@@ -58,7 +80,7 @@ class WireFormatTest {
         void insecureDev() {
             CookieScope scope = CookieScope.resolve(false, CookieScope.Scope.HOST, null);
 
-            assertEquals("dbsc-session", scope.bindingCookieName());
+            assertEquals("dbsc-session", scope.sessionIdentifierName());
             assertEquals("dbsc-challenge", scope.challengeCookieName());
         }
 

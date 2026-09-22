@@ -23,6 +23,26 @@ dbsc:
   # browser's registration POST is issued from a cross-site navigation context.
   registration-path: /dbsc/regist
   refresh-path: /dbsc/refresh
+  # An override for the cookie name written into the JSON session config as
+  # `session_identifier`.
+  #
+  # LEAVE THIS UNSET unless you are naming a cookie your application sets itself.
+  # Unset, the name is the one this library advertises and deliberately never sets a
+  # cookie under. Per spec 09.6 that key is a cookie *name*, not a value: Chromium keys
+  # its session store by this string and stores only a cookie of that name, so no
+  # session id ever travels in a cookie -- the id exists only server-side, and the only
+  # cookie that moves is the rotating credential one.
+  #
+  # The intended use is protecting your own session cookie instead, e.g. JSESSIONID.
+  # Then bind()'s sessionId must be that cookie's value, and cookie-scope must not be
+  # "site" (a __Secure- name cannot protect a cookie of an unrelated name).
+  session-identifier-name:
+  # The cookie named in the JSON config's `credentials[]`, whose value is a ticket
+  # reissued on every successful refresh, so a copy of it is worth one refresh
+  # window rather than the session's lifetime. Retired values keep resolving for
+  # rotation-grace, so a second tab that has not seen the new value does not break.
+  # The name is used verbatim; a prefix is the deployer's choice.
+  credential-cookie-name: __Host-auth_cookie
   # Grace window past the binding cookie's expiry: a freshness poll that lands
   # while the browser's next refresh is in flight still reads the old tier.
   binding-cookie-ttl: 10m
@@ -30,6 +50,10 @@ dbsc:
   registration-cookie-ttl: 24h
   challenge-ttl: 5m
   refresh-grace: 30s
+  # How long a retired ticket-cookie value keeps resolving to the id that replaced
+  # it. The window is itself exposure, so set it to the longest gap between
+  # refreshes that must survive, not to a round number.
+  rotation-grace: 60s
   session-ttl: 7d
   # What the route guard does with a client that has no DBSC binding at all.
   # "allow" keeps DBSC an additional layer: a browser without support for the

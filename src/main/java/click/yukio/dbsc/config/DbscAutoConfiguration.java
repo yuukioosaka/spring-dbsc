@@ -109,7 +109,10 @@ public class DbscAutoConfiguration {
     @ConditionalOnMissingBean(CookieScope.class)
     public CookieScope dbscCookieScope(DbscProperties properties) {
         return CookieScope.resolve(
-                properties.isSecure(), properties.getCookieScope(), properties.getCookieDomain());
+                properties.isSecure(),
+                properties.getCookieScope(),
+                properties.getCookieDomain(),
+                properties.getCredentialCookieName());
     }
 
     @Bean

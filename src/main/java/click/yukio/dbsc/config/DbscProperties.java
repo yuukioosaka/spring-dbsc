@@ -51,6 +51,47 @@ public class DbscProperties {
     private String refreshPath = "/dbsc/refresh";
 
     /**
+     * An <em>override</em> for the cookie name carried in the JSON config's
+     * {@code session_identifier}.
+     *
+     * <p>This is a <em>name</em>, not a value: {@code session_identifier} is how
+     * Chromium keys the session in its own store (spec §7.2), so it has to be a
+     * stable string. The cookie of that name holds the DBSC session id, which is
+     * whatever the caller passed to {@code bind()} and never changes for the life of
+     * the binding.
+     *
+     * <p>Left {@code null} by default, in which case the name is
+     * {@link CookieScope#sessionIdentifierName()} — the name this library advertises and,
+     * by design, never sets a cookie under.
+     * <strong>That is the only safe default.</strong> A name configured here that does
+     * not match a cookie on the request makes every refresh fail with
+     * {@code MISSING_SESSION_ID} and @{@code REFRESH_REJECTED}, because Chromium stores
+     * only the cookie named here and §8.8 requires that request to carry it.
+     *
+     * <p>Set it only to name a cookie your application sets itself — most usefully its
+     * own session cookie, e.g. {@code JSESSIONID}. In that case
+     * {@code bind()}'s {@code sessionId} argument should be that cookie's value, and
+     * cookie scope must not be {@code site} (a {@code __Secure-} name cannot protect a
+     * cookie of an unrelated name).
+     */
+    private String sessionIdentifierName;
+
+    /**
+     * The cookie named in the JSON config's {@code credentials[]} and protected by
+     * the binding (spec §9.6).
+     *
+     * <p>Its value is a rotating ticket, not the DBSC session id: a refresh mints a
+     * new one and the retired one keeps resolving for {@link #rotationGrace}. That
+     * that is what puts a clock on a captured cookie — see the README's credential
+     * rotation section.
+     *
+     * <p>The full name is used verbatim. Whether it carries a {@code __Host-} or
+     * {@code __Secure-} prefix is the deployer's decision, not something the library
+     * adds.
+     */
+    private String credentialCookieName = "__Host-auth_cookie";
+
+    /**
      * Grace window applied after the binding cookie expires.
      */
     private Duration bindingCookieTtl = Duration.ofMinutes(10);
@@ -76,6 +117,18 @@ public class DbscProperties {
 
     /** How the guard treats a request from a client with no DBSC binding at all. */
     private Unregistered unregistered = Unregistered.ALLOW;
+
+    /**
+     * How long a retired DBSC session id keeps resolving to the id that replaced it.
+     *
+     * <p>Rotation itself is not optional: the DBSC session id is replaced on every
+     * successful refresh, unconditionally. What is configurable is how long the
+     * <em>previous</em> id goes on working, because a browser only learns the new id
+     * from the refresh response and a second tab will be holding the old one. That
+     * window is exactly the exposure rotation removes, so it is the one value worth
+     * tuning: set it to the longest gap between refresh attempts that must not fail.
+     */
+    private Duration rotationGrace = Duration.ofSeconds(60);
 
     /**
      * What the guard does with a client that has no DBSC binding.
@@ -204,6 +257,22 @@ public class DbscProperties {
         this.refreshPath = refreshPath;
     }
 
+    public String getSessionIdentifierName() {
+        return sessionIdentifierName;
+    }
+
+    public void setSessionIdentifierName(String sessionIdentifierName) {
+        this.sessionIdentifierName = sessionIdentifierName;
+    }
+
+    public String getCredentialCookieName() {
+        return credentialCookieName;
+    }
+
+    public void setCredentialCookieName(String credentialCookieName) {
+        this.credentialCookieName = credentialCookieName;
+    }
+
     public Duration getBindingCookieTtl() {
         return bindingCookieTtl;
     }
@@ -260,6 +329,14 @@ public class DbscProperties {
         this.unregistered = unregistered;
     }
 
+    public Duration getRotationGrace() {
+        return rotationGrace;
+    }
+
+    public void setRotationGrace(Duration rotationGrace) {
+        this.rotationGrace = rotationGrace;
+    }
+
     // ---- Derived values, in milliseconds ----
 
     public long bindingCookieTtlMs() {
@@ -280,5 +357,9 @@ public class DbscProperties {
 
     public long sessionTtlMs() {
         return sessionTtl.toMillis();
+    }
+
+    public long rotationGraceMs() {
+        return rotationGrace.toMillis();
     }
 }

@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -121,5 +122,39 @@ class JdbcAdapterConcurrencyTest {
         Session loaded = storage.getSession("sess_jdbc").orElseThrow();
         assertEquals(ProtectionTier.DBSC, loaded.tier());
         assertEquals("user_1", loaded.userId());
+    }
+
+    @Test
+    @DisplayName("JDBC storage: a ticket resolves to its session and expires on its own")
+    void ticketResolvesAndExpires() {
+        long now = System.currentTimeMillis();
+        storage.setSession(new Session("sess_tkt", "app_tkt", "user_1",
+                ProtectionTier.DBSC, false, now, now + 60_000, now));
+        storage.setTicket("tkt_live", "sess_tkt", 60_000);
+        storage.setTicket("tkt_dead", "sess_tkt", -1_000);
+
+        assertEquals("sess_tkt", storage.resolveTicket("tkt_live"));
+        assertNull(storage.resolveTicket("tkt_dead"),
+                "an expired ticket must not keep resolving: it is what bounds how long a "
+                        + "captured cookie stays useful");
+        assertNull(storage.resolveTicket("tkt_never_issued"),
+                "an unknown ticket is simply unknown; the caller cannot tell it from expired");
+    }
+
+    @Test
+    @DisplayName("JDBC storage: rotateSession is gone; the session id itself never moves")
+    void sessionIdIsStableAcrossTicketRotation() {
+        long now = System.currentTimeMillis();
+        storage.setSession(new Session("sess_stable", "app_stable", "user_1",
+                ProtectionTier.DBSC, false, now, now + 60_000, now));
+        storage.setTicket("tkt_a", "sess_stable", 60_000);
+        storage.setTicket("tkt_b", "sess_stable", 60_000);
+
+        // Two tickets, one session: that is the whole shape of the rotation now. The
+        // session record is never rewritten, so the unique app-session index that used to
+        // make this delicate is not touched at all.
+        assertEquals("sess_stable", storage.resolveTicket("tkt_a"));
+        assertEquals("sess_stable", storage.resolveTicket("tkt_b"));
+        assertEquals("sess_stable", storage.getSessionByAppSessionId("app_stable").orElseThrow().id());
     }
 }

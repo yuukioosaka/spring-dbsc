@@ -1,4 +1,5 @@
--- DBSC storage schema (sessions, device keys, challenges, registration tokens).
+-- DBSC storage schema (sessions, device keys, challenges, registration tokens,
+-- credential tickets).
 --
 -- This migration is BYTE-EQUIVALENT to what JdbcStorageAdapter.initialize()
 -- creates on startup. It exists so applications that run a migration tool can let
@@ -59,3 +60,19 @@ CREATE TABLE IF NOT EXISTS dbsc_registration_tokens (
 );
 
 CREATE INDEX IF NOT EXISTS dbsc_registration_tokens_session_idx ON dbsc_registration_tokens (session_id);
+
+-- Credential-cookie values that still resolve to a session, with the expiry of
+-- their grace. Written by credential rotation, which is unconditional: a refresh
+-- mints a new ticket and leaves the old one resolving for dbsc.rotation-grace so a
+-- second tab is not refused. A row is deleted when it is read after its expiry, so
+-- the table stays near-empty.
+CREATE TABLE IF NOT EXISTS dbsc_credential_tickets (
+    ticket     VARCHAR(255) PRIMARY KEY,
+    session_id VARCHAR(255) NOT NULL,
+    expires_at BIGINT       NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS dbsc_credential_tickets_expiry_idx ON dbsc_credential_tickets (expires_at);
+
+-- Looked up by session on cleanup, and by nothing else.
+CREATE INDEX IF NOT EXISTS dbsc_credential_tickets_session_idx ON dbsc_credential_tickets (session_id);

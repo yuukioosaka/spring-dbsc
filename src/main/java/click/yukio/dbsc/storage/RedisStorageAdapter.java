@@ -103,6 +103,15 @@ public class RedisStorageAdapter implements StorageAdapter {
         return "dbsc:registration-token:" + token;
     }
 
+    /**
+     * Credential-cookie value -> the session it names. A plain string key with a TTL,
+     * which is exactly the lifetime semantics a ticket needs: Redis drops the pointer
+     * when the grace lapses, so nothing has to sweep it.
+     */
+    private static String ticketKey(String ticket) {
+        return "dbsc:credential-ticket:" + ticket;
+    }
+
     // ---- Sessions ----
 
     @Override
@@ -146,6 +155,31 @@ public class RedisStorageAdapter implements StorageAdapter {
         // Challenges and registration tokens are keyed by their own value, not by the
         // session, so they cannot be addressed without scanning. They are given short
         // TTLs precisely so they clean themselves up; leaving them is bounded work.
+        // Credential tickets are the same: the grace is short and the TTL removes them.
+    }
+
+    @Override
+    public String resolveTicket(String ticket) {
+        // No read-time expiry check is needed here, unlike the JDBC adapter: Redis
+        // deletes the key on its own when the grace lapses, so a value that comes back
+        // is by construction still live.
+        return redis.opsForValue().get(ticketKey(ticket));
+    }
+
+    @Override
+    public void setTicket(String ticket, String sessionId, long ttlMs) {
+        // A one-second floor rather than a policy: EXPIRE with a non-positive TTL
+        // deletes immediately, which would make a zero grace mean "no ticket at all"
+        // instead of "a ticket that stops resolving at once after the refresh".
+        redis.opsForValue().set(ticketKey(ticket), sessionId,
+                Duration.ofMillis(Math.max(ttlMs, 1_000L)));
+    }
+
+    @Override
+    public void deleteTicket(String ticket) {
+        if (ticket != null) {
+            redis.delete(ticketKey(ticket));
+        }
     }
 
     private static long retentionOf(Session session) {

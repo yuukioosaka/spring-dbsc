@@ -33,6 +33,9 @@ public final class CookieScope {
     public static final String CHALLENGE_SUFFIX = "dbsc-challenge";
     public static final String BINDING_SUFFIX = "dbsc-session";
 
+    /** Used when no credential cookie name is configured. */
+    public static final String DEFAULT_CREDENTIAL_COOKIE = "__Host-dbsc-session";
+
     /** How widely the binding cookie is shared. */
     public enum Scope {
         /** {@code __Host-} cookies: origin-locked, no {@code Domain}. Strongest. */
@@ -44,11 +47,13 @@ public final class CookieScope {
     private final boolean secure;
     private final Scope scope;
     private final String domain;
+    private final String credentialCookieName;
 
-    private CookieScope(boolean secure, Scope scope, String domain) {
+    private CookieScope(boolean secure, Scope scope, String domain, String credentialCookieName) {
         this.secure = secure;
         this.scope = scope;
         this.domain = domain;
+        this.credentialCookieName = credentialCookieName;
     }
 
     /**
@@ -60,6 +65,26 @@ public final class CookieScope {
      *         outside site scope
      */
     public static CookieScope resolve(boolean secure, Scope scope, String domain) {
+        return resolve(secure, scope, domain, null);
+    }
+
+    /**
+     * Resolves and validates a cookie-scope configuration.
+     *
+     * @param credentialCookieName the cookie named in {@code credentials[]} and
+     *         protected by the binding. Used verbatim — a prefix is the deployer's
+     *         choice, not something added here. When blank, the default
+     *         {@code __Host-dbsc-session} name is used
+     * @throws IllegalArgumentException when site scope is requested without a
+     *         domain, when site scope is requested without {@code Secure}, when
+     *         the domain carries a leading dot, or when a domain is supplied
+     *         outside site scope
+     */
+    public static CookieScope resolve(
+            boolean secure, Scope scope, String domain, String credentialCookieName) {
+        String credentialName = credentialCookieName == null || credentialCookieName.isBlank()
+                ? DEFAULT_CREDENTIAL_COOKIE
+                : credentialCookieName;
         Scope resolved = scope == null ? Scope.HOST : scope;
         if (resolved == Scope.SITE) {
             if (domain == null || domain.isBlank()) {
@@ -76,13 +101,13 @@ public final class CookieScope {
                 throw new IllegalArgumentException(
                         "cookieDomain must not start with a leading dot: use \"example.com\", not \"." + domain.substring(1) + "\"");
             }
-            return new CookieScope(true, Scope.SITE, domain);
+            return new CookieScope(true, Scope.SITE, domain, credentialName);
         }
         if (domain != null && !domain.isBlank()) {
             throw new IllegalArgumentException(
                     "cookieDomain is only valid when cookieScope is \"site\"");
         }
-        return new CookieScope(secure, Scope.HOST, null);
+        return new CookieScope(secure, Scope.HOST, null, credentialName);
     }
 
     public boolean secure() {
@@ -120,8 +145,31 @@ public final class CookieScope {
         return secure ? "None" : "Lax";
     }
 
-    public String bindingCookieName() {
+    /**
+     * The value written into the JSON config's {@code session_identifier} by default.
+     *
+     * <p>This is a cookie <em>name</em> (spec §9.6), and it is intentionally the name of
+     * a cookie this server never sets. Chromium keys its session store by this string
+     * and re-issues only a cookie of that name, so an unset name is the safest possible
+     * value: no cookie travels, and the session id — which the name keys — exists only
+     * server-side. The credential cookie named in {@code credentials[]} is what actually
+     * moves, and it rotates on every refresh.
+     */
+    public String sessionIdentifierName() {
         return prefix() + BINDING_SUFFIX;
+    }
+
+    /**
+     * The cookie named in the JSON config's {@code credentials[]}, whose value is the
+     * rotating ticket (spec §9.6).
+     *
+     * <p>Returned verbatim from configuration — no prefix is added, because whether
+     * the name carries {@code __Host-} is the deployer's decision. The attributes it
+     * is written with are {@link #attributesString()}, which is also what the JSON
+     * config echoes, so the two cannot drift.
+     */
+    public String credentialCookieName() {
+        return credentialCookieName;
     }
 
     public String challengeCookieName() {

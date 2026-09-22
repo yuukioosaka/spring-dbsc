@@ -71,6 +71,15 @@ public record Session(
         return new Session(id, appSessionId, userId, tier, newRevoked, createdAt, expiresAt, lastRefreshAt);
     }
 
+    /**
+     * The same session under a new id. Used by rotation on refresh, where every
+     * field but the id is carried over -- including {@code createdAt}, which stays
+     * the moment the binding began rather than the moment it was last renamed.
+     */
+    public Session withId(String newId) {
+        return new Session(newId, appSessionId, userId, tier, revoked, createdAt, expiresAt, lastRefreshAt);
+    }
+
     public boolean isExpired(long nowMs) {
         return nowMs > expiresAt;
     }

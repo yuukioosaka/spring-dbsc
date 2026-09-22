@@ -2,6 +2,7 @@ package click.yukio.dbsc.storage;
 
 import click.yukio.dbsc.core.DeviceKey;
 import click.yukio.dbsc.core.Challenge;
+import click.yukio.dbsc.core.CredentialTicket;
 import click.yukio.dbsc.core.RegistrationToken;
 import click.yukio.dbsc.core.Session;
 import click.yukio.dbsc.core.StorageAdapter;
@@ -29,6 +30,7 @@ public class InMemoryStorageAdapter implements StorageAdapter {
     private final Map<KeyId, DeviceKey> deviceKeys = new ConcurrentHashMap<>();
     private final Map<String, Challenge> challenges = new ConcurrentHashMap<>();
     private final Map<String, RegistrationToken> registrationTokens = new ConcurrentHashMap<>();
+    private final Map<String, CredentialTicket> tickets = new ConcurrentHashMap<>();
 
     @Override
     public Optional<Session> getSession(String id) {
@@ -50,9 +52,39 @@ public class InMemoryStorageAdapter implements StorageAdapter {
     @Override
     public void deleteSession(String id) {
         sessions.remove(id);
+        tickets.values().removeIf(ticket -> ticket.sessionId().equals(id));
         deviceKeys.keySet().removeIf(key -> key.sessionId().equals(id));
         challenges.values().removeIf(challenge -> challenge.sessionId().equals(id));
         registrationTokens.values().removeIf(token -> token.sessionId().equals(id));
+    }
+
+    @Override
+    public String resolveTicket(String ticket) {
+        CredentialTicket found = tickets.get(ticket);
+        if (found == null) {
+            return null;
+        }
+        // Expired tickets are removed here rather than left for a sweep: this is the
+        // only place that can tell "expired" from "never existed", and an expired
+        // ticket must stop resolving the moment the grace lapses.
+        if (found.isExpired(System.currentTimeMillis())) {
+            tickets.remove(ticket, found);
+            return null;
+        }
+        return found.sessionId();
+    }
+
+    @Override
+    public void setTicket(String ticket, String sessionId, long ttlMs) {
+        tickets.put(ticket, new CredentialTicket(
+                ticket, sessionId, System.currentTimeMillis() + ttlMs));
+    }
+
+    @Override
+    public void deleteTicket(String ticket) {
+        if (ticket != null) {
+            tickets.remove(ticket);
+        }
     }
 
     @Override

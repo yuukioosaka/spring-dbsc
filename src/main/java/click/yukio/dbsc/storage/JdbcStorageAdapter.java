@@ -2,6 +2,7 @@ package click.yukio.dbsc.storage;
 
 import click.yukio.dbsc.core.DeviceKey;
 import click.yukio.dbsc.core.Challenge;
+import click.yukio.dbsc.core.CredentialTicket;
 import click.yukio.dbsc.core.Json;
 import click.yukio.dbsc.core.RegistrationToken;
 import click.yukio.dbsc.core.Session;
@@ -87,6 +88,16 @@ public class JdbcStorageAdapter implements StorageAdapter {
                     )
                     """);
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS dbsc_registration_tokens_session_idx ON dbsc_registration_tokens (session_id)");
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS dbsc_credential_tickets (
+                        ticket     VARCHAR(255) PRIMARY KEY,
+                        session_id VARCHAR(255) NOT NULL,
+                        expires_at BIGINT       NOT NULL
+                    )
+                    """);
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS dbsc_credential_tickets_expiry_idx ON dbsc_credential_tickets (expires_at)");
+            // Looked up by session on cleanup, and by nothing else.
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS dbsc_credential_tickets_session_idx ON dbsc_credential_tickets (session_id)");
         } catch (SQLException e) {
             throw new StorageException("failed to initialize the DBSC schema", e);
         }
@@ -133,8 +144,51 @@ public class JdbcStorageAdapter implements StorageAdapter {
     public void deleteSession(String id) {
         update("DELETE FROM dbsc_challenges WHERE session_id = ?", s -> s.setString(1, id));
         update("DELETE FROM dbsc_registration_tokens WHERE session_id = ?", s -> s.setString(1, id));
+        update("DELETE FROM dbsc_credential_tickets WHERE session_id = ?", s -> s.setString(1, id));
         update("DELETE FROM dbsc_device_keys WHERE session_id = ?", s -> s.setString(1, id));
         update("DELETE FROM dbsc_sessions WHERE id = ?", s -> s.setString(1, id));
+    }
+
+    // ---- Credential tickets ----
+
+    @Override
+    public String resolveTicket(String ticket) {
+        String sql = "SELECT session_id, expires_at FROM dbsc_credential_tickets WHERE ticket = ?";
+        CredentialTicket found = queryOne(sql, statement -> statement.setString(1, ticket),
+                rs -> new CredentialTicket(ticket, rs.getString("session_id"), rs.getLong("expires_at")));
+        if (found == null) {
+            return null;
+        }
+        if (found.isExpired(System.currentTimeMillis())) {
+            // Deleted on read: this is the one point that can tell an expired ticket from
+            // an absent one, and once the grace has lapsed the row is pure exposure -- it
+            // would keep resolving a value a refresh already retired.
+            update("DELETE FROM dbsc_credential_tickets WHERE ticket = ?",
+                    statement -> statement.setString(1, ticket));
+            return null;
+        }
+        return found.sessionId();
+    }
+
+    @Override
+    public void setTicket(String ticket, String sessionId, long ttlMs) {
+        String sql = "MERGE INTO dbsc_credential_tickets (ticket, session_id, expires_at) "
+                + "KEY (ticket) VALUES (?, ?, ?)";
+        long expiresAt = System.currentTimeMillis() + ttlMs;
+        update(sql, statement -> {
+            statement.setString(1, ticket);
+            statement.setString(2, sessionId);
+            statement.setLong(3, expiresAt);
+        });
+    }
+
+    @Override
+    public void deleteTicket(String ticket) {
+        if (ticket == null) {
+            return;
+        }
+        update("DELETE FROM dbsc_credential_tickets WHERE ticket = ?",
+                statement -> statement.setString(1, ticket));
     }
 
     // ---- Bound keys ----

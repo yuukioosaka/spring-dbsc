@@ -134,12 +134,14 @@ public class DbscService {
 
         setChallengeCookie(response, cookieScope.challengeCookieName(), challenge.jti(),
                 properties.challengeTtlMs());
-        // The binding cookie is sent from the start, not only after registration.
-        // The session is not protected until registration completes (tier is
-        // "none" and lastRefreshAt is 0), but having the cookie present means a
-        // request that omits it is distinguishable from a browser that never
-        // bound at all — see guardDecision().
-        setCookie(response, cookieScope.bindingCookieName(), session.id(),
+        // One cookie, one job. The credential cookie carries a ticket and is the cookie
+        // the protocol actually protects: §8.6 asks whether a cookie of the name in
+        // credentials[] is present, and that is the cookie a refresh replaces.
+        //
+        // The ticket minted here is already unrelated to the session id -- the browser is
+        // registered by this very request, so there is nothing for the id to protect yet
+        // -- which keeps the value's meaning constant: always a ticket, never the id.
+        setCookie(response, cookieScope.credentialCookieName(), engine.rotateAfterRefresh(session.id()),
                 properties.bindingCookieTtlMs());
     }
 
@@ -192,14 +194,14 @@ public class DbscService {
     public Map<String, Object> terminate(String sessionId, HttpServletRequest request,
                                          HttpServletResponse response) {
         storage.revokeSession(sessionId);
-        response.addHeader("Set-Cookie", cookieScope.deleteCookieValue(cookieScope.bindingCookieName()));
+        response.addHeader("Set-Cookie", cookieScope.deleteCookieValue(cookieScope.credentialCookieName()));
         // The challenge cookie uses the SameSite=None attribute set, so it must be
         // deleted with the same attributes or the browser keeps the old one.
         response.addHeader("Set-Cookie",
                 cookieScope.deleteChallengeCookieValue(cookieScope.challengeCookieName()));
         return SessionConfig.terminated(
                 OriginResolver.resolve(request, trustForwardedHeaders),
-                sessionId, properties.getRefreshPath(), cookieScope, properties);
+                properties.getRefreshPath(), cookieScope, properties);
     }
 
     // ------------------------------------------------------------------
@@ -245,9 +247,15 @@ public class DbscService {
         // The challenge cookie carried the JTI the browser signed and is spent.
         response.addHeader("Set-Cookie",
                 cookieScope.deleteChallengeCookieValue(cookieScope.challengeCookieName()));
-        setCookie(response, cookieScope.bindingCookieName(), sessionId, properties.bindingCookieTtlMs());
+        // Registration is the one place the credential cookie is dropped rather than
+        // replaced. Until now the browser held a ticket that predates the binding; the
+        // correct move is to stop honouring it, so a pre-registration value cannot
+        // survive into the session it was meant for.
+        storage.deleteTicket(readCookie(request, cookieScope.credentialCookieName()).orElse(null));
+        setCookie(response, cookieScope.credentialCookieName(), engine.rotateAfterRefresh(sessionId),
+                properties.bindingCookieTtlMs());
 
-        return sessionConfig(request, sessionId);
+        return sessionConfig(request);
     }
 
     /**
@@ -307,16 +315,30 @@ public class DbscService {
                 .orElseThrow(DbscException::challengeNotFound);
         engine.handleRefresh(sessionId, responseHeader, expectedJti);
 
+        // Rotation happens only now, after the signature verified: this returns the
+        // ticket to present, which is always a fresh one. The session id itself does not
+        // move -- session_identifier names a session, and Chromium keys its store by that
+        // name (§7.2), so rotating the value would strand the session.
+        String ticket = engine.rotateAfterRefresh(sessionId);
+
         response.addHeader("Set-Cookie",
                 cookieScope.deleteChallengeCookieValue(cookieScope.challengeCookieName()));
-        setCookie(response, cookieScope.bindingCookieName(), sessionId, properties.bindingCookieTtlMs());
+        setCookie(response, cookieScope.credentialCookieName(), ticket,
+                properties.bindingCookieTtlMs());
 
-        return sessionConfig(request, sessionId);
+        return sessionConfig(request);
     }
 
     /**
      * Resolves the session identifier on a native refresh: {@code Sec-Secure-Session-Id}
      * (or its legacy alias), falling back to the session cookie.
+     *
+     * <p>The result is <strong>always</strong> run through the rotation alias table
+     * before it is used. A refresh that arrives on a retired id is the normal case
+     * while rotation is on -- another tab, a retry, a slow proxy -- and acting on the
+     * retired id directly would look up a session record that no longer exists, fail
+     * to recognise the still-valid key, and hand back an id the browser would then
+     * refresh against forever.
      */
     private String resolveRefreshSessionId(HttpServletRequest request) {
         String sessionId = request.getHeader(DbscHeaders.SESSION_ID);
@@ -352,17 +374,34 @@ public class DbscService {
     // ------------------------------------------------------------------
 
     /**
-     * Resolves the DBSC session identifier from the binding cookie.
+     * Resolves the DBSC session identifier from the cookie the browser sends.
+     *
+     * <p>There is exactly one such cookie: the credential one named in
+     * {@code credentials[]}, whose value is a ticket. It has to be resolved through the
+     * ticket table rather than used directly, because a refresh retires the value it
+     * replaces and a request already in flight still carries the old one; the table is
+     * what makes that value name the same session during the grace.
+     *
+     * <p>{@code session_identifier} is deliberately not consulted. It holds a cookie
+     * <em>name</em>, and this server mints no cookie of that name — its value is the
+     * session id, which is carried nowhere in the request at all. The session id being
+     * absent from the cookie jar is the point: it never leaves the server, so there is
+     * no long-lived value to lift, and the only thing a thief can take is a ticket that
+     * stops resolving shortly after the real browser's next refresh.
      *
      * <p>A cookie proves nothing: it is attacker-supplied on any unauthenticated
-     * request, so this only names a candidate session. The caller's proof check is
-     * what admits or rejects it. Session discovery on the registration route does
-     * <em>not</em> go through here — that route names its session with a token in
-     * the path, because it is the one route that runs from a cross-site context
-     * where this cookie would be withheld.
+     * request, so this only names a candidate session. The caller's proof check is what
+     * admits or rejects it. Session discovery on the registration route does <em>not</em>
+     * go through here — that route names its session with a token in the path, because
+     * it is the one route that runs from a cross-site context where this cookie would be
+     * withheld.
      */
     public Optional<String> resolveBinderSession(HttpServletRequest request) {
-        return readCookie(request, cookieScope.bindingCookieName());
+        String ticket = readCookie(request, cookieScope.credentialCookieName()).orElse(null);
+        if (ticket == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(storage.resolveTicket(ticket));
     }
 
     private String requireBinderSession(HttpServletRequest request) {
@@ -463,7 +502,10 @@ public class DbscService {
     }
 
     public Optional<Session> sessionFor(HttpServletRequest request) {
-        return resolveBinderSession(request).flatMap(storage::getSession);
+        // resolveBinderSession already resolves the credential ticket to a session id,
+        // so a request mid-rotation is a client with a session, not one without.
+        return resolveBinderSession(request)
+                .flatMap(storage::getSession);
     }
 
     /**
@@ -485,11 +527,10 @@ public class DbscService {
     // Internals
     // ------------------------------------------------------------------
 
-    private Map<String, Object> sessionConfig(HttpServletRequest request, String sessionId) {
+    private Map<String, Object> sessionConfig(HttpServletRequest request) {
         boolean includeSite = cookieScope.scope() == CookieScope.Scope.SITE;
         return SessionConfig.build(
                 OriginResolver.resolve(request, trustForwardedHeaders),
-                sessionId,
                 properties.getRefreshPath(),
                 cookieScope,
                 includeSite,

@@ -28,8 +28,9 @@ and the theft is reported as `session_stolen`.
 | Atomic challenge consumption | ✅ in-memory + JDBC + Redis |
 | Tier model + demotion-on-failure | ✅ `dbsc` / `none` |
 | Route guard | ✅ opt-in per route; refuses anything not currently `dbsc`, and a bound session that omits its DBSC cookies |
-| Telemetry events | ✅ 6 event types |
+| Telemetry events | ✅ 7 event types |
 | Rate limiting | ✅ per-IP, with a separate failure budget |
+| Credential rotation on refresh | ✅ always on; bounds how long a captured credential cookie is worth |
 
 ## The protection model
 
@@ -62,6 +63,16 @@ session is actually trustworthy.
 is registered; `none` means nothing is bound, or a refresh signature failed. There
 is no intermediate or weaker tier, and a stored value the library does not
 recognise reads as `none` rather than being trusted.
+
+**The credential cookie is worth one refresh window.** The session id never travels in a
+cookie at all: `session_identifier` names a cookie this library deliberately never sets,
+so the id exists only server-side and a lifted cookie jar contains no long-lived
+credential. The one cookie that does travel is `__Host-auth_cookie`, named in
+`credentials[]`, and its value is replaced on every successful refresh. A copy of it
+therefore goes stale within one refresh rather than staying valid for the session's
+lifetime. The one tunable is `dbsc.rotation-grace`, the window in which a retired
+credential still resolves so a second tab does not break — and that window is itself
+exposure. See [Credential rotation](#credential-rotation).
 
 ### What the library does not do
 
@@ -245,7 +256,7 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
                         // The DBSC session id is minted here, independent of the
                         // application's session id, which is passed as the second
                         // argument. Keep the value if you want to call terminate()
-                        // by value; otherwise read it back from the binding cookie
+                        // by value; otherwise read it back with sessionFor(request)
                         // with sessionFor(request).
                         dbsc.bind(UUID.randomUUID().toString(),
                                   request.getSession().getId(), auth.getName(),
@@ -496,16 +507,23 @@ session, and it is only recorded so the guard can spot a request that dropped it
 cookies. Nothing requires them to match, and nothing derives one from the other:
 
 ```
-JSESSIONID=72234F6E…             your session   -> appSessionId
-__Host-dbsc-session=3D99F29D…    the binding    -> sessionId
+JSESSIONID=72234F6E…               your session   -> appSessionId
+__Host-auth_cookie=0Jp36T8T…       the credential -> a rotating ticket
+__Host-dbsc-session                sessionId      -> advertised, never set
 ```
 
+`session_identifier` carries a cookie *name* (spec §9.6), and Chromium keys its session
+store by that string. This library advertises a name it never sets a cookie under, which
+is the safest value available: the session id stays server-side, and the only cookie that
+travels is the credential one, named in `credentials[]`, whose value is replaced on every
+refresh. See [Credential rotation](#credential-rotation).
+
 Mint the DBSC id however you like — a UUID is the obvious choice — and pass your own
-session id alongside it. Keep the DBSC id if you want to call `terminate()` by value;
-otherwise read it back from the binding cookie with `sessionFor(request)`.
+session id alongside it. The id is never handed to the browser, so `sessionFor(request)`
+is the way to read it back rather than any cookie value.
 
 **`bind()` is the only thing that starts a binding.** It persists the session record,
-mints a single-use registration token, sets the challenge + binding cookies, and adds
+mints a single-use registration token, sets the challenge and credential cookies, and adds
 `Secure-Session-Registration` naming `/dbsc/regist/<token>`; Chromium then calls that
 route on its own within about a second, with no client code to write. `DbscFilter` never
 adds that header to your application's own responses, so a login flow that never calls
@@ -627,10 +645,13 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `cookie-domain` | — | e.g. `example.com`; required for `site` scope |
 | `registration-path` | `/dbsc/regist` | **prefix** for the registration route, not a full path: the advertised route is `<prefix>/<token>` |
 | `refresh-path` | `/dbsc/refresh` | also the `refresh_url` in the JSON config |
-| `binding-cookie-ttl` | `10m` | lifetime of the binding cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
+| `session-identifier-name` | unset | override for the cookie name written as `session_identifier`. **Unset is the safe default**: the name is then one this library advertises and never sets a cookie under, so no session id travels in a cookie. See [Naming your own session cookie](#naming-your-own-session-cookie) |
+| `credential-cookie-name` | `__Host-auth_cookie` | the protected cookie named in `credentials[].name`, whose value rotates. Used verbatim — a prefix is your choice |
+| `binding-cookie-ttl` | `10m` | lifetime of the credential cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
 | `registration-cookie-ttl` | `24h` | lifetime of the single-use registration token. The token is consumed by a successful registration; this is only the ceiling for one that never completes |
 | `challenge-ttl` | `5m` | lifetime of a challenge JTI |
 | `refresh-grace` | `30s` | softens the freshness poll across a refresh |
+| `rotation-grace` | `60s` | how long a retired credential cookie value keeps resolving. Rotation itself is not optional — see [Credential rotation](#credential-rotation) |
 | `session-ttl` | `7d` | default lifetime applied by `bind()` when the caller does not set one |
 | `rate-limit.enabled` | `true` | |
 | `rate-limit.capacity` | `30` | per IP, per window |
@@ -638,6 +659,102 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `rate-limit.window` | `1m` | |
 | `storage` | `jdbc` when a `DataSource` is present | `memory` for tests and local dev only; `redis` for a host already running Redis/Valkey with no `DataSource` |
 | `trust-forwarded-headers` | `false` | believe `X-Forwarded-For` / `X-Forwarded-Proto`. Leave off unless a reverse proxy is known to overwrite them — they drive the IP used for rate limiting |
+
+### Credential rotation
+
+One cookie is in play, and this is the important part to get right:
+
+| Cookie | Its name appears in | Its value | Set by this library? |
+|---|---|---|---|
+| `__Host-auth_cookie` | `credentials[].name` | a credential ticket | **yes** — replaced on every successful refresh |
+| `__Host-dbsc-session` | `session_identifier` | nothing | **no** — advertised, never set |
+
+Per spec §9.6 `session_identifier` holds a cookie **name**, not a value, and Chromium keys
+its session store by that string. This library advertises a name it never sets a cookie
+under, which is the strongest position available: the session id exists only server-side,
+so there is no long-lived value in the cookie jar to lift, and §8.9's
+`Sec-Secure-Session-Id` check needs no cookie to agree with.
+
+Every successful refresh mints a new credential ticket and hands it back in the
+`Set-Cookie` of the `credentials[]` cookie. This is not optional: that cookie can be
+copied, and a copy is only ever worth as little as the value's remaining life. Making it a
+setting would mean the safe behaviour is the one you have to know to ask for.
+
+The one tunable is the grace:
+
+```yaml
+dbsc:
+  rotation-grace: 60s
+```
+
+**What it does not do.** It does **not** make the session proof-free, and it does not
+invalidate a key. A refresh *is* the browser's proof of possession, so whoever holds the
+cookie and the device still refreshes successfully — the server cannot tell a stolen
+cookie from the real browser. What rotation buys is narrower and worth stating plainly: a
+captured credential cookie stops resolving `rotation-grace` after the real browser's next
+refresh, instead of staying valid for the session's whole lifetime. What stops a stolen
+*key* is `terminate()` and the demote-on-failure path, and neither is a substitute for
+treating a leaked binding as everything it is worth.
+
+**How the grace works, and why it has to exist.** The browser only learns the new ticket
+from the refresh *response*, so any request already in flight — a second tab, a retry, a
+slow proxy — still carries the old one. For `grace`, the retired ticket keeps resolving to
+the same session. Without that, a second tab's refresh would be refused, and Chromium
+records a refresh failure as permanent and will not retry, which would silently kill DBSC
+for the whole browser.
+
+The grace is the exposure. It is the window in which a stolen credential still works, so
+set it to the longest gap between refresh attempts you need to survive, not to a round
+number:
+
+| `grace` | Behaviour |
+|---|---|
+| short (a few seconds) | Less exposure, but a slow tab or an idle one that wakes up late gets refused and has to re-register |
+| `60s` (default) | Survives a normal multi-tab refresh race |
+| long (minutes) | The rotation buys much less than it costs — the retired ticket outlives the reason to retire it |
+
+A retired ticket used *within* the grace is answered normally and rotated again, so a
+lagging tab cannot pin the old value — each successful refresh moves the credential
+forward while the session id stays put.
+
+**Cost.** One extra record write and one expired-row sweep per refresh, plus a row (or a
+key) per retired ticket held for the grace. Rotation happens only after the signature
+verifies, so an unauthenticated request can never retire anything: minting the new value
+first would be a denial-of-service primitive that needs no key at all.
+
+### Naming your own session cookie
+
+By default `session_identifier` names `__Host-dbsc-session` (or `dbsc-session` when
+`secure: false`), and **this library never sets a cookie under that name**. The name is
+advertised because Chromium keys its session store by it — it stores the session's key
+and state against that string — while the session id itself stays server-side and
+travels in `Sec-Secure-Session-Id` on a refresh. There is therefore no long-lived value
+in the cookie jar to steal, which is the whole point of the default.
+
+The one thing to be careful about: if you point `session_identifier` at a name for which
+the request carries no cookie *and* your application does not supply the id some other
+way, every refresh fails with `MISSING_SESSION_ID` and a `REFRESH_REJECTED` 403, which
+looks like a protocol bug rather than a configuration one.
+
+If you would rather DBSC key sessions on a cookie *your* application already sets, set
+`dbsc.session-identifier-name` to that cookie's name:
+
+```yaml
+dbsc:
+  session-identifier-name: JSESSIONID
+```
+
+Two things then have to line up, and only you can make them:
+
+1. **Pass that cookie's value to `bind()` as `sessionId`.** The value stays put for the
+   life of the binding, so use something your server controls per session, not a value
+   you plan to rotate.
+2. **Do not use `cookie-scope: site`.** A `__Secure-` prefixed cookie cannot protect a
+   cookie of an unrelated name, and the JSON's `credentials[].attributes` must match the
+   real `Set-Cookie` byte for byte.
+
+Either way the credential cookie is this library's own (`credential-cookie-name`), so
+the two jobs stay split: your session cookie is named, our credential cookie rotates.
 
 ### Storage
 
@@ -702,6 +819,7 @@ its own server or its own database index. The key layout is:
 | `dbsc:device-key:<sessionId>` | hash | the session's deadline, or 24h when orphaned |
 | `dbsc:challenge:<jti>` | hash | the challenge's expiry **+ 1h** |
 | `dbsc:registration-token:<token>` | hash | the token's expiry **+ 1h** |
+| `dbsc:credential-ticket:<ticket>` | string | the rotation grace, no longer |
 
 The `+ 1h` on challenges and registration tokens is deliberate: the record has to outlive
 its stated expiry, or a client presenting a JTI that lapsed a moment ago would get
@@ -745,6 +863,7 @@ The DDL is shipped for exactly that, at
 | `dbsc_sessions` | one row per bound session (`id` PK, `app_session_id`, `user_id`, `tier`, `revoked`, timestamps). `app_session_id` is uniquely indexed, so there is at most one binding per application session |
 | `dbsc_device_keys` | the registered hardware key it holds — `session_id` PK, so **one key per session** |
 | `dbsc_challenges` | outstanding JTIs, with the `consumed` flag that makes consumption atomic |
+| `dbsc_credential_tickets` | tickets that still resolve to a session, with their expiry. Written by [credential rotation](#credential-rotation); a row is dropped when it is read after its expiry |
 
 The `dbsc_sessions` table references the DBSC session id (`id`) and your application's
 session id (`app_session_id`) as two independent columns — see
@@ -777,6 +896,26 @@ session?" when a request arrives without DBSC cookies.
 > sessions and can never collide, since `id` is already unique. Those sessions will be
 > refused once by the guard and recover on the next login, which re-binds them with the
 > real application session id.
+>
+> The release that added [credential rotation](#credential-rotation) replaced
+> `dbsc_session_aliases` with `dbsc_credential_tickets`. `CREATE TABLE IF NOT EXISTS`
+> creates the new table on its own, so an upgrade needs no manual step — but the old
+> table is neither migrated nor dropped, and is left as dead weight. It held only
+> retired session ids from a scheme that no longer exists, so dropping it is safe and
+> loses nothing:
+>
+> ```sql
+> DROP TABLE IF EXISTS dbsc_session_aliases;
+> ```
+>
+> The same release settled the cookie layout on a single cookie. `credentials[].name`
+> names `__Host-auth_cookie`, whose value is a rotating ticket; `session_identifier`
+> advertises `__Host-dbsc-session` as a name the server deliberately never sets a cookie
+> under, so the session id exists only server-side and `Sec-Secure-Session-Id` is the
+> only thing that ever carries it. A browser holding a binding from an older build
+> re-registers on its own; the server side is what has to change, and only if you set
+> `dbsc.session-identifier-name` explicitly — it is now an override rather than an
+> independent setting, and leaving it unset gives the correct name.
 
 The file is a plain `CREATE TABLE IF NOT EXISTS` migration: drop it into your
 migration tool's directory, or run its statements however you already run schema
@@ -799,28 +938,26 @@ This section explains why the registration token travels in the URL rather than 
 cookie. The failure it describes is real and worth understanding — it is what the design
 solves — but with the current library there is nothing for you to do about it.
 
-Chromium makes a DBSC request inherit the **initiator** of the request that produced
-it. For an OIDC or SAML login, the response carrying your `Secure-Session-Registration`
-header is the **callback** — and the callback's initiator is the identity provider,
-not your site. So the registration POST Chromium fires in response counts as
-**cross-site**, and Chromium withholds your `SameSite=Lax` session cookie from it:
+Cross-site is a problem for the registration POST however the session is identified in
+a cookie, because Chromium withholds *all* of them from that POST:
 
 ```
-GET  /login/oauth2/code/entraid   302   session cookie set
-POST /dbsc/regist/<token>         200   session cookie NOT sent
+GET  /login/oauth2/code/entraid   302   cookies set
+POST /dbsc/regist/<token>         200   no cookie sent
 ```
 
-A server-side redirect does **not** help: `302`/`303` to your own page keeps the
-callback as the initiator. Only a navigation the *browser* issues on its own — a
-click, a page load, a script-driven location change — resets it.
+That is why nothing on the registration path may depend on a cookie naming the
+session, and it is worth knowing even though the library has already arranged it: if
+you are reading a cookie of your own in a component that runs on that path, it will be
+absent exactly when the login callback is what triggered the request.
 
 ### How the token in the path removes the problem
 
 An earlier design named the session with a `__Host-dbsc-reg` cookie. Cross-site, that
-cookie was withheld along with `JSESSIONID`, so the registration route saw a request
-with no session and answered `403` — and Chromium records that failure as permanent and
-does not retry for the rest of that login, leaving the session at `tier: none` no matter
-how long it lives.
+cookie was withheld along with your own session cookie, so the registration route saw a
+request with no session and answered `403` — and Chromium records that failure as
+permanent and does not retry for the rest of that login, leaving the session at
+`tier: none` no matter how long it lives.
 
 `bind()` no longer sets that cookie. It mints a **single-use registration token** and
 advertises the session's identity in the registration **URL**:
@@ -829,10 +966,16 @@ advertises the session's identity in the registration **URL**:
 POST /dbsc/regist/1234-56789-01234-56789
 ```
 
-The POST is resolvable from the path alone, so it does not matter that the session
-cookie was withheld and the cross-site initiator stops being a problem. Binding in the
+The POST is resolvable from the path alone, so it does not matter that cookies were
+withheld and the cross-site initiator stops being a problem. Binding in the
 OIDC success handler — the obvious place — now works, with no relay hop and no
 application-side workaround.
+
+A server-side redirect does **not** reset the initiator: `302`/`303` to your own page
+still leaves the callback as the initiator. Only a navigation the *browser* issues on
+its own — a click, a page load, a script-driven location change — does. Nothing in this
+library needs one any more; the note is here because it still governs what `bind()`
+may rely on if you call it somewhere else.
 
 Two consequences worth knowing:
 

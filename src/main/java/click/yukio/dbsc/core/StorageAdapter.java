@@ -33,6 +33,43 @@ public interface StorageAdapter {
 
     void deleteSession(String id);
 
+    // ---- Credential tickets ----
+
+    /**
+     * Resolves a credential-cookie value to the DBSC session it names.
+     *
+     * <p>Returns {@code null} when the ticket is unknown, expired, or was never
+     * issued — the caller cannot tell those apart and must not try to. A ticket that
+     * has been rotated away still resolves for the length of the grace, which is what
+     * keeps a second tab alive; see {@link CredentialTicket}.
+     *
+     * @param ticket the value from the credential cookie
+     * @return the session id it names, or {@code null}
+     */
+    String resolveTicket(String ticket);
+
+    /**
+     * Stores a ticket mapping. Called once when the binding is created and again on
+     * every successful refresh.
+     *
+     * @param ticket  the value the credential cookie will carry
+     * @param sessionId the session it names
+     * @param ttlMs   how long the ticket itself stays resolvable
+     */
+    void setTicket(String ticket, String sessionId, long ttlMs);
+
+    /**
+     * Drops a ticket mapping, so it stops naming anything immediately.
+     *
+     * <p>Unlike a rotation, which deliberately leaves the retired value resolvable for
+     * the grace, this is used where continuation is wrong: registration replaces the
+     * ticket the browser held before it was registered, and that value must not survive
+     * into the session it was minted for. A {@code null} or unknown ticket is a no-op.
+     *
+     * @param ticket the value to retire now
+     */
+    void deleteTicket(String ticket);
+
     // ---- Bound keys ----
 
     /**

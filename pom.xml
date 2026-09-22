@@ -311,6 +311,22 @@
     </profile>
 
     <!--
+      A fourth demo instance with a shortened rotation grace. Rotation itself is
+      unconditional; what is per-instance is how long a retired session id keeps
+      resolving, and the suite has to outwait that to prove the alias expires.
+
+        mvn -Pdemo,rotation-e2e -Dmaven.repo.local=.m2repo spring-boot:run
+
+      See src/demo/resources/application-rotation-e2e.yaml.
+    -->
+    <profile>
+      <id>rotation-e2e</id>
+      <properties>
+        <dbsc.demo.profiles>,rotation-e2e</dbsc.demo.profiles>
+      </properties>
+    </profile>
+
+    <!--
       The OIDC variant of the demo: adds an Entra ID login on top of src/demo and
       turns off the form-login chain (the two cannot coexist on one chain).
 

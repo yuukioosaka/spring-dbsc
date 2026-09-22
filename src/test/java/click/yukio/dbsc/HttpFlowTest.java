@@ -33,6 +33,7 @@ import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -86,10 +87,16 @@ class HttpFlowTest {
         List<String> cookies = response.getHeaders("Set-Cookie");
         assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.challengeCookieName() + "=")),
                 "the challenge cookie must be set: " + cookies);
-        assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.bindingCookieName() + "=")),
-                "the binding cookie is set from the start, so omitting it is detectable: " + cookies);
+        assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.credentialCookieName() + "=")),
+                "the credential cookie is set from the start: " + cookies);
         assertTrue(cookies.stream().noneMatch(c -> c.contains("dbsc-reg")),
                 "the pre-registration cookie is gone; the path carries the token now: " + cookies);
+        // session_identifier names a cookie this server never sets. The session id is
+        // held server-side only, so a long-lived copy of it cannot be lifted from a
+        // cookie jar -- the only cookie that moves is the rotating credential.
+        assertTrue(cookies.stream().noneMatch(
+                        c -> c.startsWith(cookieScope.sessionIdentifierName() + "=")),
+                "no cookie is minted under the name session_identifier advertises: " + cookies);
     }
 
     // ------------------------------------------------------------------
@@ -113,7 +120,11 @@ class HttpFlowTest {
         assertEquals(200, response.getStatus());
 
         Map<String, Object> config = Json.parseObject(response.getContentAsString());
-        assertEquals(login.sessionId(), config.get("session_identifier"));
+        // session_identifier is a cookie NAME, not the session id (spec §9.6), and it is
+        // deliberately the name of no cookie this server sets: the id stays server-side.
+        assertEquals(cookieScope.sessionIdentifierName(), config.get("session_identifier"));
+        assertNotEquals(login.sessionId(), config.get("session_identifier"),
+                "the id is a value and must not appear here as the name");
         assertEquals("/dbsc/refresh", config.get("refresh_url"));
 
         // The JSON body is mandatory: a 200 without it is read as an opt-out.
@@ -123,13 +134,17 @@ class HttpFlowTest {
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> credentials = (List<Map<String, Object>>) config.get("credentials");
         assertEquals(1, credentials.size());
-        assertEquals(cookieScope.bindingCookieName(), credentials.get(0).get("name"));
+        assertEquals(cookieScope.credentialCookieName(), credentials.get(0).get("name"));
         // This MUST equal the real Set-Cookie attributes byte-for-byte.
         assertEquals(cookieScope.attributesString(), credentials.get(0).get("attributes"));
 
         List<String> cookies = response.getHeaders("Set-Cookie");
-        assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.bindingCookieName() + "=")),
-                "a fresh binding cookie must be set: " + cookies);
+        assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.credentialCookieName() + "=")),
+                "the credential cookie named in the JSON config must actually be set, or "
+                        + "§8.6 finds it missing on the very next request: " + cookies);
+        assertTrue(cookies.stream().noneMatch(
+                        c -> c.startsWith(cookieScope.sessionIdentifierName() + "=")),
+                "nothing is set under the name session_identifier advertises: " + cookies);
         assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.challengeCookieName() + "=;")
                         && c.contains("Max-Age=0")),
                 "the challenge cookie must be cleared: " + cookies);
@@ -258,10 +273,20 @@ class HttpFlowTest {
 
         assertEquals(200, secondLeg.getResponse().getStatus());
         Map<String, Object> config = Json.parseObject(secondLeg.getResponse().getContentAsString());
-        assertEquals(login.sessionId(), config.get("session_identifier"));
+
+        // A refresh replaces the credential and nothing else. session_identifier names a
+        // cookie that is never set, so the only cookie the response may carry is the
+        // credential one -- a session cookie appearing here would mean the id had started
+        // travelling in the clear again.
         assertTrue(secondLeg.getResponse().getHeaders("Set-Cookie").stream()
-                        .anyMatch(c -> c.startsWith(cookieScope.bindingCookieName() + "=")),
-                "a refresh response MUST set the binding cookie");
+                        .noneMatch(c -> c.startsWith(cookieScope.sessionIdentifierName() + "=")),
+                "a refresh must not mint a cookie under session_identifier's name");
+        assertEquals(cookieScope.sessionIdentifierName(), config.get("session_identifier"));
+
+        var credential = secondLeg.getResponse().getCookie(cookieScope.credentialCookieName());
+        assertNotNull(credential, "a refresh response MUST set the credential cookie");
+        assertEquals(login.sessionId(), storage.resolveTicket(credential.getValue()),
+                "the new ticket must resolve back to this session");
         assertEquals(ProtectionTier.DBSC, storage.getSession(login.sessionId()).orElseThrow().tier());
     }
 
@@ -322,7 +347,7 @@ class HttpFlowTest {
         assertEquals(false, config.get("continue"),
                 "continue:false makes Chromium forget the binding immediately");
         assertTrue(result.getResponse().getHeaders("Set-Cookie").stream()
-                .anyMatch(c -> c.startsWith(cookieScope.bindingCookieName() + "=;")));
+                .anyMatch(c -> c.startsWith(cookieScope.credentialCookieName() + "=;")));
     }
 
     // ------------------------------------------------------------------
@@ -425,8 +450,11 @@ class HttpFlowTest {
      * The state a logged-in client holds. The binding cookie only exists after
      * native registration completes, so it is a mutable field that
      * {@link #register} fills in on the caller's instance.
+     *
+     * <p>Package-visible, like the helpers below, so {@link SessionRotationTest} can
+     * drive the same flow rather than keeping a second copy of it in step.
      */
-    private static final class LoginState {
+    static final class LoginState {
         private final String sessionId;
         private final String challenge;
         private final String registrationToken;
@@ -448,6 +476,24 @@ class HttpFlowTest {
 
         String sessionId() {
             return sessionId;
+        }
+
+        /**
+         * The same client state under a different DBSC session id, as a browser that
+         * has just read a rotated id would be. The application session is carried
+         * over unchanged, which is what a rotation does.
+         */
+        LoginState withSessionId(String newSessionId) {
+            return new LoginState(newSessionId, challenge, registrationToken,
+                    challengeCookie, appSession, bindingCookie);
+        }
+
+        /**
+         * The application's own session id, which {@code bind()} recorded and
+         * rotation must leave alone.
+         */
+        String appSessionId() {
+            return appSession.getId();
         }
 
         String challenge() {
@@ -492,7 +538,18 @@ class HttpFlowTest {
     }
 
     private LoginState loginWithState() throws Exception {
-        MvcResult result = login();
+        return loginWithState(mvc, cookieScope);
+    }
+
+    /**
+     * Logs in and returns the state a client holds before registration. Shared with
+     * {@link SessionRotationTest}.
+     */
+    static LoginState loginWithState(MockMvc mvc, CookieScope cookieScope) throws Exception {
+        MvcResult result = mvc.perform(post("/host/login")
+                        .contentType("application/json")
+                        .content("{\"userId\":\"user_1\"}"))
+                .andReturn();
         var response = result.getResponse();
         Map<String, Object> body = Json.parseObject(response.getContentAsString());
         String sessionId = (String) body.get("sessionId");
@@ -516,14 +573,20 @@ class HttpFlowTest {
                 challengeCookie, appSession, null);
     }
 
+    private LoginState register(LoginState login, TestKey key) throws Exception {
+        return register(mvc, cookieScope, login, key);
+    }
+
     /**
      * Completes native registration and returns the state a bound client sees,
      * including the binding cookie the registration response issued.
      *
      * <p>The passed-in state is updated in place, so a test that ignores the
      * return value still observes the binding cookie on its own variable.
+     * Shared with {@link SessionRotationTest}.
      */
-    private LoginState register(LoginState login, TestKey key) throws Exception {
+    static LoginState register(MockMvc mvc, CookieScope cookieScope, LoginState login, TestKey key)
+            throws Exception {
         MvcResult result = mvc.perform(post(login.registrationPath())
                         .header("Secure-Session-Response", key.registrationJws(login.challenge(), login.sessionId()))
                         .cookie(login.challengeCookie()))
@@ -531,14 +594,20 @@ class HttpFlowTest {
         assertEquals(200, result.getResponse().getStatus(),
                 "registration failed: " + result.getResponse().getContentAsString());
 
-        var bindingCookie = result.getResponse().getCookie(cookieScope.bindingCookieName());
-        assertNotNull(bindingCookie, "registration must issue the binding cookie");
-        login.bindingCookie = bindingCookie;
+        var credentialCookie = result.getResponse().getCookie(cookieScope.credentialCookieName());
+        assertNotNull(credentialCookie, "registration must issue the credential cookie");
+        login.bindingCookie = credentialCookie;
         return login;
     }
 
     /** A generated P-256 key that can produce the JWS shapes DBSC expects. */
-    private record TestKey(KeyPair pair) {
+    static final class TestKey {
+
+        private final KeyPair pair;
+
+        private TestKey(KeyPair pair) {
+            this.pair = pair;
+        }
 
         static TestKey generate() {
             try {
