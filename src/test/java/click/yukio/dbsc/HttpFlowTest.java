@@ -91,9 +91,9 @@ class HttpFlowTest {
                 "the credential cookie is set from the start: " + cookies);
         assertTrue(cookies.stream().noneMatch(c -> c.contains("dbsc-reg")),
                 "the pre-registration cookie is gone; the path carries the token now: " + cookies);
-        // session_identifier names a cookie this server never sets. The session id is
-        // held server-side only, so a long-lived copy of it cannot be lifted from a
-        // cookie jar -- the only cookie that moves is the rotating credential.
+        // The session id is echoed in the JSON config as session_identifier, but never as
+        // a cookie: it is a value the browser stores and returns in a header, not a
+        // credential a cookie jar could leak.
         assertTrue(cookies.stream().noneMatch(
                         c -> c.startsWith(cookieScope.sessionIdentifierName() + "=")),
                 "no cookie is minted under session_identifier: " + cookies);
@@ -120,11 +120,12 @@ class HttpFlowTest {
         assertEquals(200, response.getStatus());
 
         Map<String, Object> config = Json.parseObject(response.getContentAsString());
-        // session_identifier is a cookie NAME, not the session id (spec §9.6), and its
-        // default names no cookie this server sets: the id stays server-side.
-        assertEquals("session_identifier", config.get("session_identifier"));
-        assertNotEquals(login.sessionId(), config.get("session_identifier"),
-                "the id is a value and must not appear here as the name");
+        // session_identifier IS the session id (spec §9.6: "a string representing a session
+        // identifier ... the identifier for the newly created session"). Chromium keys its
+        // session store by it and echoes it back as Sec-Secure-Session-Id on every refresh,
+        // which is the only way the server can find the session to verify against.
+        assertEquals(login.sessionId(), config.get("session_identifier"),
+                "session_identifier must be the session id the server knows the session by");
         assertEquals("/dbsc/refresh", config.get("refresh_url"));
 
         // The JSON body is mandatory: a 200 without it is read as an opt-out.
@@ -135,8 +136,11 @@ class HttpFlowTest {
         List<Map<String, Object>> credentials = (List<Map<String, Object>>) config.get("credentials");
         assertEquals(1, credentials.size());
         assertEquals(cookieScope.credentialCookieName(), credentials.get(0).get("name"));
-        // This MUST equal the real Set-Cookie attributes byte-for-byte.
+        // This MUST match the real Set-Cookie prefix byte-for-byte, but MUST NOT carry
+        // Max-Age: Chromium rejects that attribute here outright.
         assertEquals(cookieScope.attributesString(), credentials.get(0).get("attributes"));
+        assertFalse(((String) credentials.get(0).get("attributes")).contains("Max-Age"),
+                "Max-Age in credentials[].attributes is a registration failure on Chromium");
 
         List<String> cookies = response.getHeaders("Set-Cookie");
         assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.credentialCookieName() + "=")),
@@ -274,14 +278,14 @@ class HttpFlowTest {
         assertEquals(200, secondLeg.getResponse().getStatus());
         Map<String, Object> config = Json.parseObject(secondLeg.getResponse().getContentAsString());
 
-        // A refresh replaces the credential and nothing else. session_identifier names a
-        // cookie that is never set, so the only cookie the response may carry is the
-        // credential one -- a session cookie appearing here would mean the id had started
-        // travelling in the clear again.
+        // A refresh replaces the credential and nothing else. The session id is echoed as
+        // session_identifier -- that is how Chromium knows which session this is -- but no
+        // cookie appears under it: the id is a value, not a stored credential.
         assertTrue(secondLeg.getResponse().getHeaders("Set-Cookie").stream()
                         .noneMatch(c -> c.startsWith(cookieScope.sessionIdentifierName() + "=")),
                 "a refresh must not mint a cookie under session_identifier's name");
-        assertEquals("session_identifier", config.get("session_identifier"));
+        assertEquals(login.sessionId(), config.get("session_identifier"),
+                "a refresh must echo the same session id the session was registered under");
 
         var credential = secondLeg.getResponse().getCookie(cookieScope.credentialCookieName());
         assertNotNull(credential, "a refresh response MUST set the credential cookie");

@@ -70,6 +70,55 @@ dbsc:
     failure-capacity: 15
     window: 1m
 
+  # Which URLs the session covers, written into the JSON config as
+  # scope.scope_specification (spec 9.7, 9.8). These are instructions to the browser,
+  # not server-side checks: the user agent decides where to attach the credential and
+  # when to refresh from them.
+  #
+  # scope.origin is derived from the request, and normally needs no configuration. If
+  # the derived value is wrong (a proxy rewriting the host to an internal name, a CDN
+  # setting no forwarding header this library reads), pin it here. Prefer
+  # trust-forwarded-headers where that applies: it stays correct if the public name
+  # changes. An absolute origin, no path, scheme included:
+  #
+  #   scope-origin: https://example.com:8443
+  #
+  # A wrong value is invisible on the wire — Chromium discards the session while the
+  # server answers 200 — so it is validated at startup and fails the context.
+  scope-origin:
+  # The browser walks this list in REVERSE and stops at the first match (8.2), so the
+  # last rule written wins. The idiomatic shape is therefore outermost-first: exclude a
+  # broad area, then include the part of it that matters.
+  #
+  # Empty means the entire origin applies (or the entire site, when cookie-scope is
+  # "site"). "domain" defaults to "*" and "path" to "/" when omitted; both are written
+  # out explicitly in the response so the emitted JSON says what it means.
+  scope-specifications: []
+  #   - type: exclude
+  #     domain: "*.example.com"
+  #     path: /static
+  #   - type: include
+  #     domain: trusted.example.com
+  #     path: /only_trusted_path
+
+  # Hosts OUTSIDE the scope above that may still trigger a refresh, written into the
+  # JSON config as allowed_refresh_initiators (spec 9.6, 8.3).
+  #
+  # This is the remedy for the refresh endpoint's timing side channel (spec 3.2): by
+  # default an out-of-scope cross-origin fetch to a protected URL blocks on the refresh
+  # request, and the delay alone reveals whether the user is logged in. Listing only the
+  # hosts that genuinely need to call the site removes that signal for everyone else.
+  #
+  # Each entry is a host or host pattern: "*" matches everything, "*.example.com" matches
+  # subdomains of example.com but NOT example.com itself, and a bare host matches only
+  # itself (8.4). In-scope requests are always allowed, so this list is only about
+  # out-of-scope callers.
+  #
+  # Empty means no out-of-scope host may refresh.
+  allowed-refresh-initiators: []
+  #   - example.com
+  #   - "*.example.com"
+
 logging:
   level:
     click.yukio.dbsc: DEBUG

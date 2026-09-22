@@ -29,11 +29,9 @@ dbsc:
   # resolving. The value is also read through DBSC_ROTATION_GRACE by the suite.
   rotation-grace: 5s
 
-  # Rotation makes the default binding-cookie lifetime the *other* half of the
-  # exposure -- a captured cookie is stale after one refresh, but the refresh itself
-  # only happens every binding-cookie-ttl. Shortened here so a demo run exercises
-  # several rotations rather than one.
-  binding-cookie-ttl: 30s
+  # Rotation makes the binding-cookie lifetime the *other* half of the exposure --
+  # a captured cookie is stale after one refresh, but the refresh itself only happens
+  # every binding-cookie-ttl. Left at the 10m default.
 
 logging:
   level:

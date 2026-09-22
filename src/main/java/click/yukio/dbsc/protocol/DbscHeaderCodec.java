@@ -44,6 +44,27 @@ public final class DbscHeaderCodec {
     }
 
     /**
+     * Parses a structured-field string, i.e. an optionally double-quoted value, as
+     * used by {@code Sec-Secure-Session-Id} and {@code Secure-Session-Response}
+     * (spec §9.3, §9.4). Surrounding whitespace is trimmed and one layer of quotes is
+     * removed; any other parameter is the caller's to ignore.
+     *
+     * <p>Browsers differ on whether they quote these values, so both forms must be
+     * accepted — a quoted value that is not unquoted becomes part of the session id and
+     * every lookup misses.
+     */
+    public static String parseStructuredString(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String trimmed = raw.trim();
+        if (trimmed.length() >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            return trimmed.substring(1, trimmed.length() - 1);
+        }
+        return trimmed;
+    }
+
+    /**
      * Parses the {@code Secure-Session-Skipped} header value into recognized
      * entries. Unrecognized tokens are ignored, optional quotes around
      * {@code session_identifier} are stripped, and a skip is never an error.

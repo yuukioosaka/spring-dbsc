@@ -136,13 +136,14 @@ public class DbscProtocolEngine {
 
     /**
      * Mints a fresh credential-cookie ticket for a session whose refresh has already
-     * verified, and keeps the value the browser was carrying resolvable for the grace.
+     * verified.
      *
-     * <p>The session id does not move. {@code session_identifier} is the name of the
-     * cookie holding it and Chromium keys the session store by that name (spec §7.2),
-     * so the value behind that name has to stay put for the life of the binding. What
-     * rotates is the value of the credential cookie — the one {@code credentials[]}
-     * names and §8.6 asks about — which is what puts a clock on a copy of it.
+     * <p>The ticket <strong>is</strong> the value of the credential cookie named in
+     * {@code credentials[]} — the cookie {@code §8.6} asks about — and replacing it on
+     * every refresh is what puts a clock on a copy of it. The session it names does not
+     * move, and nothing about this method defines session identity: a refresh is
+     * resolved from the {@code Sec-Secure-Session-Id} header, so the ticket the browser
+     * was carrying is never consulted here.
      *
      * <p>Minting happens on <strong>every</strong> successful refresh and is not a
      * setting. A cookie can be copied, and a copy is worth only as little as the value's
@@ -151,9 +152,10 @@ public class DbscProtocolEngine {
      *
      * <p>Ordering is the whole security argument, and it is the opposite of the obvious
      * one. The new ticket is minted <strong>after</strong> the signature verified, never
-     * before, and the old value is retired only then. Minting first would let anyone who
-     * can reach the refresh route retire a stranger's credential by posting a refresh
-     * with no proof at all — a denial of service that needs no key and leaves no trace.
+     * before, and the old value keeps resolving until its own expiry. Minting first would
+     * let anyone who can reach the refresh route retire a stranger's credential by
+     * posting a refresh with no proof at all — a denial of service that needs no key and
+     * leaves no trace.
      *
      * <p>When there is no session record the id is returned unchanged: {@code
      * handleRefresh} tolerates a session that has gone, and issuing a ticket for one
@@ -168,11 +170,13 @@ public class DbscProtocolEngine {
         }
 
         String ticket = Base64Url.randomJti();
-        // Both writes are unconditional, and together they are the rotation: the new ticket
-        // starts resolving, and the old one keeps resolving for exactly as long as it takes
-        // the browser to see the new one. Nothing is deleted on the old side -- a tab that
-        // arrives late still has to be recognised, or Chromium records a permanent failure.
-        storage.setTicket(ticket, sessionId, properties.rotationGraceMs());
+        // The new ticket lives as long as the cookie carrying it is allowed to -- the
+        // binding TTL, which is also the refresh cadence -- plus the grace, which covers
+        // the overlap while the browser is still holding the previous value. Writing it
+        // with rotationGraceMs alone would expire the credential long before Chromium
+        // comes back to refresh it, and every refresh after the first would fail.
+        storage.setTicket(ticket, sessionId,
+                properties.bindingCookieTtlMs() + properties.rotationGraceMs());
 
         telemetry.publish(new DbscTelemetryEvent.SessionRotated(
                 sessionId, storage.getSession(sessionId).map(Session::tier).orElse(ProtectionTier.NONE),

@@ -29,6 +29,31 @@ dbsc:
   # HTTPS has to set dbsc.secure: false explicitly.
   secure: true
   storage: jdbc
+  # The DBSC refresh cadence. Chromium re-runs /dbsc/refresh when the credential
+  # cookie is this old, so it is also the window in which a captured cookie is worth
+  # something. The library default is 10m; shortened here so a manual session still
+  # shows a refresh or two without making Chromium poll hard enough to hit its own
+  # per-origin signing quota.
+  binding-cookie-ttl: 3m
+  # Both scope keys set to something non-empty, so a registration response from the
+  # demo shows the real shape rather than two empty arrays. Chromium walks
+  # scope_specification in reverse, so "exclude everything under /static" is written
+  # first and the narrower "include /api" after it — last match wins.
+  scope-specifications:
+    - type: exclude
+      domain: "*"
+      path: /static
+    - type: include
+      domain: localhost
+      path: /api
+  # Only these hosts may refresh out of scope. "localhost" matches itself; the
+  # wildcard form would be "*.example.com".
+  allowed-refresh-initiators:
+    - localhost
+  # The demo is reached at https://localhost:8443, which the derived origin already
+  # gets right — this is here to show the key, and because the demo's whole point is
+  # to read the registration response and see what each setting produced.
+  scope-origin: https://localhost:8443
   # The library default is 30 requests / 15 failures per minute, which is right for
   # production but too tight for scripts/e2e.py: the suite performs dozens of
   # registrations in a few seconds, and its negative cases (malformed JWTs,

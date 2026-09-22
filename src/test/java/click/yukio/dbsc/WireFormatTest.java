@@ -1,9 +1,11 @@
 package click.yukio.dbsc;
 
+import click.yukio.dbsc.config.DbscProperties;
 import click.yukio.dbsc.core.SkippedEntry;
 import click.yukio.dbsc.core.SkippedReason;
 import click.yukio.dbsc.protocol.CookieScope;
 import click.yukio.dbsc.protocol.DbscHeaderCodec;
+import click.yukio.dbsc.protocol.SessionConfig;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -24,6 +26,155 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * makes Chromium silently drop the binding.
  */
 class WireFormatTest {
+
+    /**
+     * {@code scope.scope_specification} and {@code allowed_refresh_initiators}: the two
+     * JSON keys that tell the browser where the session applies and who may make it
+     * refresh. Both are advisory to the user agent, so what matters here is that the
+     * configured shape survives into the JSON unaltered — array order included, since
+     * §8.2 walks the specs in reverse.
+     */
+    @Nested
+    class ScopeAndInitiators {
+
+        private DbscProperties properties() {
+            DbscProperties properties = new DbscProperties();
+            properties.setCookieScope(CookieScope.Scope.HOST);
+            return properties;
+        }
+
+        private Map<String, Object> render(DbscProperties properties) {
+            return SessionConfig.build("https://example.com", "/dbsc/refresh", "sid-1",
+                    CookieScope.resolve(true, CookieScope.Scope.HOST, null), false, properties);
+        }
+
+        @SuppressWarnings("unchecked")
+        private List<Map<String, Object>> specs(Map<String, Object> config) {
+            return (List<Map<String, Object>>) ((Map<String, Object>) config.get("scope"))
+                    .get("scope_specification");
+        }
+
+        @SuppressWarnings("unchecked")
+        private Map<String, Object> scopeOf(Map<String, Object> config) {
+            return (Map<String, Object>) config.get("scope");
+        }
+
+        private String str(Object value) {
+            return String.valueOf(value);
+        }
+
+        @SuppressWarnings("unchecked")
+        private List<String> initiators(Map<String, Object> config) {
+            return (List<String>) config.get("allowed_refresh_initiators");
+        }
+
+        @Test
+        @DisplayName("both keys are always present, empty when unconfigured")
+        void defaultsAreEmptyLists() {
+            Map<String, Object> config = render(properties());
+
+            // Emitted rather than omitted: an absent key and an empty list mean the same
+            // thing to the browser, and writing it makes the behaviour legible.
+            assertTrue(config.containsKey("allowed_refresh_initiators"));
+            assertTrue(initiators(config).isEmpty());
+            assertTrue(specs(config).isEmpty());
+        }
+
+        @Test
+        @DisplayName("origin is the resolved origin, and is omitted only when unknown")
+        void originIsRendered() {
+            assertEquals("https://example.com", scopeOf(render(properties())).get("origin"));
+
+            // null means "let Chromium infer it from the request URL". Emitting the key
+            // with a null value would fail §8.9's "valid non-opaque origin" check, so it
+            // is dropped entirely instead.
+            Map<String, Object> noOrigin = SessionConfig.build(
+                    null, "/dbsc/refresh", "sid-1",
+                    CookieScope.resolve(true, CookieScope.Scope.HOST, null), false, properties());
+            assertFalse(scopeOf(noOrigin).containsKey("origin"), str(scopeOf(noOrigin)));
+        }
+
+        @Test
+        @DisplayName("scope specifications keep their configured order and type")
+        void scopeSpecificationsPreserveOrder() {
+            DbscProperties properties = properties();
+            properties.setScopeSpecifications(List.of(
+                    spec(DbscProperties.ScopeSpecification.Type.EXCLUDE, "*", "/static"),
+                    spec(DbscProperties.ScopeSpecification.Type.INCLUDE, "localhost", "/api")));
+
+            List<Map<String, Object>> rendered = specs(render(properties));
+
+            assertEquals(2, rendered.size());
+            // §8.2 walks the list in reverse, so the server's order is the whole point:
+            // the second entry is the one that wins. Re-sorting would invert the rules.
+            assertEquals("exclude", rendered.get(0).get("type"));
+            assertEquals("*", rendered.get(0).get("domain"));
+            assertEquals("/static", rendered.get(0).get("path"));
+            assertEquals("include", rendered.get(1).get("type"));
+            assertEquals("localhost", rendered.get(1).get("domain"));
+            assertEquals("/api", rendered.get(1).get("path"));
+        }
+
+        @Test
+        @DisplayName("an omitted domain or path is written out as the spec's default")
+        void scopeSpecificationFillsDefaults() {
+            DbscProperties properties = properties();
+            properties.setScopeSpecifications(List.of(
+                    spec(DbscProperties.ScopeSpecification.Type.EXCLUDE, null, null)));
+
+            Map<String, Object> rendered = specs(render(properties)).get(0);
+
+            // §9.8 makes both keys optional, defaulting to "*" and "/". Filling them in
+            // keeps the emitted JSON self-describing instead of relying on the browser's
+            // defaults for a rule that excluded everything.
+            assertEquals("*", rendered.get("domain"));
+            assertEquals("/", rendered.get("path"));
+        }
+
+        @Test
+        @DisplayName("initiators are trimmed, and blank entries dropped")
+        void initiatorsAreNormalised() {
+            DbscProperties properties = properties();
+            properties.setAllowedRefreshInitiators(
+                    List.of(" example.com ", "", "*.example.com", "  "));
+
+            assertEquals(List.of("example.com", "*.example.com"), initiators(render(properties)));
+        }
+
+        @Test
+        @DisplayName("a null list is normalised to empty rather than thrown on")
+        void nullListsAreTolerated() {
+            DbscProperties properties = properties();
+            properties.setScopeSpecifications(null);
+            properties.setAllowedRefreshInitiators(null);
+
+            assertTrue(specs(render(properties)).isEmpty());
+            assertTrue(initiators(render(properties)).isEmpty());
+        }
+
+        @Test
+        @DisplayName("the config declares neither key on a terminated session")
+        void terminatedKeepsScopeKeys() {
+            Map<String, Object> config = SessionConfig.terminated(
+                    "https://example.com", "/dbsc/refresh", "sid-1",
+                    CookieScope.resolve(true, CookieScope.Scope.HOST, null), properties());
+
+            // continue:false terminates, but the keys must still parse: §8.9 reads the
+            // whole object before it looks at `continue`.
+            assertEquals(Boolean.FALSE, config.get("continue"));
+            assertTrue(config.containsKey("scope"));
+            assertTrue(config.containsKey("allowed_refresh_initiators"));
+        }
+
+        private DbscProperties.ScopeSpecification spec(
+                DbscProperties.ScopeSpecification.Type type, String domain, String path) {
+            DbscProperties.ScopeSpecification spec = new DbscProperties.ScopeSpecification();
+            spec.setType(type);
+            spec.setDomain(domain);
+            spec.setPath(path);
+            return spec;
+        }
+    }
 
     /**
      * The attributes string MUST match the real {@code Set-Cookie} byte-for-byte,
@@ -95,6 +246,37 @@ class WireFormatTest {
                     "attributes must appear verbatim, in order: " + setCookie);
             // Max-Age is a raw Set-Cookie field in SECONDS, not milliseconds.
             assertTrue(setCookie.endsWith("Max-Age=600"), setCookie);
+        }
+
+        /**
+         * {@code Max-Age} MUST NOT travel in {@code credentials[].attributes}. Chromium
+         * parses that string as a cookie attribute list, where {@code Max-Age} is not
+         * permitted, and rejects the registration with "cookie attribute not permitted"
+         * — observed against a real browser. §8.6 matches only Domain, Path, Secure,
+         * HttpOnly and SameSite, so the lifetime is not merely optional there, it is
+         * invalid.
+         */
+        @Test
+        @DisplayName("the advertised attributes carry no Max-Age, which Chromium rejects")
+        void attributesCarryNoMaxAge() {
+            CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.HOST, null);
+
+            assertFalse(scope.attributesString().contains("Max-Age"),
+                    "Max-Age in credentials[].attributes invalidates the registration");
+            // The lifetime is still present on the real header; only the advertised
+            // attribute string omits it.
+            assertTrue(scope.setCookieValue("__Host-auth_cookie", "ticket", 30_000)
+                    .endsWith("Max-Age=30"));
+        }
+
+        @Test
+        @DisplayName("with site scope the attributes end at Domain, with no Max-Age")
+        void siteScopeAttributesCarryNoMaxAge() {
+            CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.SITE, "example.com");
+
+            assertEquals("Path=/; Secure; HttpOnly; SameSite=Lax; Domain=example.com",
+                    scope.attributesString());
+            assertFalse(scope.attributesString().contains("Max-Age"));
         }
 
         @Test

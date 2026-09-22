@@ -4,6 +4,8 @@ import click.yukio.dbsc.protocol.CookieScope;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Configuration for the DBSC server, prefixed {@code dbsc}.
@@ -126,6 +128,107 @@ public class DbscProperties {
      * tuning: set it to the longest gap between refresh attempts that must not fail.
      */
     private Duration rotationGrace = Duration.ofSeconds(60);
+
+    /**
+     * Rules narrowing or widening which URLs the session covers, written into the JSON
+     * config's {@code scope.scope_specification} (spec §9.8).
+     *
+     * <p>Scope is decided by the browser, not by this server: the list only tells the
+     * user agent where to attach the DBSC credential and when to refresh. Each rule has a
+     * {@code type} ({@code include} or {@code exclude}), a {@code domain} pattern, and a
+     * {@code path} prefix; the browser walks the list in <em>reverse</em>, so later rules
+     * win (§8.2). That makes the natural spelling outermost-first: exclude a broad area,
+     * then include the part of it that matters.
+     *
+     * <p>Empty by default, which means the whole origin (or site, when
+     * {@link #cookieScope} is {@code site}) is in scope. The array order in YAML is
+     * preserved as written.
+     */
+    private List<ScopeSpecification> scopeSpecifications = new ArrayList<>();
+
+    /**
+     * Hosts outside the session scope that may still trigger a DBSC refresh, written into
+     * the JSON config's {@code allowed_refresh_initiators} (spec §9.6, §8.3).
+     *
+     * <p>An out-of-scope request can normally trigger a refresh, which is how a
+     * cross-origin fetch to a protected endpoint ends up blocking on the refresh URL and
+     * thereby leaking whether the user is logged in, through timing alone (§3.2). Listing
+     * the embedding or calling hosts here confines that to the ones that need it; every
+     * other initiator gets no refresh, so there is no timing signal to measure.
+     *
+     * <p>Each entry is a host or host pattern: {@code *} matches everything,
+     * {@code *.example.com} matches subdomains of {@code example.com} but not
+     * {@code example.com} itself, and a bare host matches only itself (§8.4). In-scope
+     * requests are allowed regardless, so the list is about out-of-scope callers only.
+     *
+     * <p>Empty by default: no out-of-scope host may refresh.
+     */
+    private List<String> allowedRefreshInitiators = new ArrayList<>();
+
+    /**
+     * A fixed origin written into the JSON config's {@code scope.origin}, overriding
+     * whatever the request (or its forwarded headers) appears to say.
+     *
+     * <p>Leave it unset: the origin is normally derived from the request, which is the
+     * only value that can be right for every deployment. Set it only when that derivation
+     * is known to produce the wrong answer — a proxy that rewrites the host to an internal
+     * name, or a CDN that sets no forwarding header this library reads. Turning on
+     * {@link #trustForwardedHeaders} is the other remedy, and a safer one where it applies,
+     * because it stays correct if the public name changes.
+     *
+     * <p>It must be an absolute origin with no path — {@code https://example.com} or
+     * {@code https://example.com:8443} — or an {@code http} origin for development. The
+     * scheme is used verbatim: unlike the derived path, there is no way to correct it from
+     * the request. A mismatch against the real origin is invisible on the wire: Chromium
+     * discards the session while the server still answers 200, so this is validated at
+     * startup rather than left to fail silently.
+     */
+    private String scopeOrigin;
+
+    /**
+     * One entry of {@code scope.scope_specification} (spec §9.8).
+     *
+     * <p>The {@code domain} and {@code path} fields are optional in the spec: an absent
+     * domain means {@code *} (every host) and an absent path means {@code /} (every path).
+     * Both defaults are filled in when the JSON is rendered, so a rule is never emitted
+     * with a key the browser would have to default itself.
+     */
+    public static class ScopeSpecification {
+
+        /** {@code include} adds the match to the scope, {@code exclude} removes it. */
+        public enum Type {
+            INCLUDE,
+            EXCLUDE
+        }
+
+        private Type type = Type.INCLUDE;
+        private String domain;
+        private String path;
+
+        public Type getType() {
+            return type;
+        }
+
+        public void setType(Type type) {
+            this.type = type;
+        }
+
+        public String getDomain() {
+            return domain;
+        }
+
+        public void setDomain(String domain) {
+            this.domain = domain;
+        }
+
+        public String getPath() {
+            return path;
+        }
+
+        public void setPath(String path) {
+            this.path = path;
+        }
+    }
 
     /**
      * What the guard does with a client that has no DBSC binding.
@@ -332,6 +435,31 @@ public class DbscProperties {
 
     public void setRotationGrace(Duration rotationGrace) {
         this.rotationGrace = rotationGrace;
+    }
+
+    public List<ScopeSpecification> getScopeSpecifications() {
+        return scopeSpecifications;
+    }
+
+    public void setScopeSpecifications(List<ScopeSpecification> scopeSpecifications) {
+        this.scopeSpecifications = scopeSpecifications == null ? new ArrayList<>() : scopeSpecifications;
+    }
+
+    public List<String> getAllowedRefreshInitiators() {
+        return allowedRefreshInitiators;
+    }
+
+    public void setAllowedRefreshInitiators(List<String> allowedRefreshInitiators) {
+        this.allowedRefreshInitiators =
+                allowedRefreshInitiators == null ? new ArrayList<>() : allowedRefreshInitiators;
+    }
+
+    public String getScopeOrigin() {
+        return scopeOrigin;
+    }
+
+    public void setScopeOrigin(String scopeOrigin) {
+        this.scopeOrigin = scopeOrigin;
     }
 
     // ---- Derived values, in milliseconds ----

@@ -200,8 +200,8 @@ public class DbscService {
         response.addHeader("Set-Cookie",
                 cookieScope.deleteChallengeCookieValue(cookieScope.challengeCookieName()));
         return SessionConfig.terminated(
-                OriginResolver.resolve(request, trustForwardedHeaders),
-                properties.getRefreshPath(), cookieScope, properties);
+                OriginResolver.resolve(request, trustForwardedHeaders, properties.getScopeOrigin()),
+                properties.getRefreshPath(), sessionId, cookieScope, properties);
     }
 
     // ------------------------------------------------------------------
@@ -255,7 +255,7 @@ public class DbscService {
         setCookie(response, cookieScope.credentialCookieName(), engine.rotateAfterRefresh(sessionId),
                 properties.bindingCookieTtlMs());
 
-        return sessionConfig(request);
+        return sessionConfig(sessionId, request);
     }
 
     /**
@@ -316,9 +316,9 @@ public class DbscService {
         engine.handleRefresh(sessionId, responseHeader, expectedJti);
 
         // Rotation happens only now, after the signature verified: this returns the
-        // ticket to present, which is always a fresh one. The session id itself does not
-        // move -- session_identifier is the key Chromium stores the session under, so
-        // rotating the value would strand the session.
+        // ticket to present, which is always a fresh one. The ticket has no other role
+        // -- the session was identified by the header above, and nothing here depends
+        // on the ticket the browser was carrying.
         String ticket = engine.rotateAfterRefresh(sessionId);
 
         response.addHeader("Set-Cookie",
@@ -326,33 +326,36 @@ public class DbscService {
         setCookie(response, cookieScope.credentialCookieName(), ticket,
                 properties.bindingCookieTtlMs());
 
-        return sessionConfig(request);
+        return sessionConfig(sessionId, request);
     }
 
     /**
-     * Resolves the session identifier on a native refresh: {@code Sec-Secure-Session-Id}
-     * (or its legacy alias), falling back to the session cookie.
+     * Resolves the session identifier on a native refresh, from the
+     * {@code Sec-Secure-Session-Id} header (or its legacy alias) and from nothing else.
      *
-     * <p>The result is <strong>always</strong> run through the rotation alias table
-     * before it is used. A refresh that arrives on a retired id is the normal case
-     * while rotation is on -- another tab, a retry, a slow proxy -- and acting on the
-     * retired id directly would look up a session record that no longer exists, fail
-     * to recognise the still-valid key, and hand back an id the browser would then
-     * refresh against forever.
+     * <p>The credential cookie is deliberately <strong>not</strong> consulted. Its value
+     * is a ticket that rotates on every refresh, so it names a ticket rather than a
+     * session, and a refresh that fell back to it would be resolving a session by a
+     * value whose whole purpose is to stop being one. The header is what the spec sends
+     * on this route (§9.4, toolkit 02 L149: "The session identifier comes from the
+     * {@code Sec-Secure-Session-Id} header, <strong>not</strong> from a cookie"); a
+     * refresh without it has no session to act on.
      */
     private String resolveRefreshSessionId(HttpServletRequest request) {
         String sessionId = request.getHeader(DbscHeaders.SESSION_ID);
         if (sessionId == null || sessionId.isBlank()) {
-            sessionId = request.getHeader("Sec-Secure-Session-Id");
+            // The legacy alias is accepted inbound and is not a fallback to anything
+            // else: either name carries the session id, or the request is refused.
+            sessionId = request.getHeader(DbscHeaders.LEGACY_SESSION_ID);
         }
-        if (sessionId == null || sessionId.isBlank()) {
-            sessionId = resolveBinderSession(request).orElse(null);
-        }
+        // Spec 09.4 types this as an sf-string, so it may arrive quoted; unquoting is
+        // not optional, or the quotes become part of the id and every lookup misses.
+        sessionId = DbscHeaderCodec.parseStructuredString(sessionId);
         if (sessionId == null || sessionId.isBlank()) {
             throw new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
-                    "refresh requires the session identifier header");
+                    "refresh requires the " + DbscHeaders.SESSION_ID + " header");
         }
-        return sessionId.trim();
+        return sessionId;
     }
 
     /**
@@ -527,11 +530,12 @@ public class DbscService {
     // Internals
     // ------------------------------------------------------------------
 
-    private Map<String, Object> sessionConfig(HttpServletRequest request) {
+    private Map<String, Object> sessionConfig(String sessionId, HttpServletRequest request) {
         boolean includeSite = cookieScope.scope() == CookieScope.Scope.SITE;
         return SessionConfig.build(
-                OriginResolver.resolve(request, trustForwardedHeaders),
+                OriginResolver.resolve(request, trustForwardedHeaders, properties.getScopeOrigin()),
                 properties.getRefreshPath(),
+                sessionId,
                 cookieScope,
                 includeSite,
                 properties);
@@ -542,7 +546,9 @@ public class DbscService {
         if (value == null || value.isBlank()) {
             value = request.getHeader(DbscHeaders.LEGACY_RESPONSE);
         }
-        return value;
+        // Also an sf-string (spec 09.3): a quoted JWS must not keep its quotes, or the
+        // JWS parser sees a malformed token.
+        return DbscHeaderCodec.parseStructuredString(value);
     }
 
     private Optional<String> readCookie(HttpServletRequest request, String name) {

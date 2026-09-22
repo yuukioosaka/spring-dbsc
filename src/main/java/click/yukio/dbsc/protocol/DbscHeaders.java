@@ -25,6 +25,7 @@ public final class DbscHeaders {
     // Legacy inbound aliases, MUST be accepted
     public static final String LEGACY_RESPONSE = "Sec-Session-Response";
     public static final String LEGACY_SKIPPED = "Sec-Session-Skipped";
+    public static final String LEGACY_SESSION_ID = "Sec-Session-Id";
 
     /** Server clock hint. */
     public static final String SERVER_TIME = "X-Server-Time";

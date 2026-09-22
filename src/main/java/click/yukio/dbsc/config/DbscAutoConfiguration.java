@@ -7,6 +7,7 @@ import click.yukio.dbsc.protocol.CookieScope;
 import click.yukio.dbsc.protocol.DbscProtocolEngine;
 import click.yukio.dbsc.ratelimit.InMemoryRateLimiter;
 import click.yukio.dbsc.ratelimit.RateLimiter;
+import click.yukio.dbsc.web.OriginResolver;
 import click.yukio.dbsc.storage.InMemoryStorageAdapter;
 import click.yukio.dbsc.storage.JdbcStorageAdapter;
 import click.yukio.dbsc.storage.RedisStorageAdapter;
@@ -108,6 +109,10 @@ public class DbscAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(CookieScope.class)
     public CookieScope dbscCookieScope(DbscProperties properties) {
+        // The other place where a bad value would otherwise only show up as a browser
+        // silently discarding every session, so it is checked here, at startup, next to
+        // the cookie-scope validation that has the same failure mode.
+        OriginResolver.validateConfigured(properties.getScopeOrigin());
         return CookieScope.resolve(
                 properties.isSecure(),
                 properties.getCookieScope(),

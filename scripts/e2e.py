@@ -231,7 +231,7 @@ def login(opener, jar, user="demo", password="demo", base=None):
     `/dbsc/regist/<token>` Chromium is told to POST to. It is not the DBSC session
     id: the token is a single-use value that names the session for one registration
     POST, and the session id itself is only ever in the response body and in the
-    session cookie (the cookie `session_identifier` names).
+    application's own session state.
 
     The CSRF token is rotated on authentication, so the value scraped from the
     login page is stale by the time the login completes. Callers that need a
@@ -259,8 +259,8 @@ def registration_path(headers):
 def session_id_of(opener, base=None):
     """The DBSC session id, as the application reports it.
 
-    The id is not in any cookie -- by design, since session_identifier is a store key
-    rather than a cookie name -- so the application is the only source for it.
+    The id is not in any cookie -- by design, since session_identifier *is* the id and
+    the id is never a cookie value -- so the application is the only source for it.
     """
     status, _, text = request(opener, "GET", "/app/whoami", base=base)
     if status != 200:
@@ -485,10 +485,11 @@ def main():
     # omits it is distinguishable from a browser that never bound at all.
     bind_cookie = cookie(jar, "__Host-auth_cookie")
     check("__Host-auth_cookie cookie present from bind()", bind_cookie is not None)
-    # session_identifier keeps its spec-default value and is not a cookie, so nothing is
-    # ever set under it. That is the design: the session id lives only server-side, so a
-    # lifted cookie jar holds a rotating ticket and no long-lived id.
-    check("no cookie is set under session_identifier's name",
+    # session_identifier is the id itself (spec 9.6: "the identifier for the newly
+    # created session"), so nothing is ever set under a cookie of that name. That is the
+    # design: the id lives only server-side and in the JSON, so a lifted cookie jar holds
+    # a rotating ticket and no long-lived id.
+    check("no cookie is set under the name session_identifier",
           cookie(jar, "session_identifier") is None)
     check("__Host- cookies are Secure",
           bool(bind_cookie and bind_cookie.secure and ch_cookie and ch_cookie.secure))
@@ -512,11 +513,11 @@ def main():
     check("POST /dbsc/regist/<token> -> 200", status == 200, f"got {status}: {text[:200]}")
     if status == 200:
         cfg = json.loads(text)
-        check("registration advertises the default session_identifier",
-              cfg.get("session_identifier") == "session_identifier",
-              str(cfg)[:200])
+        check("registration advertises the session id as session_identifier",
+              cfg.get("session_identifier") == session_id_of(opener),
+              f"{cfg.get('session_identifier')} != {session_id_of(opener)}")
         check("credential cookie set", cookie(jar, "__Host-auth_cookie") is not None)
-        check("still no cookie under session_identifier's name",
+        check("still no cookie under the name session_identifier",
               cookie(jar, "session_identifier") is None)
         check("challenge cookie cleared after use",
               cookie_value(jar, "__Host-dbsc-challenge") is None)
@@ -557,8 +558,11 @@ def main():
     # First leg: no proof -> 403 with a fresh challenge. 401 would kill the
     # session in Chromium, so 403 is load-bearing.
     status, h1, t1 = request(opener, "POST", "/dbsc/refresh", body=b"",
-                             headers={"Content-Type": "application/json"})
+                             headers={"Content-Type": "application/json",
+                                      "Sec-Secure-Session-Id": session_id_of(opener)})
     check("first leg (no proof) -> 403, never 401", status == 403, f"got {status}: {t1[:200]}")
+    check("the first leg is refused for want of a proof, not a session",
+          "CHALLENGE" not in t1 and "SESSION_NOT_FOUND" not in t1, t1[:200])
     new_ch = cookie_value(jar, "__Host-dbsc-challenge")
     check("first leg issues a fresh challenge cookie", new_ch is not None)
     check("first leg does not return 401", status != 401)
@@ -580,7 +584,8 @@ def main():
         status, _, t3 = request(
             opener, "POST", "/dbsc/refresh", body=b"", headers={
                 "Content-Type": "application/json",
-                "Secure-Session-Response": f"{new_ch}.{native.sign(new_ch)}"})
+                "Sec-Secure-Session-Id": session_id_of(opener),
+                "Secure-Session-Response": refresh_jws(native, new_ch)})
         check("replaying a consumed challenge -> 403", status == 403, f"got {status}")
 
     # ------------------------------------------------------- 6. bad signature
@@ -663,16 +668,16 @@ def main():
 
     check("native registration returns a JSON body (a 200 with no body is opt-out)",
           bool(a_cfg), a_text[:200])
-    check("session_identifier names no cookie the server sets",
-          a_cfg.get("session_identifier") == "session_identifier",
-          f"{a_cfg.get('session_identifier')} != session_identifier")
-    check("no cookie is set under that name",
+    check("session_identifier is the session id the app reports",
+          a_cfg.get("session_identifier") == a_sid,
+          f"{a_cfg.get('session_identifier')} != {a_sid}")
+    check("no cookie named session_identifier is ever set",
           cookie_value(a_jar, "session_identifier") is None)
-    # It is a NAME, so it must not be the id -- and the id, which the app reports, is what
-    # bind() was handed.
-    check("session_identifier is a name, not the session id",
-          a_cfg.get("session_identifier") != a_sid,
-          f"{a_cfg.get('session_identifier')} == {a_sid}")
+    # The id is a store key, not a cookie value: the only cookie that moves is the
+    # rotating credential one, so a lifted jar holds no long-lived id.
+    check("the id travels in no cookie",
+          a_cfg.get("session_identifier") != cookie_value(a_jar, "__Host-auth_cookie"),
+          "the id is the credential cookie value")
     check("the session id is not the servlet session id",
           a_sid != cookie_value(a_jar, "JSESSIONID"),
           f"{a_sid} == {cookie_value(a_jar, 'JSESSIONID')}")
@@ -690,8 +695,8 @@ def main():
         # two cookies with two jobs, and the JSON names them in two different fields.
         check("credential[0].name is the credential cookie",
               cred0.get("name") == "__Host-auth_cookie", str(cred0.get("name")))
-        check("credential[0].name is not the session cookie name",
-              cred0.get("name") != a_cfg.get("session_identifier"),
+        check("credential[0].name is not session_identifier",
+              cred0.get("name") != "session_identifier",
               str(cred0.get("name")))
         # Spec 07: attributes must match the Set-Cookie attributes exactly, spaces
         # after semicolons included, and must NOT carry Max-Age.
@@ -701,6 +706,30 @@ def main():
               declared == "Path=/; Secure; HttpOnly; SameSite=Lax", repr(declared))
         check("attributes carry no Max-Age",
               "Max-Age" not in declared, declared)
+
+    # ------------------------------------------------- scope & initiators
+    # Both keys are instructions to the browser, so what is asserted here is only the
+    # shape the server emits -- order, types, and the presence of the keys at all.
+    scope_map = a_cfg.get("scope") or {}
+    specs = scope_map.get("scope_specification")
+    check("scope.scope_specification is a list", isinstance(specs, list), str(specs))
+    if isinstance(specs, list):
+        # Bigger than one, or the demo's own two rules are not being read at all and
+        # every assertion below is vacuously true.
+        check("the demo's configured scope rules survive into the JSON",
+              len(specs) >= 1, str(specs))
+        for i, rule in enumerate(specs):
+            check(f"scope_specification[{i}].type is include or exclude",
+                  rule.get("type") in ("include", "exclude"), str(rule))
+            check(f"scope_specification[{i}].domain is a string",
+                  isinstance(rule.get("domain"), str), str(rule))
+            check(f"scope_specification[{i}].path is a string",
+                  isinstance(rule.get("path"), str), str(rule))
+    initiators = a_cfg.get("allowed_refresh_initiators")
+    check("allowed_refresh_initiators is a list", isinstance(initiators, list), str(initiators))
+    if isinstance(initiators, list):
+        check("every initiator is a non-empty string",
+              all(isinstance(x, str) and x for x in initiators), str(initiators))
 
     # ------------------------------------------------- B. error ordering
     print("\n-- B. failures are reported in the spec's normative order --")
@@ -1223,11 +1252,12 @@ def rotation_checks():
     successful refresh replaces. A copy of it is therefore worth one refresh window
     rather than the session's lifetime.
 
-    ``session_identifier`` is the key Chromium stores the session under; it is not a
-    cookie, so no cookie of that name exists to be sent. The session id never travels: it
-    exists only server-side and is read back from the application. That is what the id
-    assertions below check -- the id is stable and absent from the
-    cookie jar, which is a stronger statement than 'it does not rotate'.
+    ``session_identifier`` is the key Chromium stores the session under -- the session id
+    itself, per spec 9.6 -- and it is not a cookie, so no cookie of that name exists to be
+    sent. The session id never travels in the cookie jar: it is read back from the
+    application and echoed in the JSON. That is what the id assertions below check -- the
+    id is stable and absent from the cookie jar, which is a stronger statement than 'it
+    does not rotate'.
 
     The three properties that matter are asserted against real HTTP, because none of
     them is visible from the library's own tests alone:
@@ -1261,11 +1291,11 @@ def rotation_checks():
               f"got {reg_status}: {reg_text[:200]}")
         return
 
-    # The session id is never in a cookie: it lives only server-side and the app reports
-    # it. The only cookie the browser holds is the credential one.
+    # The session id is never in a cookie: it lives server-side, the app reports it, and
+    # the JSON advertises it. The only cookie the browser holds is the credential one.
     session_before = session_id_of(opener, base=ROTATION_BASE)
     ticket_before = cookie_value(jar, "__Host-auth_cookie")
-    check("no cookie carries the session id",
+    check("no cookie named session_identifier is ever set",
           cookie_value(jar, "session_identifier") is None)
 
     # One full refresh: leg 1 for the challenge, leg 2 for the proof.
@@ -1290,20 +1320,21 @@ def rotation_checks():
     check("the session id is NOT replaced by a refresh",
           session_after is not None and session_after == session_before,
           f"{session_before} -> {session_after}")
-    check("a refresh still sets no cookie under session_identifier's name",
+    check("a refresh still sets no cookie named session_identifier",
           cookie_value(jar, "session_identifier") is None)
     if status == 200:
         try:
             cfg = json.loads(text)
         except ValueError:
             cfg = {}
-        # session_identifier is a fixed name, never the id.
-        check("session_identifier keeps its default name across a refresh",
-              cfg.get("session_identifier") == "session_identifier",
-              f"{cfg.get('session_identifier')} != session_identifier")
-        check("session_identifier is a name, not the session id",
-              cfg.get("session_identifier") != session_after,
-              f"{cfg.get('session_identifier')} == the id")
+        # session_identifier is the id, unchanged by a refresh: Chromium keys its store by
+        # this value, so rotating it would orphan the registration.
+        check("session_identifier survives a refresh unchanged",
+              cfg.get("session_identifier") == session_after,
+              f"{cfg.get('session_identifier')} != {session_after}")
+        check("the id is still not a cookie value",
+              cfg.get("session_identifier") != ticket_after,
+              "the id is the credential cookie value")
         creds = cfg.get("credentials") or []
         check("credentials[0].name is the credential cookie, not the session cookie",
               bool(creds) and creds[0].get("name") == "__Host-auth_cookie",
@@ -1342,38 +1373,40 @@ def rotation_checks():
     check("a guarded route admits the rotated session", guarded_status == 200,
           f"got {guarded_status}: {guarded_text[:160]}")
 
-    # Outwait the grace and the retired ticket must stop resolving.
-    #
-    # Asserted where the ticket is the only clue to the session, i.e. with no
-    # Sec-Secure-Session-Id header. That is not a workaround for the header: on a real
-    # refresh Chromium sends it, and it names the session outright, so the request is
-    # authorised by the session id and the ticket is never consulted -- which is why a
-    # refresh carrying a retired ticket still succeeds, and rightly so, since the tab
-    # presenting it is the very browser that holds the live one. What the grace bounds
-    # is the window in which a *captured* credential cookie is still worth something,
-    # and the captured value is exactly what an attacker has: no session id header, a
-    # cookie that must resolve on its own.
-    deadline = time.time() + ROTATION_GRACE_S + 2
-    while time.time() < deadline:
-        time.sleep(0.5)
-    status, _, expired_text = request(
+    # The session is named by the header and by nothing else. A refresh that carries a
+    # retired ticket but no Sec-Secure-Session-Id is not a slow tab -- it is an attacker
+    # holding a captured cookie, and it must not be able to name a session at all. The
+    # ticket is never consulted, so the retired one is beside the point: the request fails
+    # for want of the header.
+    ticket_status, _, ticket_text = request(
         opener, "POST", "/dbsc/refresh", body=b"", base=ROTATION_BASE,
-        headers={"Content-Type": "application/json",
-                 "Secure-Session-Response": refresh_jws(key, refresh_jti(
-                     request(opener, "POST", "/dbsc/refresh", body=b"",
-                             base=ROTATION_BASE,
-                             headers={"Content-Type": "application/json"})[1],
-                     jar))},
+        headers={"Content-Type": "application/json"},
         replace_cookies={"__Host-auth_cookie": ticket_before})
-    check("after the grace, the retired ticket no longer names a session",
-          status == 403 and "SESSION_NOT_FOUND" in expired_text,
-          f"got {status}: {expired_text[:160]}")
+    check("a refresh with no Sec-Secure-Session-Id is refused, whatever cookie it carries",
+          ticket_status == 403 and "SESSION_NOT_FOUND" in ticket_text,
+          f"got {ticket_status}: {ticket_text[:160]}")
     check("and it is a 403, never the 401 Chromium treats as fatal",
-          status != 401, f"got {status}")
+          ticket_status != 401, f"got {ticket_status}")
     check("the credential cookie the browser actually holds still works",
           cookie_value(jar, "__Host-auth_cookie") is not None
           and cookie_value(jar, "__Host-auth_cookie") != ticket_before,
           f"{ticket_before} -> {cookie_value(jar, '__Host-auth_cookie')}")
+
+    # The same request with the header names the session outright and succeeds, even on
+    # the retired ticket -- the tab presenting it is the browser that holds the live one.
+    header_status, _, header_text = request(
+        opener, "POST", "/dbsc/refresh", body=b"", base=ROTATION_BASE,
+        headers={"Content-Type": "application/json",
+                 "Sec-Secure-Session-Id": session_before,
+                 "Secure-Session-Response": refresh_jws(key, refresh_jti(
+                     request(opener, "POST", "/dbsc/refresh", body=b"",
+                             base=ROTATION_BASE,
+                             headers={"Content-Type": "application/json",
+                                      "Sec-Secure-Session-Id": session_before})[1],
+                     jar))},
+        replace_cookies={"__Host-auth_cookie": ticket_before})
+    check("the header alone names the session, retired ticket and all",
+          header_status == 200, f"got {header_status}: {header_text[:160]}")
 
 
 if __name__ == "__main__":

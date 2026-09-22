@@ -198,13 +198,15 @@ public final class CookieScope {
 
     /**
      * The attributes string echoed back in the registration response's
-     * {@code credentials[].attributes} field, which Chromium re-reads to know how
-     * to re-issue the binding cookie on refresh.
+     * {@code credentials[].attributes} field, which Chromium compares against the
+     * protected cookie's real attributes.
      *
-     * <p>This MUST match what the server actually sets in {@code Set-Cookie},
-     * byte for byte, or Chromium drops the binding. Segments are joined by
-     * {@code "; "}, the order is fixed, and site scope appends {@code Domain=}
-     * without a leading dot.
+     * <p>It carries exactly the five attributes {@code §8.6} matches on — Domain,
+     * Path, Secure, HttpOnly, SameSite — and no others. {@code Max-Age} in particular
+     * MUST NOT appear here: Chromium parses this string as a cookie attribute list,
+     * where {@code Max-Age} is not permitted, and answers the registration with
+     * "cookie attribute not permitted". Segments are joined by {@code "; "} and site
+     * scope appends {@code Domain=} without a leading dot.
      */
     public String attributesString() {
         List<String> parts = new ArrayList<>(List.of("Path=/", "Secure", "HttpOnly", "SameSite=Lax"));
@@ -215,17 +217,25 @@ public final class CookieScope {
     }
 
     /**
+     * Converts a millisecond lifetime to the seconds {@code Max-Age} takes. A
+     * positive lifetime never rounds down to zero, which would delete the cookie
+     * instead of shortening it.
+     */
+    private static long maxAgeSeconds(long maxAgeMs) {
+        return maxAgeMs <= 0 ? 0 : Math.max(1, maxAgeMs / 1000);
+    }
+
+    /**
      * Renders a full {@code Set-Cookie} value: {@code name=value; <attributes>;
      * Max-Age=<seconds>}.
      *
-     * <p>{@code maxAgeMs} is converted to seconds here — the one place the unit
-     * change happens — and a non-positive value emits {@code Max-Age=0}, the
-     * standard way to delete a cookie.
+     * <p>The attribute prefix is the same {@link #attributesString()} that fills
+     * {@code credentials[].attributes}, minus the {@code Max-Age} that only the real
+     * header may carry.
      */
     public String setCookieValue(String name, String value, long maxAgeMs) {
-        String attributes = attributesString();
-        long seconds = maxAgeMs <= 0 ? 0 : Math.max(1, maxAgeMs / 1000);
-        return name + "=" + value + "; " + attributes + "; Max-Age=" + seconds;
+        return name + "=" + value + "; " + attributesString()
+                + "; Max-Age=" + maxAgeSeconds(maxAgeMs);
     }
 
     /**
@@ -234,8 +244,8 @@ public final class CookieScope {
      * cookie's attributes.
      */
     public String setChallengeCookieValue(String name, String value, long maxAgeMs) {
-        long seconds = maxAgeMs <= 0 ? 0 : Math.max(1, maxAgeMs / 1000);
-        return name + "=" + value + "; " + challengeAttributesString() + "; Max-Age=" + seconds;
+        return name + "=" + value + "; " + challengeAttributesString()
+                + "; Max-Age=" + maxAgeSeconds(maxAgeMs);
     }
 
     /** Renders a {@code Set-Cookie} value that deletes the challenge cookie. */
@@ -243,7 +253,11 @@ public final class CookieScope {
         return name + "=; " + challengeAttributesString() + "; Max-Age=0";
     }
 
-    /** Renders a {@code Set-Cookie} value that deletes the named cookie. */
+    /**
+     * Renders a {@code Set-Cookie} value that deletes the named cookie. The deletion
+     * carries {@code Max-Age=0}, so the attribute list here intentionally omits the
+     * lifetime only the header carries.
+     */
     public String deleteCookieValue(String name) {
         return name + "=; " + attributesString() + "; Max-Age=0";
     }

@@ -30,9 +30,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 /**
  * Credential-ticket rotation on refresh, over the real filter chain.
  *
- * <p>Two values are in play and only one of them moves. The session id — the value
- * behind the cookie {@code session_identifier} names — is fixed for the life of the
- * binding, because Chromium keys its session store by that name and a refresh checks
+ * <p>Two values are in play and only one of them moves. The session id is fixed for the
+ * life of the binding: it is what the JSON config reports as {@code session_identifier},
+ * which is how Chromium keys its session store, and a refresh checks
  * {@code Sec-Secure-Session-Id} against it. The credential cookie named in
  * {@code credentials[]} carries a ticket, and that is what rotates.
  *
@@ -74,21 +74,17 @@ class SessionRotationTest {
         assertTrue(storage.resolveTicket(credential.getValue()) != null,
                 "the new ticket must resolve to a session");
 
-        // The session id, by contrast, is not in the response at all -- not in the body
-        // and not in a cookie. It is a name Chromium keys its store by (spec §7.2) and
-        // §8.9 checks Sec-Secure-Session-Id against it, so moving it would strand the
-        // session; not minting it means a stolen cookie jar holds a rotating ticket and
-        // no long-lived id.
+        // The session id is echoed as session_identifier and is not a cookie: it is the
+        // value Chromium stores the session under and returns in a header, so it must
+        // survive a refresh unchanged rather than being re-minted or moved.
         assertNull(result.getResponse().getCookie(cookieScope.sessionIdentifierName()),
                 "no cookie is set under session_identifier's name, on a refresh or ever");
-        assertFalse(result.getResponse().getContentAsString().contains(login.sessionId()),
-                "the session id must not be echoed into the JSON config");
 
         Map<String, Object> config =
                 click.yukio.dbsc.core.Json.parseObject(result.getResponse().getContentAsString());
-        assertEquals("session_identifier",
+        assertEquals(login.sessionId(),
                 config.get("session_identifier"),
-                "session_identifier keeps its spec-default name across a refresh");
+                "a refresh must echo the session id it was registered under, not a new one");
         assertEquals(cookieScope.credentialCookieName(),
                 ((Map<?, ?>) ((List<?>) config.get("credentials")).get(0)).get("name"),
                 "credentials[].name names the protected cookie, which is what actually moves");
