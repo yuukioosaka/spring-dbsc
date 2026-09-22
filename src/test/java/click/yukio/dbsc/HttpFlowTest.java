@@ -95,7 +95,7 @@ class HttpFlowTest {
         // a cookie: it is a value the browser stores and returns in a header, not a
         // credential a cookie jar could leak.
         assertTrue(cookies.stream().noneMatch(
-                        c -> c.startsWith(cookieScope.sessionIdentifierName() + "=")),
+                        c -> c.startsWith("session_identifier" + "=")),
                 "no cookie is minted under session_identifier: " + cookies);
     }
 
@@ -147,7 +147,7 @@ class HttpFlowTest {
                 "the credential cookie named in the JSON config must actually be set, or "
                         + "§8.6 finds it missing on the very next request: " + cookies);
         assertTrue(cookies.stream().noneMatch(
-                        c -> c.startsWith(cookieScope.sessionIdentifierName() + "=")),
+                        c -> c.startsWith("session_identifier" + "=")),
                 "nothing is set under session_identifier: " + cookies);
         assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.challengeCookieName() + "=;")
                         && c.contains("Max-Age=0")),
@@ -282,7 +282,7 @@ class HttpFlowTest {
         // session_identifier -- that is how Chromium knows which session this is -- but no
         // cookie appears under it: the id is a value, not a stored credential.
         assertTrue(secondLeg.getResponse().getHeaders("Set-Cookie").stream()
-                        .noneMatch(c -> c.startsWith(cookieScope.sessionIdentifierName() + "=")),
+                        .noneMatch(c -> c.startsWith("session_identifier" + "=")),
                 "a refresh must not mint a cookie under session_identifier's name");
         assertEquals(login.sessionId(), config.get("session_identifier"),
                 "a refresh must echo the same session id the session was registered under");

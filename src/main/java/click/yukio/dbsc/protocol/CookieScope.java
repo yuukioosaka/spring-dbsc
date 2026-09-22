@@ -35,14 +35,6 @@ public final class CookieScope {
     /** Used when no credential cookie name is configured. */
     public static final String DEFAULT_CREDENTIAL_COOKIE = "__Host-auth_cookie";
 
-    /**
-     * The default {@code session_identifier}, taken verbatim from the spec's own
-     * config key name: this library keys its session store server-side and never
-     * sets a cookie under it, so a name that looks like a cookie would only
-     * advertise something that does not exist.
-     */
-    public static final String DEFAULT_SESSION_IDENTIFIER = "session_identifier";
-
     /** How widely the binding cookie is shared. */
     public enum Scope {
         /** {@code __Host-} cookies: origin-locked, no {@code Domain}. Strongest. */
@@ -150,21 +142,6 @@ public final class CookieScope {
      */
     public String challengeSameSite() {
         return secure ? "None" : "Lax";
-    }
-
-    /**
-     * The value written into the JSON config's {@code session_identifier}: the literal
-     * string {@code session_identifier} (spec §9.6).
-     *
-     * <p>This is a key into the browser's session store, <strong>not a cookie</strong> this
-     * server reads or writes, which is why it is fixed and never derived from a cookie
-     * name. Chromium keys the session's key and state by this string; the session id
-     * itself is supplied to {@code bind()} and stays server-side, and the only cookie
-     * that travels is the credential one named in {@code credentials[]}, whose value
-     * rotates on every refresh.
-     */
-    public String sessionIdentifierName() {
-        return DEFAULT_SESSION_IDENTIFIER;
     }
 
     /**

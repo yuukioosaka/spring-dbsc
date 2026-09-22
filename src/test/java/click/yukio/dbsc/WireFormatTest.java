@@ -189,7 +189,6 @@ class WireFormatTest {
         void hostScope() {
             CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.HOST, null);
 
-            assertEquals("session_identifier", scope.sessionIdentifierName());
             assertEquals("__Host-dbsc-challenge", scope.challengeCookieName());
             assertEquals("Path=/; Secure; HttpOnly; SameSite=Lax", scope.attributesString());
         }
@@ -199,7 +198,7 @@ class WireFormatTest {
         void siteScope() {
             CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.SITE, "example.com");
 
-            assertEquals("session_identifier", scope.sessionIdentifierName());
+            assertEquals("__Secure-dbsc-challenge", scope.challengeCookieName());
             assertEquals(
                     "Path=/; Secure; HttpOnly; SameSite=Lax; Domain=example.com",
                     scope.attributesString());
@@ -211,11 +210,10 @@ class WireFormatTest {
             CookieScope scope = CookieScope.resolve(
                     true, CookieScope.Scope.HOST, null, "__Host-auth_cookie");
 
-            // The name is a deployer choice: no prefix is added, and
-            // session_identifier keeps its own, fixed default. The two are independent.
+            // The name is a deployer choice: no prefix is added, and it is independent
+            // of the cookie session_identifier refers to -- which is not a cookie at all.
             assertEquals("__Host-auth_cookie", scope.credentialCookieName());
-            assertEquals("session_identifier", scope.sessionIdentifierName());
-            assertNotEquals(scope.sessionIdentifierName(), scope.credentialCookieName());
+            assertNotEquals("__Host-dbsc-challenge", scope.credentialCookieName());
         }
 
         @Test
@@ -231,7 +229,6 @@ class WireFormatTest {
         void insecureDev() {
             CookieScope scope = CookieScope.resolve(false, CookieScope.Scope.HOST, null);
 
-            assertEquals("session_identifier", scope.sessionIdentifierName());
             assertEquals("dbsc-challenge", scope.challengeCookieName());
         }
 

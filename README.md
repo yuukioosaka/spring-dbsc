@@ -31,6 +31,8 @@ and the theft is reported as `session_stolen`.
 | Telemetry events | ✅ 7 event types |
 | Rate limiting | ✅ per-IP, with a separate failure budget |
 | Credential rotation on refresh | ✅ always on; bounds how long a captured credential cookie is worth |
+| Session scope rules | ✅ `scope.scope_specification` — include/exclude by domain and path |
+| Refresh-initiator allow-list | ✅ `allowed_refresh_initiators`, closing the out-of-scope timing side channel |
 | Application-session binding | ✅ the DBSC session id is bound to your own session id (`JSESSIONID`, Spring Session, …), so the guard can tell a client that never bound from one that dropped its DBSC cookies — see [What the guard actually decides](#what-the-guard-actually-decides) |
 
 ## The protection model
@@ -66,14 +68,22 @@ is no intermediate or weaker tier, and a stored value the library does not
 recognise reads as `none` rather than being trusted.
 
 **The credential cookie is worth one refresh window.** The session id never travels in a
-cookie at all: `session_identifier` is not a cookie the library sets — it is only the key
-Chromium stores the session under — so the id exists only server-side and a lifted cookie
-jar contains no long-lived credential. The one cookie that does travel is
-`__Host-auth_cookie`, named in `credentials[]`, and its value is replaced on every
-successful refresh. A copy of it therefore goes stale within one refresh rather than
-staying valid for the session's lifetime. The one tunable is `dbsc.rotation-grace`, the
-window in which a retired credential still resolves so a second tab does not break — and
-that window is itself exposure. See [Credential rotation](#credential-rotation).
+cookie at all: `session_identifier` carries the id itself (spec §9.6) but names no cookie,
+so the id exists only server-side and a lifted cookie jar contains no long-lived
+credential. The one cookie that does travel is `__Host-auth_cookie`, named in
+`credentials[]`, and its value is replaced on every successful refresh. A copy of it
+therefore goes stale within one refresh rather than staying valid for the session's
+lifetime. The one tunable is `dbsc.rotation-grace`, the window in which a retired
+credential still resolves so a second tab does not break — and that window is itself
+exposure. See [Credential rotation](#credential-rotation).
+
+**The session is confined to the hosts and pages you name.** `scope.include_site`,
+`scope.scope_specification` and `allowed_refresh_initiators` are instructions to the
+browser, not checks this server performs: they decide where the credential is attached
+and which out-of-scope callers may trigger a refresh. By default an out-of-scope
+cross-origin fetch to a protected URL blocks on the refresh request, and the delay alone
+reveals whether the user is logged in (spec §3.2) — so the initiator list is a security
+control, not a convenience. See [Session scope](#session-scope).
 
 ### What the library does not do
 
@@ -512,11 +522,11 @@ JSESSIONID=72234F6E…               your session   -> appSessionId
 __Host-auth_cookie=0Jp36T8T…       the credential -> a rotating ticket
 ```
 
-`session_identifier` is a key into Chromium's session store, not the id itself and not a
-cookie. Its default is the literal string `session_identifier` — the spec's own config
-key — so no cookie name is implied: the session id stays server-side, and the only cookie
-that travels is the credential one, named in `credentials[]`, whose value is replaced on
-every refresh. See [Credential rotation](#credential-rotation).
+`session_identifier` is a different thing again: it is the DBSC session id, sent so
+Chromium can key its own session store by it. It names no cookie, so the id stays out of
+the cookie jar entirely, and the only cookie that travels is the credential one — named in
+`credentials[]`, its value replaced on every refresh. See
+[Credential rotation](#credential-rotation).
 
 Mint the DBSC id however you like — a UUID is the obvious choice — and pass your own
 session id alongside it. The id is never handed to the browser, so `sessionFor(request)`
@@ -675,7 +685,7 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `cookie-domain` | — | e.g. `example.com`; required for `site` scope |
 | `registration-path` | `/dbsc/regist` | **prefix** for the registration route, not a full path: the advertised route is `<prefix>/<token>` |
 | `refresh-path` | `/dbsc/refresh` | also the `refresh_url` in the JSON config |
-| `session-identifier-name` | `session_identifier` | the string written as `session_identifier`. The default is the spec's own key name; this is **not a cookie**, so no session id travels in one |
+| `session-identifier-name` | — | **removed.** `session_identifier` carries the session id itself (spec §9.6), so there was no name left to configure. Setting it now has no effect |
 | `credential-cookie-name` | `__Host-auth_cookie` | the protected cookie named in `credentials[].name`, whose value rotates. Used verbatim — a prefix is your choice |
 | `binding-cookie-ttl` | `10m` | lifetime of the credential cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
 | `registration-cookie-ttl` | `24h` | lifetime of the single-use registration token. The token is consumed by a successful registration; this is only the ceiling for one that never completes |
@@ -683,6 +693,9 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `refresh-grace` | `30s` | softens the freshness poll across a refresh |
 | `rotation-grace` | `60s` | how long a retired credential cookie value keeps resolving. Rotation itself is not optional — see [Credential rotation](#credential-rotation) |
 | `session-ttl` | `7d` | default lifetime applied by `bind()` when the caller does not set one |
+| `scope-origin` | *derived from the request* | pins `scope.origin`. Set only when the derived value is wrong — a proxy rewriting the host to an internal name. Validated at startup; a wrong value makes Chromium discard the session while the server still answers 200 |
+| `scope-specifications` | `[]` | rules written into `scope.scope_specification`. See [Session scope](#session-scope) |
+| `allowed-refresh-initiators` | `[]` | hosts outside the scope that may still trigger a refresh. Empty means none — see [Session scope](#session-scope) |
 | `rate-limit.enabled` | `true` | |
 | `rate-limit.capacity` | `30` | per IP, per window |
 | `rate-limit.failure-capacity` | `15` | **failed** attempts per IP, per window — trips long before `capacity` does |
@@ -698,12 +711,21 @@ One cookie is in play, and this is the important part to get right:
 |---|---|---|---|
 | `__Host-auth_cookie` | `credentials[].name` | a credential ticket | **yes** — replaced on every successful refresh |
 
-Per spec §9.6 `session_identifier` is how Chromium keys the session in its own store — a
-key, not a cookie and not a value. The default is the literal string
-`session_identifier` — the spec's own config key name — so it cannot be mistaken for a
-cookie that should be sent: nothing is ever read from or written to it. The session id
-exists only server-side, so there is no long-lived value in the cookie jar to lift, and
-§8.9's `Sec-Secure-Session-Id` check needs no cookie to agree with.
+Per spec §9.6 `session_identifier` is "the identifier for the newly created session" —
+the session id **itself**, not the name of a cookie holding it. Chromium keys its session
+store by this value (§8.1 Identify session) and echoes it back in `Sec-Secure-Session-Id`
+on every refresh (§9.4), so the server resolves the session by exactly this string. It is
+therefore whatever you passed to `bind()`, and it never changes for the life of the
+binding — rotating it would orphan the registration.
+
+The id is still **not a cookie**: nothing is read from or written to a cookie of that
+name, and `credentials[]` names a different cookie entirely. So there is no long-lived
+value in the cookie jar to lift, and the refresh path needs no cookie to agree with.
+
+The `dbsc.session-identifier-name` property is **gone**, not deprecated: it now has no
+reader. It dated from an earlier reading of §9.6 in which this field held a fixed key
+name; that was wrong, and the field is the id. A configuration file that still sets it
+will not fail to start — Spring ignores unknown keys — so remove it yourself.
 
 Every successful refresh mints a new credential ticket and hands it back in the
 `Set-Cookie` of the `credentials[]` cookie. This is not optional: that cookie can be
@@ -751,6 +773,83 @@ forward while the session id stays put.
 key) per retired ticket held for the grace. Rotation happens only after the signature
 verifies, so an unauthenticated request can never retire anything: minting the new value
 first would be a denial-of-service primitive that needs no key at all.
+
+### Session scope
+
+Three keys tell the browser where the session applies and who may make it refresh. All
+three are **advisory**: the user agent enforces them, and this server never consults them
+when handling a request. That means a mistake here does not produce a server-side error —
+it produces a browser that quietly applies the session somewhere you did not intend.
+
+```yaml
+dbsc:
+  cookie-scope: site
+  cookie-domain: example.com
+
+  # Which URLs are in scope: walked in REVERSE, first match wins.
+  scope-specifications:
+    - type: exclude
+      domain: "*.example.com"
+      path: /static
+    - type: include
+      domain: trusted.example.com
+      path: /only_trusted_path
+
+  # Hosts OUTSIDE the scope that may still trigger a refresh.
+  allowed-refresh-initiators:
+    - example.com
+    - "*.example.com"
+```
+
+**`include_site` is set by `cookie-scope`, not by its own key.** `host` (the default)
+means the origin only; `site` means the whole registrable domain. Scope is decided in the
+same place the cookie is, so the credential and the scope can never disagree. Note that
+`include_site: true` takes precedence over every rule in `scope_specification` (§8.2):
+the domain check happens first, so an `exclude` rule cannot narrow a site-scoped session
+back to a single host.
+
+**`scope_specification` rules are applied in reverse.** §8.2 walks the list from last to
+first and stops at the first match, which makes the natural spelling outermost-first: put
+the broad `exclude` first and the narrower `include` after it, as above. Order is
+preserved exactly as written for this reason; re-ordering the array inverts the meaning.
+
+Each rule has three keys, all of which are written out even when you omit them:
+
+| Key | Default when omitted | Meaning |
+|---|---|---|
+| `type` | — (required) | `include` adds the match to the scope, `exclude` removes it |
+| `domain` | `*` | `*` matches every host; `*.example.com` matches subdomains but **not** `example.com` itself; a bare host matches only itself |
+| `path` | `/` | Matches when the URL path is exactly this, starts with it followed by `/`, or — when the pattern ends in `/` — starts with it |
+
+**`allowed_refresh_initiators` closes a timing side channel.** By default an out-of-scope
+request can trigger a refresh, and the refresh is slow: the browser has to reach the
+hardware key before it can continue. A cross-origin page that fetches a protected endpoint
+therefore learns whether the user is logged in from the delay alone, with no error and no
+response body. Listing the embedding or calling hosts here confines that to the ones you
+chose; every other initiator gets no refresh, so there is nothing to time. In-scope
+requests are always allowed (§8.3), so the list concerns out-of-scope callers only.
+
+Both lists default to empty, which means "the whole origin (or site)" and "no out-of-scope
+initiator" respectively. Both are also the spec's own defaults — an empty
+`allowed_refresh_initiators` is what a browser assumes when the key is absent.
+
+**Pinning `scope.origin`.** `scope.origin` is normally derived from the request, which is
+the only value that can be right for every deployment. Set `dbsc.scope-origin` only when
+that derivation is known to be wrong:
+
+```yaml
+dbsc:
+  scope-origin: https://example.com:8443
+```
+
+Prefer `trust-forwarded-headers: true` where that applies: it stays correct if the public
+name changes, whereas a pinned origin has to be updated by hand. The value must be an
+absolute origin with no path (`https://example.com`, not `https://example.com/app`), and
+it is validated at startup — because on the wire a mismatch is invisible. §8.9 requires
+`origin` to be same-site with the destination and terminates the session on a mismatch,
+and it does so **in the browser**: the server still answers 200 and logs nothing, while
+the session silently fails to exist. Failing the context start is the only way that
+mistake is ever visible.
 
 ### Storage
 
@@ -905,12 +1004,10 @@ session?" when a request arrives without DBSC cookies.
 > ```
 >
 > The same release settled the cookie layout on a single cookie. `credentials[].name`
-> names `__Host-auth_cookie`, whose value is a rotating ticket; `session_identifier`
-> keeps its spec-default value `session_identifier`, which names no cookie, so the
-> session id exists only server-side and `Sec-Secure-Session-Id` is the only thing that
-> ever carries it. A browser holding a binding from an older build re-registers on its
-> own. There is nothing to change on the server side: the default is now the string the
-> spec itself uses.
+> names `__Host-auth_cookie`, whose value is a rotating ticket. `session_identifier` is
+> unrelated to it: it carries the DBSC session id itself (spec §9.6), names no cookie, and
+> so keeps the id out of the cookie jar. A browser holding a binding from an older build
+> re-registers on its own; there is nothing to change on the server side.
 
 The file is a plain `CREATE TABLE IF NOT EXISTS` migration: drop it into your
 migration tool's directory, or run its statements however you already run schema
@@ -1013,6 +1110,16 @@ extend this:
   demoted session keeps its key on purpose (so a later failure is still recognisable
   as `session_stolen`), which is why `tierFor()` reads the stored tier rather than
   inferring protection from the key.
+- **`scope_specification` is read in reverse by the browser**, so the array order you
+  write is the precedence — last match wins. Sorting or de-duplicating the list would
+  silently invert it.
+- **Nothing on the server enforces scope.** `scope_specification` and
+  `allowed_refresh_initiators` are instructions to the user agent; the server happily
+  answers a refresh for a URL the browser should never have attached the credential to.
+  Do not treat them as authorization.
+- **A wrong `scope.origin` fails in the browser, not here.** §8.9 terminates the session
+  on a same-site mismatch, so the server answers 200 while Chromium discards it. That is
+  why `dbsc.scope-origin` is validated at startup instead of at first use.
 
 ## License
 

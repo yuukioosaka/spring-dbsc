@@ -23,19 +23,11 @@ dbsc:
   # browser's registration POST is issued from a cross-site navigation context.
   registration-path: /dbsc/regist
   refresh-path: /dbsc/refresh
-  # An override for the string written into the JSON session config as
-  # `session_identifier`.
-  #
-  # LEAVE THIS UNSET. It is not a cookie: per spec 09.6 that key names the slot Chromium
-  # keys its session store by, and nothing is read from or written to a cookie of that
-  # name. The default -- the literal string "session_identifier" -- keeps it that way, so
-  # no session id ever travels in a cookie: the id exists only server-side, and the only
-  # cookie that moves is the rotating credential one.
-  #
-  # Setting a cookie name here (JSESSIONID, SESSION, ...) implies the browser sends that
-  # cookie on refresh; if it does not, every refresh is MISSING_SESSION_ID /
-  # REFRESH_REJECTED, which reads like a protocol bug rather than a configuration one.
-  session-identifier-name:
+  # session_identifier (spec 9.6) is the session id itself, so there is no name to
+  # configure here: the value written into the JSON config is whatever the caller passed
+  # to bind(). It names no cookie -- nothing is read from or written to a cookie of that
+  # name -- so the id exists only server-side and the only cookie that moves is the
+  # rotating credential one below.
   # The cookie named in the JSON config's `credentials[]`, whose value is a ticket
   # reissued on every successful refresh, so a copy of it is worth one refresh
   # window rather than the session's lifetime. Retired values keep resolving for

@@ -77,7 +77,7 @@ class SessionRotationTest {
         // The session id is echoed as session_identifier and is not a cookie: it is the
         // value Chromium stores the session under and returns in a header, so it must
         // survive a refresh unchanged rather than being re-minted or moved.
-        assertNull(result.getResponse().getCookie(cookieScope.sessionIdentifierName()),
+        assertNull(result.getResponse().getCookie("session_identifier"),
                 "no cookie is set under session_identifier's name, on a refresh or ever");
 
         Map<String, Object> config =
