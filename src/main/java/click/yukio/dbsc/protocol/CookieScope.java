@@ -31,10 +31,17 @@ import java.util.List;
 public final class CookieScope {
 
     public static final String CHALLENGE_SUFFIX = "dbsc-challenge";
-    public static final String BINDING_SUFFIX = "dbsc-session";
 
     /** Used when no credential cookie name is configured. */
-    public static final String DEFAULT_CREDENTIAL_COOKIE = "__Host-dbsc-session";
+    public static final String DEFAULT_CREDENTIAL_COOKIE = "__Host-auth_cookie";
+
+    /**
+     * The default {@code session_identifier}, taken verbatim from the spec's own
+     * config key name: this library keys its session store server-side and never
+     * sets a cookie under it, so a name that looks like a cookie would only
+     * advertise something that does not exist.
+     */
+    public static final String DEFAULT_SESSION_IDENTIFIER = "session_identifier";
 
     /** How widely the binding cookie is shared. */
     public enum Scope {
@@ -74,7 +81,7 @@ public final class CookieScope {
      * @param credentialCookieName the cookie named in {@code credentials[]} and
      *         protected by the binding. Used verbatim — a prefix is the deployer's
      *         choice, not something added here. When blank, the default
-     *         {@code __Host-dbsc-session} name is used
+     *         {@link #DEFAULT_CREDENTIAL_COOKIE} is used
      * @throws IllegalArgumentException when site scope is requested without a
      *         domain, when site scope is requested without {@code Secure}, when
      *         the domain carries a leading dot, or when a domain is supplied
@@ -146,17 +153,18 @@ public final class CookieScope {
     }
 
     /**
-     * The value written into the JSON config's {@code session_identifier} by default.
+     * The value written into the JSON config's {@code session_identifier}: the literal
+     * string {@code session_identifier} (spec §9.6).
      *
-     * <p>This is a cookie <em>name</em> (spec §9.6), and it is intentionally the name of
-     * a cookie this server never sets. Chromium keys its session store by this string
-     * and re-issues only a cookie of that name, so an unset name is the safest possible
-     * value: no cookie travels, and the session id — which the name keys — exists only
-     * server-side. The credential cookie named in {@code credentials[]} is what actually
-     * moves, and it rotates on every refresh.
+     * <p>This is a key into the browser's session store, <strong>not a cookie</strong> this
+     * server reads or writes, which is why it is fixed and never derived from a cookie
+     * name. Chromium keys the session's key and state by this string; the session id
+     * itself is supplied to {@code bind()} and stays server-side, and the only cookie
+     * that travels is the credential one named in {@code credentials[]}, whose value
+     * rotates on every refresh.
      */
     public String sessionIdentifierName() {
-        return prefix() + BINDING_SUFFIX;
+        return DEFAULT_SESSION_IDENTIFIER;
     }
 
     /**

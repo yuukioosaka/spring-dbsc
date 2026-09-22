@@ -259,8 +259,8 @@ def registration_path(headers):
 def session_id_of(opener, base=None):
     """The DBSC session id, as the application reports it.
 
-    The id is not in any cookie -- by design, since no cookie is minted under the name
-    session_identifier advertises -- so the application is the only source for it.
+    The id is not in any cookie -- by design, since session_identifier is a store key
+    rather than a cookie name -- so the application is the only source for it.
     """
     status, _, text = request(opener, "GET", "/app/whoami", base=base)
     if status != 200:
@@ -485,11 +485,11 @@ def main():
     # omits it is distinguishable from a browser that never bound at all.
     bind_cookie = cookie(jar, "__Host-auth_cookie")
     check("__Host-auth_cookie cookie present from bind()", bind_cookie is not None)
-    # session_identifier advertises a cookie name the server never sets. That is the
-    # design: the session id lives only server-side, so a lifted cookie jar holds a
-    # rotating ticket and no long-lived id.
-    check("no cookie is set under the name session_identifier advertises",
-          cookie(jar, "__Host-dbsc-session") is None)
+    # session_identifier keeps its spec-default value and is not a cookie, so nothing is
+    # ever set under it. That is the design: the session id lives only server-side, so a
+    # lifted cookie jar holds a rotating ticket and no long-lived id.
+    check("no cookie is set under session_identifier's name",
+          cookie(jar, "session_identifier") is None)
     check("__Host- cookies are Secure",
           bool(bind_cookie and bind_cookie.secure and ch_cookie and ch_cookie.secure))
     check("__Host- cookies are HttpOnly and Path=/",
@@ -512,12 +512,12 @@ def main():
     check("POST /dbsc/regist/<token> -> 200", status == 200, f"got {status}: {text[:200]}")
     if status == 200:
         cfg = json.loads(text)
-        check("registration advertises the session_identifier cookie name",
-              cfg.get("session_identifier") == "__Host-dbsc-session",
+        check("registration advertises the default session_identifier",
+              cfg.get("session_identifier") == "session_identifier",
               str(cfg)[:200])
         check("credential cookie set", cookie(jar, "__Host-auth_cookie") is not None)
         check("still no cookie under session_identifier's name",
-              cookie(jar, "__Host-dbsc-session") is None)
+              cookie(jar, "session_identifier") is None)
         check("challenge cookie cleared after use",
               cookie_value(jar, "__Host-dbsc-challenge") is None)
 
@@ -663,11 +663,11 @@ def main():
 
     check("native registration returns a JSON body (a 200 with no body is opt-out)",
           bool(a_cfg), a_text[:200])
-    check("session_identifier names a cookie the server never sets",
-          a_cfg.get("session_identifier") == "__Host-dbsc-session",
-          f"{a_cfg.get('session_identifier')} != __Host-dbsc-session")
+    check("session_identifier names no cookie the server sets",
+          a_cfg.get("session_identifier") == "session_identifier",
+          f"{a_cfg.get('session_identifier')} != session_identifier")
     check("no cookie is set under that name",
-          cookie_value(a_jar, "__Host-dbsc-session") is None)
+          cookie_value(a_jar, "session_identifier") is None)
     # It is a NAME, so it must not be the id -- and the id, which the app reports, is what
     # bind() was handed.
     check("session_identifier is a name, not the session id",
@@ -1223,10 +1223,10 @@ def rotation_checks():
     successful refresh replaces. A copy of it is therefore worth one refresh window
     rather than the session's lifetime.
 
-    ``session_identifier`` names a cookie this server deliberately never sets. Chromium
-    keys its session store by that name and stores only a cookie of it, so the session
-    id never travels: it exists only server-side and is read back from the application.
-    That is what the id assertions below check -- the id is stable and absent from the
+    ``session_identifier`` is the key Chromium stores the session under; it is not a
+    cookie, so no cookie of that name exists to be sent. The session id never travels: it
+    exists only server-side and is read back from the application. That is what the id
+    assertions below check -- the id is stable and absent from the
     cookie jar, which is a stronger statement than 'it does not rotate'.
 
     The three properties that matter are asserted against real HTTP, because none of
@@ -1266,7 +1266,7 @@ def rotation_checks():
     session_before = session_id_of(opener, base=ROTATION_BASE)
     ticket_before = cookie_value(jar, "__Host-auth_cookie")
     check("no cookie carries the session id",
-          cookie_value(jar, "__Host-dbsc-session") is None)
+          cookie_value(jar, "session_identifier") is None)
 
     # One full refresh: leg 1 for the challenge, leg 2 for the proof.
     _, leg1_headers, _ = request(
@@ -1291,17 +1291,16 @@ def rotation_checks():
           session_after is not None and session_after == session_before,
           f"{session_before} -> {session_after}")
     check("a refresh still sets no cookie under session_identifier's name",
-          cookie_value(jar, "__Host-dbsc-session") is None)
+          cookie_value(jar, "session_identifier") is None)
     if status == 200:
         try:
             cfg = json.loads(text)
         except ValueError:
             cfg = {}
-        # session_identifier names the session cookie, so it never changes -- and it
-        # is a name, never the id.
-        check("session_identifier still advertises the same cookie name",
-              cfg.get("session_identifier") == "__Host-dbsc-session",
-              f"{cfg.get('session_identifier')} != __Host-dbsc-session")
+        # session_identifier is a fixed name, never the id.
+        check("session_identifier keeps its default name across a refresh",
+              cfg.get("session_identifier") == "session_identifier",
+              f"{cfg.get('session_identifier')} != session_identifier")
         check("session_identifier is a name, not the session id",
               cfg.get("session_identifier") != session_after,
               f"{cfg.get('session_identifier')} == the id")

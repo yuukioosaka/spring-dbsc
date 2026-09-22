@@ -86,9 +86,9 @@ class SessionRotationTest {
 
         Map<String, Object> config =
                 click.yukio.dbsc.core.Json.parseObject(result.getResponse().getContentAsString());
-        assertEquals(cookieScope.sessionIdentifierName(),
+        assertEquals("session_identifier",
                 config.get("session_identifier"),
-                "session_identifier names the cookie Chromium should key the session by");
+                "session_identifier keeps its spec-default name across a refresh");
         assertEquals(cookieScope.credentialCookieName(),
                 ((Map<?, ?>) ((List<?>) config.get("credentials")).get(0)).get("name"),
                 "credentials[].name names the protected cookie, which is what actually moves");

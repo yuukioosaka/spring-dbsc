@@ -73,8 +73,10 @@ public final class SessionConfig {
         Map<String, Object> config = new LinkedHashMap<>();
         String identifierName = properties.getSessionIdentifierName();
         if (identifierName == null || identifierName.isBlank()) {
-            // The name must be one this library actually sets a cookie under, or the
-            // browser stores a session it cannot satisfy on refresh. See DbscProperties.
+            // The default is the literal string "session_identifier", the key name from
+            // the spec's own config, not a cookie name: this library sets no session
+            // cookie, so the identifier keys a store that lives server-side only.
+            // See DbscProperties.
             identifierName = scope.sessionIdentifierName();
         }
         config.put("session_identifier", identifierName);

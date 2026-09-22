@@ -66,14 +66,14 @@ is no intermediate or weaker tier, and a stored value the library does not
 recognise reads as `none` rather than being trusted.
 
 **The credential cookie is worth one refresh window.** The session id never travels in a
-cookie at all: `session_identifier` names a cookie this library deliberately never sets,
-so the id exists only server-side and a lifted cookie jar contains no long-lived
-credential. The one cookie that does travel is `__Host-auth_cookie`, named in
-`credentials[]`, and its value is replaced on every successful refresh. A copy of it
-therefore goes stale within one refresh rather than staying valid for the session's
-lifetime. The one tunable is `dbsc.rotation-grace`, the window in which a retired
-credential still resolves so a second tab does not break — and that window is itself
-exposure. See [Credential rotation](#credential-rotation).
+cookie at all: `session_identifier` is not a cookie the library sets — it is only the key
+Chromium stores the session under — so the id exists only server-side and a lifted cookie
+jar contains no long-lived credential. The one cookie that does travel is
+`__Host-auth_cookie`, named in `credentials[]`, and its value is replaced on every
+successful refresh. A copy of it therefore goes stale within one refresh rather than
+staying valid for the session's lifetime. The one tunable is `dbsc.rotation-grace`, the
+window in which a retired credential still resolves so a second tab does not break — and
+that window is itself exposure. See [Credential rotation](#credential-rotation).
 
 ### What the library does not do
 
@@ -510,14 +510,13 @@ cookies. Nothing requires them to match, and nothing derives one from the other:
 ```
 JSESSIONID=72234F6E…               your session   -> appSessionId
 __Host-auth_cookie=0Jp36T8T…       the credential -> a rotating ticket
-__Host-dbsc-session                sessionId      -> advertised, never set
 ```
 
-`session_identifier` carries a cookie *name* (spec §9.6), and Chromium keys its session
-store by that string. This library advertises a name it never sets a cookie under, which
-is the safest value available: the session id stays server-side, and the only cookie that
-travels is the credential one, named in `credentials[]`, whose value is replaced on every
-refresh. See [Credential rotation](#credential-rotation).
+`session_identifier` is a key into Chromium's session store, not the id itself and not a
+cookie. Its default is the literal string `session_identifier` — the spec's own config
+key — so no cookie name is implied: the session id stays server-side, and the only cookie
+that travels is the credential one, named in `credentials[]`, whose value is replaced on
+every refresh. See [Credential rotation](#credential-rotation).
 
 Mint the DBSC id however you like — a UUID is the obvious choice — and pass your own
 session id alongside it. The id is never handed to the browser, so `sessionFor(request)`
@@ -676,7 +675,7 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `cookie-domain` | — | e.g. `example.com`; required for `site` scope |
 | `registration-path` | `/dbsc/regist` | **prefix** for the registration route, not a full path: the advertised route is `<prefix>/<token>` |
 | `refresh-path` | `/dbsc/refresh` | also the `refresh_url` in the JSON config |
-| `session-identifier-name` | unset | override for the cookie name written as `session_identifier`. **Unset is the safe default**: the name is then one this library advertises and never sets a cookie under, so no session id travels in a cookie. See [Naming your own session cookie](#naming-your-own-session-cookie) |
+| `session-identifier-name` | `session_identifier` | the string written as `session_identifier`. The default is the spec's own key name; this is **not a cookie**, so no session id travels in one |
 | `credential-cookie-name` | `__Host-auth_cookie` | the protected cookie named in `credentials[].name`, whose value rotates. Used verbatim — a prefix is your choice |
 | `binding-cookie-ttl` | `10m` | lifetime of the credential cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
 | `registration-cookie-ttl` | `24h` | lifetime of the single-use registration token. The token is consumed by a successful registration; this is only the ceiling for one that never completes |
@@ -698,13 +697,13 @@ One cookie is in play, and this is the important part to get right:
 | Cookie | Its name appears in | Its value | Set by this library? |
 |---|---|---|---|
 | `__Host-auth_cookie` | `credentials[].name` | a credential ticket | **yes** — replaced on every successful refresh |
-| `__Host-dbsc-session` | `session_identifier` | nothing | **no** — advertised, never set |
 
-Per spec §9.6 `session_identifier` holds a cookie **name**, not a value, and Chromium keys
-its session store by that string. This library advertises a name it never sets a cookie
-under, which is the strongest position available: the session id exists only server-side,
-so there is no long-lived value in the cookie jar to lift, and §8.9's
-`Sec-Secure-Session-Id` check needs no cookie to agree with.
+Per spec §9.6 `session_identifier` is how Chromium keys the session in its own store — a
+key, not a cookie and not a value. The default is the literal string
+`session_identifier` — the spec's own config key name — so it cannot be mistaken for a
+cookie that should be sent: nothing is ever read from or written to it. The session id
+exists only server-side, so there is no long-lived value in the cookie jar to lift, and
+§8.9's `Sec-Secure-Session-Id` check needs no cookie to agree with.
 
 Every successful refresh mints a new credential ticket and hands it back in the
 `Set-Cookie` of the `credentials[]` cookie. This is not optional: that cookie can be
@@ -752,40 +751,6 @@ forward while the session id stays put.
 key) per retired ticket held for the grace. Rotation happens only after the signature
 verifies, so an unauthenticated request can never retire anything: minting the new value
 first would be a denial-of-service primitive that needs no key at all.
-
-### Naming your own session cookie
-
-By default `session_identifier` names `__Host-dbsc-session` (or `dbsc-session` when
-`secure: false`), and **this library never sets a cookie under that name**. The name is
-advertised because Chromium keys its session store by it — it stores the session's key
-and state against that string — while the session id itself stays server-side and
-travels in `Sec-Secure-Session-Id` on a refresh. There is therefore no long-lived value
-in the cookie jar to steal, which is the whole point of the default.
-
-The one thing to be careful about: if you point `session_identifier` at a name for which
-the request carries no cookie *and* your application does not supply the id some other
-way, every refresh fails with `MISSING_SESSION_ID` and a `REFRESH_REJECTED` 403, which
-looks like a protocol bug rather than a configuration one.
-
-If you would rather DBSC key sessions on a cookie *your* application already sets, set
-`dbsc.session-identifier-name` to that cookie's name:
-
-```yaml
-dbsc:
-  session-identifier-name: JSESSIONID
-```
-
-Two things then have to line up, and only you can make them:
-
-1. **Pass that cookie's value to `bind()` as `sessionId`.** The value stays put for the
-   life of the binding, so use something your server controls per session, not a value
-   you plan to rotate.
-2. **Do not use `cookie-scope: site`.** A `__Secure-` prefixed cookie cannot protect a
-   cookie of an unrelated name, and the JSON's `credentials[].attributes` must match the
-   real `Set-Cookie` byte for byte.
-
-Either way the credential cookie is this library's own (`credential-cookie-name`), so
-the two jobs stay split: your session cookie is named, our credential cookie rotates.
 
 ### Storage
 
@@ -941,12 +906,11 @@ session?" when a request arrives without DBSC cookies.
 >
 > The same release settled the cookie layout on a single cookie. `credentials[].name`
 > names `__Host-auth_cookie`, whose value is a rotating ticket; `session_identifier`
-> advertises `__Host-dbsc-session` as a name the server deliberately never sets a cookie
-> under, so the session id exists only server-side and `Sec-Secure-Session-Id` is the
-> only thing that ever carries it. A browser holding a binding from an older build
-> re-registers on its own; the server side is what has to change, and only if you set
-> `dbsc.session-identifier-name` explicitly — it is now an override rather than an
-> independent setting, and leaving it unset gives the correct name.
+> keeps its spec-default value `session_identifier`, which names no cookie, so the
+> session id exists only server-side and `Sec-Secure-Session-Id` is the only thing that
+> ever carries it. A browser holding a binding from an older build re-registers on its
+> own. There is nothing to change on the server side: the default is now the string the
+> spec itself uses.
 
 The file is a plain `CREATE TABLE IF NOT EXISTS` migration: drop it into your
 migration tool's directory, or run its statements however you already run schema
@@ -1045,8 +1009,6 @@ extend this:
 - **The `attributes` string in the JSON config must match the real
   `Set-Cookie` bytes**, so the browser's cookie matcher recognises it. It
   deliberately excludes `Max-Age`, which the spec's match set does not include.
-- **A key can only be registered once per session.** A second registration is
-  refused with `SESSION_ALREADY_REGISTERED`; re-binding means starting a new session.
 - **`tier` is what makes a session protected, not the presence of a key.** A
   demoted session keeps its key on purpose (so a later failure is still recognisable
   as `session_stolen`), which is why `tierFor()` reads the stored tier rather than

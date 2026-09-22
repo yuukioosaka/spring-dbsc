@@ -96,7 +96,7 @@ class HttpFlowTest {
         // cookie jar -- the only cookie that moves is the rotating credential.
         assertTrue(cookies.stream().noneMatch(
                         c -> c.startsWith(cookieScope.sessionIdentifierName() + "=")),
-                "no cookie is minted under the name session_identifier advertises: " + cookies);
+                "no cookie is minted under session_identifier: " + cookies);
     }
 
     // ------------------------------------------------------------------
@@ -120,9 +120,9 @@ class HttpFlowTest {
         assertEquals(200, response.getStatus());
 
         Map<String, Object> config = Json.parseObject(response.getContentAsString());
-        // session_identifier is a cookie NAME, not the session id (spec §9.6), and it is
-        // deliberately the name of no cookie this server sets: the id stays server-side.
-        assertEquals(cookieScope.sessionIdentifierName(), config.get("session_identifier"));
+        // session_identifier is a cookie NAME, not the session id (spec §9.6), and its
+        // default names no cookie this server sets: the id stays server-side.
+        assertEquals("session_identifier", config.get("session_identifier"));
         assertNotEquals(login.sessionId(), config.get("session_identifier"),
                 "the id is a value and must not appear here as the name");
         assertEquals("/dbsc/refresh", config.get("refresh_url"));
@@ -144,7 +144,7 @@ class HttpFlowTest {
                         + "§8.6 finds it missing on the very next request: " + cookies);
         assertTrue(cookies.stream().noneMatch(
                         c -> c.startsWith(cookieScope.sessionIdentifierName() + "=")),
-                "nothing is set under the name session_identifier advertises: " + cookies);
+                "nothing is set under session_identifier: " + cookies);
         assertTrue(cookies.stream().anyMatch(c -> c.startsWith(cookieScope.challengeCookieName() + "=;")
                         && c.contains("Max-Age=0")),
                 "the challenge cookie must be cleared: " + cookies);
@@ -281,7 +281,7 @@ class HttpFlowTest {
         assertTrue(secondLeg.getResponse().getHeaders("Set-Cookie").stream()
                         .noneMatch(c -> c.startsWith(cookieScope.sessionIdentifierName() + "=")),
                 "a refresh must not mint a cookie under session_identifier's name");
-        assertEquals(cookieScope.sessionIdentifierName(), config.get("session_identifier"));
+        assertEquals("session_identifier", config.get("session_identifier"));
 
         var credential = secondLeg.getResponse().getCookie(cookieScope.credentialCookieName());
         assertNotNull(credential, "a refresh response MUST set the credential cookie");

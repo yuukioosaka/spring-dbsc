@@ -317,8 +317,8 @@ public class DbscService {
 
         // Rotation happens only now, after the signature verified: this returns the
         // ticket to present, which is always a fresh one. The session id itself does not
-        // move -- session_identifier names a session, and Chromium keys its store by that
-        // name (§7.2), so rotating the value would strand the session.
+        // move -- session_identifier is the key Chromium stores the session under, so
+        // rotating the value would strand the session.
         String ticket = engine.rotateAfterRefresh(sessionId);
 
         response.addHeader("Set-Cookie",
@@ -382,12 +382,12 @@ public class DbscService {
      * replaces and a request already in flight still carries the old one; the table is
      * what makes that value name the same session during the grace.
      *
-     * <p>{@code session_identifier} is deliberately not consulted. It holds a cookie
-     * <em>name</em>, and this server mints no cookie of that name — its value is the
-     * session id, which is carried nowhere in the request at all. The session id being
-     * absent from the cookie jar is the point: it never leaves the server, so there is
-     * no long-lived value to lift, and the only thing a thief can take is a ticket that
-     * stops resolving shortly after the real browser's next refresh.
+     * <p>{@code session_identifier} is deliberately not consulted: it is the browser's
+     * store key, not a cookie, so nothing of that name is ever on the request. The
+     * session id is carried nowhere in the request at all — being absent from the cookie
+     * jar is the point: it never leaves the server, so there is no long-lived value to
+     * lift, and the only thing a thief can take is a ticket that stops resolving shortly
+     * after the real browser's next refresh.
      *
      * <p>A cookie proves nothing: it is attacker-supplied on any unauthenticated
      * request, so this only names a candidate session. The caller's proof check is what

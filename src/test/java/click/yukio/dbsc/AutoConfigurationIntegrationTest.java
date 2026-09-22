@@ -88,8 +88,9 @@ class AutoConfigurationIntegrationTest {
         assertNotNull(response.getCookie(cookieScope.challengeCookieName()),
                 "bind() must set the challenge cookie the registration JWS is validated against");
         assertNull(response.getCookie(cookieScope.sessionIdentifierName()),
-                "bind() must NOT set a cookie under session_identifier's name: the session id "
-                        + "stays server-side, and only the credential cookie moves");
+                "bind() must NOT set a cookie under session_identifier: it is a key into the "
+                        + "browser's session store, not a cookie name, and the session id stays "
+                        + "server-side; only the credential cookie moves");
 
         assertNotNull(response.getCookie(cookieScope.credentialCookieName()),
                 "bind() must set the credential cookie the protocol actually protects");

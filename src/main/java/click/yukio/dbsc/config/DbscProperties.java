@@ -51,28 +51,25 @@ public class DbscProperties {
     private String refreshPath = "/dbsc/refresh";
 
     /**
-     * An <em>override</em> for the cookie name carried in the JSON config's
+     * An <em>override</em> for the string written into the JSON config's
      * {@code session_identifier}.
      *
      * <p>This is a <em>name</em>, not a value: {@code session_identifier} is how
      * Chromium keys the session in its own store (spec §7.2), so it has to be a
-     * stable string. The cookie of that name holds the DBSC session id, which is
-     * whatever the caller passed to {@code bind()} and never changes for the life of
-     * the binding.
+     * stable string. It is <strong>not a cookie</strong>: nothing is read from or
+     * written to a cookie under it. The DBSC session id it keys is whatever the caller
+     * passed to {@code bind()} and never changes for the life of the binding.
      *
-     * <p>Left {@code null} by default, in which case the name is
-     * {@link CookieScope#sessionIdentifierName()} — the name this library advertises and,
-     * by design, never sets a cookie under.
-     * <strong>That is the only safe default.</strong> A name configured here that does
-     * not match a cookie on the request makes every refresh fail with
-     * {@code MISSING_SESSION_ID} and @{@code REFRESH_REJECTED}, because Chromium stores
-     * only the cookie named here and §8.8 requires that request to carry it.
+     * <p>Leave it unset. The default is {@link CookieScope#sessionIdentifierName()} —
+     * the literal string {@code session_identifier}, the spec's own config key name —
+     * and that is the whole point: the key exists in the browser's session store, but
+     * no cookie travels under it, so there is no long-lived value to steal.
      *
-     * <p>Set it only to name a cookie your application sets itself — most usefully its
-     * own session cookie, e.g. {@code JSESSIONID}. In that case
-     * {@code bind()}'s {@code sessionId} argument should be that cookie's value, and
-     * cookie scope must not be {@code site} (a {@code __Secure-} name cannot protect a
-     * cookie of an unrelated name).
+     * <p>There is rarely a reason to set this. A value that looks like a cookie name
+     * (a container's {@code JSESSIONID}, Spring Session's {@code SESSION}) implies the
+     * browser will send that cookie on refresh, and if it does not, every refresh fails
+     * with {@code MISSING_SESSION_ID} and {@code REFRESH_REJECTED} — a configuration
+     * error that presents as a protocol bug.
      */
     private String sessionIdentifierName;
 
