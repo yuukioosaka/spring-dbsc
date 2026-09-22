@@ -6,18 +6,25 @@ import click.yukio.dbsc.core.Session;
 import click.yukio.dbsc.core.StorageAdapter;
 import click.yukio.dbsc.storage.JdbcStorageAdapter;
 import click.yukio.dbsc.storage.RedisStorageAdapter;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Import;
-import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+import org.springframework.data.redis.core.HashOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import redis.embedded.RedisServer;
+import org.springframework.data.redis.core.ValueOperations;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Which store {@code dbsc.storage} actually selects.
@@ -31,31 +38,58 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class StorageSelectionTest {
 
-    private static final int PORT = 16397;
+    /**
+     * A {@code StringRedisTemplate} that keeps hash writes in a map instead of talking
+     * to a server.
+     *
+     * <p>A plain Mockito stub cannot do, because the one test that stores and reads a
+     * session back needs {@code entries()} to return what {@code putAll()} was given.
+     * Four lines of in-memory state replace a test-scoped Redis distribution.
+     *
+     * <p>What this deliberately does not reproduce: real expiry, and the Lua script's
+     * atomicity. Neither is what this class is about -- it asserts which adapter the
+     * property selects, and the {@code entries()} round trip is only there to show the
+     * selected adapter is actually reachable.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static StringRedisTemplate inMemoryRedis() {
+        StringRedisTemplate redis = mock(StringRedisTemplate.class);
+        Map<String, Map<Object, Object>> hashes = new ConcurrentHashMap<>();
+        Map<String, String> values = new ConcurrentHashMap<>();
 
-    private static RedisServer server;
-    private static LettuceConnectionFactory connectionFactory;
+        HashOperations hashOps = mock(HashOperations.class);
+        when(redis.opsForHash()).thenReturn(hashOps);
+        when(hashOps.entries(anyString()))
+                .thenAnswer(invocation -> new LinkedHashMap<>(hashes.getOrDefault(
+                        invocation.getArgument(0), Map.of())));
+        doAnswer(invocation -> {
+            hashes.put(invocation.getArgument(0),
+                    new ConcurrentHashMap<>(invocation.getArgument(1)));
+            return null;
+        }).when(hashOps).putAll(anyString(), any(Map.class));
+        doAnswer(invocation -> {
+            hashes.computeIfAbsent(invocation.getArgument(0), k -> new ConcurrentHashMap<>())
+                    .put(invocation.getArgument(1), invocation.getArgument(2));
+            return null;
+        }).when(hashOps).put(anyString(), any(), any());
 
-    @BeforeAll
-    static void startServer() throws Exception {
-        server = RedisServer.newRedisServer().port(PORT).build();
-        server.start();
-        connectionFactory = new LettuceConnectionFactory("localhost", PORT);
-        connectionFactory.afterPropertiesSet();
-    }
+        ValueOperations valueOps = mock(ValueOperations.class);
+        when(redis.opsForValue()).thenReturn(valueOps);
+        when(valueOps.get(anyString())).thenAnswer(invocation -> values.get(invocation.getArgument(0)));
+        doAnswer(invocation -> {
+            values.put(invocation.getArgument(0), invocation.getArgument(1));
+            return null;
+        }).when(valueOps).set(anyString(), anyString(), any(java.time.Duration.class));
 
-    @AfterAll
-    static void stopServer() throws Exception {
-        connectionFactory.destroy();
-        server.stop();
+        return redis;
     }
 
     /** A Redis client, the way a host app on starter-data-redis would have one. */
     @Configuration(proxyBeanMethods = false)
     static class RedisClientConfiguration {
-        @org.springframework.context.annotation.Bean
+        @Bean
         StringRedisTemplate stringRedisTemplate() {
-            return new StringRedisTemplate(connectionFactory);
+            return inMemoryRedis();
         }
     }
 

@@ -933,8 +933,15 @@ return 1
 Lua runs to completion without interleaving, so the check and the write are one step and
 exactly one concurrent caller can observe `1`. A read-then-write would be a replay
 vulnerability: an attacker could race a captured proof against the legitimate client and
-have both accepted. `RedisStorageAdapterTest` runs 16 threads against a real server
-rather than a mock, since a stub would pass against the unsafe implementation too.
+have both accepted.
+
+**That atomicity is not covered by the test suite, and cannot be.** `RedisStorageAdapterTest`
+runs against a mocked `StringRedisTemplate`, and a stub is happy to accept three
+concurrent `consumeChallenge` calls that a real server would resolve to one — it would pass
+just as well against the read-then-write implementation the script exists to avoid. The
+test pins the surrounding work instead: key layout, field encoding, TTLs, and the direction
+of the script's `1`/`0` reply. The concurrency guarantee rests on the script above being
+correct, which is why it is quoted here in full rather than described.
 
 #### Schema
 

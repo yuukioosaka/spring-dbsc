@@ -165,19 +165,6 @@
       <scope>test</scope>
     </dependency>
 
-    <!--
-      Test-only: ships a redis-server binary (Windows/Linux/macOS) so
-      RedisStorageAdapterTest can drive a real server instead of a mock. The
-      adapter's whole correctness argument is that one Lua script runs atomically
-      server-side; a Mockito stub cannot test that, and would happily pass against
-      the read-then-write implementation the script exists to avoid.
-    -->
-    <dependency>
-      <groupId>com.github.codemonstur</groupId>
-      <artifactId>embedded-redis</artifactId>
-      <version>1.4.3</version>
-      <scope>test</scope>
-    </dependency>
   </dependencies>
 
   <build>
