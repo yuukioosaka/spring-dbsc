@@ -11,8 +11,11 @@
 
 dbsc:
   secure: true
-  # jdbc when the host has a DataSource and the state must survive a restart;
-  # memory otherwise. An in-memory store breaks live sessions across a restart.
+  # jdbc (default) when the host has a DataSource and the state must survive a restart;
+  # redis for a host that already runs a Redis/Valkey-compatible server and has no
+  # DataSource — it needs spring.data.redis.* configured and the optional
+  # spring-data-redis dependency; memory for tests and local dev only, where every
+  # restart breaks live sessions.
   storage: jdbc
   # The registration route is a prefix, not one fixed path: the token that names
   # the session is appended to it, giving /dbsc/regist/<token>. The token is in

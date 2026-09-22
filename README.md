@@ -25,7 +25,7 @@ and the theft is reported as `session_stolen`.
 |---|---|
 | Native protocol | ✅ registration, refresh, well-known document |
 | Hardware-backed key binding (TPM / Secure Enclave) | ✅ `ES256` + `RS256` |
-| Atomic challenge consumption | ✅ in-memory + JDBC |
+| Atomic challenge consumption | ✅ in-memory + JDBC + Redis |
 | Tier model + demotion-on-failure | ✅ `dbsc` / `none` |
 | Route guard | ✅ opt-in per route; refuses anything not currently `dbsc`, and a bound session that omits its DBSC cookies |
 | Telemetry events | ✅ 6 event types |
@@ -469,8 +469,8 @@ bean, so defining your own replaces the default. The ones most worth replacing:
 
 ```java
 @Bean
-StorageAdapter dbscStorage(MyRedisClient redis) {
-    return new RedisStorageAdapter(redis);   // must make consumeChallenge atomic
+StorageAdapter dbscStorage(StringRedisTemplate redis) {
+    return new RedisStorageAdapter(redis);   // consumeChallenge is atomic via Lua
 }
 ```
 
@@ -636,25 +636,92 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `rate-limit.capacity` | `30` | per IP, per window |
 | `rate-limit.failure-capacity` | `15` | **failed** attempts per IP, per window — trips long before `capacity` does |
 | `rate-limit.window` | `1m` | |
-| `storage` | `jdbc` when a `DataSource` is present | `memory` for tests and local dev only |
+| `storage` | `jdbc` when a `DataSource` is present | `memory` for tests and local dev only; `redis` for a host already running Redis/Valkey with no `DataSource` |
 | `trust-forwarded-headers` | `false` | believe `X-Forwarded-For` / `X-Forwarded-Proto`. Leave off unless a reverse proxy is known to overwrite them — they drive the IP used for rate limiting |
 
 ### Storage
 
-With a `DataSource` on the classpath, sessions, keys and challenges all live in the
-database (`dbsc.storage: jdbc`).
+Three stores, chosen by `dbsc.storage`. The property decides, never the classpath: an
+application that happens to have both a `DataSource` and a Redis client is never in
+doubt about which one DBSC uses.
 
-For tests and local dev, `dbsc.storage: memory` swaps in a heap-backed store.
-**Not for production**: every restart breaks live sessions, because the browser
-still holds a cookie for a key the server no longer remembers.
+| Value | Store | Use when |
+|---|---|---|
+| `jdbc` | `JdbcStorageAdapter`, on your `DataSource` | Default. Your state already lives in a database |
+| `redis` | `RedisStorageAdapter`, on `StringRedisTemplate` | You already run Redis, Valkey, KeyDB, Dragonfly or ElastiCache and have no `DataSource` |
+| `memory` | `InMemoryStorageAdapter` | Tests and local dev. **Not for production** — every restart breaks live sessions, because the browser still holds a cookie for a key the server no longer remembers |
 
 ```yaml
 dbsc:
-  storage: jdbc          # or: memory
+  storage: jdbc          # or: redis, memory
   secure: true
   cookie-scope: site
   cookie-domain: example.com
 ```
+
+With a `DataSource` on the classpath, sessions, keys and challenges all live in the
+database (`dbsc.storage: jdbc`).
+
+Every store has to satisfy the same two hard requirements, which are worth restating
+because both are easy to get wrong in a way that only shows up as a security bug:
+
+- `consumeChallenge` and `consumeRegistrationToken` must be **atomic**. Two concurrent
+  refresh attempts on one challenge MUST yield exactly one `true`; a read followed by a
+  separate write lets an attacker race a captured proof against the legitimate client
+  and have both accepted.
+- `getSessionByAppSessionId` must honour **one binding per application session id**.
+  The guard relies on it to tell a browser that never registered from one that
+  registered and then dropped its cookies.
+
+#### Redis (and Valkey)
+
+The adapter talks to anything speaking RESP, so Valkey needs no separate adapter — the
+protocol is the same, and so are the commands it uses.
+
+**Why it exists.** Sessions, device keys, challenges and registration tokens are all
+small values with an expiry, which is what a Redis-compatible server is good at. If you
+already run one and have no database, this is the durable store that does not make you
+add one. The property is what decides, never the classpath: an app with both a
+`DataSource` and a Redis client is never in doubt about which DBSC uses.
+
+**The dependency is optional.** `spring-data-redis` and `lettuce-core` are declared
+`<optional>`, so a host that stores DBSC state in its database does not inherit a Redis
+client. A host that sets `dbsc.storage: redis` needs both on the classpath *and*
+`spring.data.redis.*` configured; without a `StringRedisTemplate` the context fails at
+startup with a message naming the property, rather than at class-load time somewhere
+unrelated.
+
+**Keys are not namespaced by tenant.** All keys are prefixed `dbsc:`, so two
+applications sharing one server (or one database index) would share sessions. Give each
+its own server or its own database index. The key layout is:
+
+| Key | Type | TTL |
+|---|---|---|
+| `dbsc:session:<id>` | hash | the session's own retention deadline |
+| `dbsc:app-session:<appSessionId>` | string | the session's own retention deadline |
+| `dbsc:device-key:<sessionId>` | hash | the session's deadline, or 24h when orphaned |
+| `dbsc:challenge:<jti>` | hash | the challenge's expiry **+ 1h** |
+| `dbsc:registration-token:<token>` | hash | the token's expiry **+ 1h** |
+
+The `+ 1h` on challenges and registration tokens is deliberate: the record has to outlive
+its stated expiry, or a client presenting a JTI that lapsed a moment ago would get
+`CHALLENGE_NOT_FOUND` where the protocol says `CHALLENGE_EXPIRED`. After that hour the
+two answers are equivalent and the key is reclaimed.
+
+Every consume is one Lua script, evaluated server-side:
+
+```lua
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+if redis.call('HGET', KEYS[1], 'consumed') == '1' then return 0 end
+redis.call('HSET', KEYS[1], 'consumed', '1')
+return 1
+```
+
+Lua runs to completion without interleaving, so the check and the write are one step and
+exactly one concurrent caller can observe `1`. A read-then-write would be a replay
+vulnerability: an attacker could race a captured proof against the legitimate client and
+have both accepted. `RedisStorageAdapterTest` runs 16 threads against a real server
+rather than a mock, since a stub would pass against the unsafe implementation too.
 
 #### Schema
 

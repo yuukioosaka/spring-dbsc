@@ -9,11 +9,13 @@ import click.yukio.dbsc.ratelimit.InMemoryRateLimiter;
 import click.yukio.dbsc.ratelimit.RateLimiter;
 import click.yukio.dbsc.storage.InMemoryStorageAdapter;
 import click.yukio.dbsc.storage.JdbcStorageAdapter;
+import click.yukio.dbsc.storage.RedisStorageAdapter;
 import click.yukio.dbsc.telemetry.TelemetryPublisher;
 import click.yukio.dbsc.web.DbscFilterConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -21,6 +23,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import javax.sql.DataSource;
 import java.time.Clock;
@@ -51,9 +54,14 @@ public class DbscAutoConfiguration {
      * in-memory store breaks live sessions, because the browser still holds a
      * binding cookie, refresh fails with {@code KEY_NOT_FOUND}, and the
      * browser loops registration.
+     *
+     * <p>Only declared when {@code dbsc.storage} is {@code jdbc} or unset. An explicit
+     * {@code redis} or {@code memory} must not find a JDBC candidate waiting to satisfy
+     * {@code StorageAdapter}, or the property would be silently ignored.
      */
     @Bean
     @ConditionalOnMissingBean(StorageAdapter.class)
+    @ConditionalOnProperty(prefix = "dbsc", name = "storage", havingValue = "jdbc", matchIfMissing = true)
     public StorageAdapter dbscStorageAdapter(DataSource dataSource) {
         JdbcStorageAdapter adapter = new JdbcStorageAdapter(dataSource);
         adapter.initialize();
@@ -145,6 +153,38 @@ public class DbscAutoConfiguration {
             log.warn("DBSC storage: in-memory — keys are lost on restart. "
                     + "Live sessions will break. Development only.");
             return new InMemoryStorageAdapter();
+        }
+    }
+
+    /**
+     * Durable storage on Redis, or on any RESP-compatible server — Valkey, KeyDB,
+     * Dragonfly, ElastiCache.
+     *
+     * <p>Not declared unless {@code dbsc.storage: redis} is set. Redis is not a
+     * {@code DataSource}, so an app that happens to have both is not in doubt about
+     * which one DBSC uses: the property decides, never the classpath.
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(prefix = "dbsc", name = "storage", havingValue = "redis")
+    static class RedisStorageConfiguration {
+
+        /**
+         * {@code ObjectProvider} rather than a required parameter: a missing
+         * {@link StringRedisTemplate} is a configuration mistake that deserves a
+         * message naming the property, not NoSuchBeanDefinitionException.
+         */
+        @Bean
+        @ConditionalOnMissingBean(StorageAdapter.class)
+        public StorageAdapter redisStorageAdapter(ObjectProvider<StringRedisTemplate> redis) {
+            StringRedisTemplate template = redis.getIfAvailable();
+            if (template == null) {
+                throw new IllegalStateException(
+                        "dbsc.storage: redis needs a StringRedisTemplate. Add "
+                        + "spring-boot-starter-data-redis and set spring.data.redis.host/port, "
+                        + "or provide your own StringRedisTemplate bean.");
+            }
+            log.info("DBSC storage: Redis (durable)");
+            return new RedisStorageAdapter(template);
         }
     }
 }

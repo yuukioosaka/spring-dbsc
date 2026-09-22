@@ -184,6 +184,48 @@ server still fails against the same browser profile. To start clean:
 3. restart the browser (the state can live in-process), and delete
    `data/demo.mv.db` so the server forgets the old session too
 
+## Redis variant
+
+A demo instance that stores DBSC state in Redis instead of H2, which is what the
+`redis-demo` profile is for. It needs a Redis-compatible server on `localhost:6379`
+(Redis or Valkey — the protocol is the same, and no separate adapter exists for
+Valkey because none is needed):
+
+```sh
+mvn -Pdemo,redis-demo -Dmaven.repo.local=.m2repo spring-boot:run
+```
+
+The protocol behaves identically; the store does not. The property that selects it is
+`dbsc.storage: redis`, and the startup log says which one won:
+
+```
+INFO  c.y.dbsc.config.DbscAutoConfiguration : DBSC storage: Redis (durable)
+```
+
+**The interesting test is a restart, not a registration.** Any store can record a
+binding; the question is whether it is still there once the process that wrote it is
+gone, because a browser keeps its `__Host-dbsc-session` cookie either way. That is the
+whole reason `dbsc.storage` exists — with the in-memory store a restart leaves the
+browser holding a cookie for a key the server no longer has, and every refresh is
+`KEY_NOT_FOUND`.
+
+`scripts/redis_binding.py` drives exactly that. It registers, captures the binding
+cookie and the *private* key, and then a restart later replays a real refresh with
+that same key:
+
+```sh
+python3 scripts/redis_binding.py capture > /tmp/binding.json   # before the restart
+# restart the demo
+python3 scripts/redis_binding.py verify /tmp/binding.json      # after
+```
+
+A refresh is the right probe because it is the operation that needs the stored key: it
+verifies a JWS against the JWK the server kept. Expect `RESULT: the pre-restart binding
+still refreshes (durable)`.
+
+The Rust demo in `dbsc-toolkit` serves the same purpose; both are worth keeping, since a
+`StorageAdapter` is only as portable as the two very different backends it already has.
+
 ## Automated end-to-end test
 
 The browser flow above is the manual check. For a repeatable one, run the suite in

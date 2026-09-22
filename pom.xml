@@ -107,6 +107,25 @@
       <scope>runtime</scope>
     </dependency>
 
+    <!--
+      Redis storage is OPTIONAL: the adapter and its two classes are the only thing
+      that needs these, and a host that stores DBSC state in its database should not
+      inherit a Redis client. Optional dependencies are compile-visible here and are
+      not pulled in transitively by consumers, which is exactly the shape wanted:
+      dbsc.storage: redis fails at startup with a message naming the property rather
+      than at class-load time somewhere unrelated.
+    -->
+    <dependency>
+      <groupId>org.springframework.data</groupId>
+      <artifactId>spring-data-redis</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>io.lettuce</groupId>
+      <artifactId>lettuce-core</artifactId>
+      <optional>true</optional>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-configuration-processor</artifactId>
@@ -143,6 +162,20 @@
     <dependency>
       <groupId>org.springframework.security</groupId>
       <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      Test-only: ships a redis-server binary (Windows/Linux/macOS) so
+      RedisStorageAdapterTest can drive a real server instead of a mock. The
+      adapter's whole correctness argument is that one Lua script runs atomically
+      server-side; a Mockito stub cannot test that, and would happily pass against
+      the read-then-write implementation the script exists to avoid.
+    -->
+    <dependency>
+      <groupId>com.github.codemonstur</groupId>
+      <artifactId>embedded-redis</artifactId>
+      <version>1.4.3</version>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -253,6 +286,28 @@
       <properties>
         <dbsc.demo.profiles>,deny-e2e</dbsc.demo.profiles>
       </properties>
+    </profile>
+
+    <!--
+      The demo on Redis instead of H2, so the store can be exercised end to end
+      against a real server. Needs one on localhost:6379.
+
+        mvn -Pdemo,redis-demo -Dmaven.repo.local=.m2repo spring-boot:run
+
+      See src/demo/resources/application-redis-demo.yaml. This profile supplies the
+      Redis client the library only declares as optional.
+    -->
+    <profile>
+      <id>redis-demo</id>
+      <properties>
+        <dbsc.demo.profiles>,redis-demo</dbsc.demo.profiles>
+      </properties>
+      <dependencies>
+        <dependency>
+          <groupId>org.springframework.boot</groupId>
+          <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+      </dependencies>
     </profile>
 
     <!--

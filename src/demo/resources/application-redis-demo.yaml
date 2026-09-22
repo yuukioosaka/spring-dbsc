@@ -1,0 +1,22 @@
+# A demo instance storing DBSC state in Redis instead of H2.
+#
+# The point is not that the protocol behaves differently -- it must not -- but that
+# the store does: kill and restart this instance and live sessions survive, because
+# the device keys are in Redis rather than in a heap. That is the property the
+# in-memory store lacks and the reason `dbsc.storage` exists.
+#
+# Needs a server on localhost:6379 (Redis or Valkey; the protocol is the same).
+# Boot's own spring-boot-starter-data-redis is not on this classpath -- the
+# dependency is optional -- so the demo turns it on with the redis-demo profile:
+#
+#   mvn -Pdemo,redis-demo -Dmaven.repo.local=.m2repo spring-boot:run
+#   redis-cli keys 'dbsc:*'
+
+dbsc:
+  storage: redis
+
+spring:
+  data:
+    redis:
+      host: localhost
+      port: 6379
