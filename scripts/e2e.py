@@ -765,6 +765,12 @@ def main():
     check("no response header (and no proof at all) -> 403 MISSING_RESPONSE_HEADER",
           status == 403 and "MISSING_RESPONSE_HEADER" in text, f"{status} {text[:160]}")
 
+    # The registration path is single-use, and it is consumed by any POST that
+    # reaches the protocol engine -- including one rejected as MALFORMED_JWS, since
+    # the token is spent before the proof is parsed. Each attempt below therefore
+    # needs its own token, or the second one is refused as REGISTRATION_TOKEN_CONSUMED
+    # and never reaches the rule under test.
+
     # typ is checked before jwk presence, so a JWS that is wrong in both ways
     # still reports the earlier rule.
     b_key = Key()
@@ -772,13 +778,13 @@ def main():
     payload = b64u(json.dumps({"jti": "x"}, separators=(",", ":")).encode())
     wrong_typ = f"{head}.{payload}.{b_key.sign(f'{head}.{payload}')}"
     status, _, text = request(
-        b_opener, "POST", b_reg, body=b"",
+        b_opener, "POST", rebind(b_opener) or b_reg, body=b"",
         headers={"Secure-Session-Response": wrong_typ, "Content-Type": "application/json"})
     check("typ != dbsc+jwt -> MALFORMED_JWS (checked before jwk)",
           "MALFORMED_JWS" in text, f"{status} {text[:160]}")
 
     status, _, text = request(
-        b_opener, "POST", b_reg, body=b"",
+        b_opener, "POST", rebind(b_opener) or b_reg, body=b"",
         headers={"Secure-Session-Response": b_key.jws({"jti": "x"}, include_jwk=False),
                  "Content-Type": "application/json"})
     check("registration JWS without a jwk header -> MALFORMED_JWS",
@@ -840,7 +846,7 @@ def main():
     # crash or a silently accepted proof.
     print("\n-- D. a proof that is not a JWS is rejected as MALFORMED_JWS --")
     status, _, text = request(
-        b_opener, "POST", b_reg, body=b"", headers={
+        b_opener, "POST", rebind(b_opener) or b_reg, body=b"", headers={
             "Secure-Session-Response": b64u(b"x") + "." + b64u(b"y"),
             "Content-Type": "application/json"})
     check("a two-segment bound-style signature on the native route -> MALFORMED_JWS",
@@ -1054,8 +1060,13 @@ def main():
     # stolen or replayed challenge hits. The signature is made by the *right* key for
     # the presenting session, so the session binding is the only thing rejecting it.
     q1, q1_jar = new_client()
-    _, _, _, _ = login(q1, q1_jar)
+    _, q1_h, q1_reg, _ = login(q1, q1_jar)
     q1_sid = session_id_of(q1)
+    # q1 needs a key of its own too. The refresh leg refuses a session with no key
+    # before it ever issues a challenge, so an unregistered q1 has no challenge to
+    # present and the check would prove nothing about session binding.
+    q1_key = Key()
+    native_register_manual(q1, registration_jti(q1_h), q1_key, reg_path=q1_reg)
 
     q2, q2_jar = new_client()
     _, q2_h, q2_reg, _ = login(q2, q2_jar)
@@ -1075,6 +1086,16 @@ def main():
                           headers={"Content-Type": "application/json",
                                    "Sec-Secure-Session-Id": q1_sid})
     q1_live = refresh_jti(q1_h2)
+    # The challenge must still be live when q2 presents it. At the production TTL it
+    # always is; at the 2-second test TTL the two requests can straddle the expiry,
+    # and the mismatch then surfaces as CHALLENGE_EXPIRED — the same refusal, but for
+    # a reason that says nothing about session binding. Re-arm and re-read in a tight
+    # pair so the freshness is the only thing this check depends on.
+    if not q1_live or q1_h2 is None:
+        _, q1_h2, _ = request(q1, "POST", "/dbsc/refresh", body=b"",
+                              headers={"Content-Type": "application/json",
+                                       "Sec-Secure-Session-Id": q1_sid})
+        q1_live = refresh_jti(q1_h2)
     check("q1 holds a live challenge to present from the other session",
           q1_live is not None)
 

@@ -29,6 +29,10 @@ set -e
 cd "$(dirname "$0")/.."
 
 MVN="mvn -B --no-transfer-progress -Dmaven.repo.local=.m2repo"
+# The demo profile adds src/demo to the build, so the profile has to be on the
+# compile below as well as on the launches -- it is what puts DemoApplication on
+# the classpath.
+MVN="$MVN -Pdemo"
 TTL="-Ddbsc.challenge-ttl=2s"
 # The low-budget instance's rate-limit window. Small on purpose: the limiter holds
 # its counters for a whole window against a key derived from the client IP, so a
@@ -37,6 +41,18 @@ TTL="-Ddbsc.challenge-ttl=2s"
 RATE_WINDOW="-Ddbsc.rate-limit.window=90s"
 
 rm -f /tmp/demo.log /tmp/demo-ratelimit.log /tmp/demo-deny.log /tmp/demo-rotation.log
+
+# Compile once, before launching anything. All four instances share one
+# target/classes, and spring-boot:run compiles as part of its lifecycle, so four
+# simultaneous launches race each other: the loser of that race starts against a
+# half-written directory and dies with "Could not find or load main class
+# click.yukio.dbsc.demo.DemoApplication". Compiling up front leaves every launch
+# with nothing to do, which is also what makes them cheap to start.
+$MVN -DskipTests test-compile > /tmp/demo-compile.log 2>&1 || {
+  echo "demo sources failed to compile"
+  tail -40 /tmp/demo-compile.log
+  exit 1
+}
 
 nohup $MVN -Pdemo \
   -Dspring-boot.run.jvmArguments="$TTL" \
