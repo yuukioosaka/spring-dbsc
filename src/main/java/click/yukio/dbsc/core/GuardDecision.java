@@ -22,7 +22,7 @@ import java.util.Objects;
  *
  * <p>The distinction between the first and the third is the whole point. Both look
  * like "no tier", so the difference is carried by evidence the client cannot
- * suppress — see {@link DbscService#guardDecision}.
+ * suppress — see {@code DbscService.guardDecision}.
  */
 public record GuardDecision(boolean allowed, Reason reason) {
 

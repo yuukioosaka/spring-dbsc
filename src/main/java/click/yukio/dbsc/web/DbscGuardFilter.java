@@ -46,8 +46,8 @@ import java.util.Map;
  *
  * <pre>
  * JSESSIONID=72234F6E…             the application's session
- * __Host-dbsc-session=3D99F29D…    the binding
- * __Host-dbsc-challenge=<jti>      the single-use JTI to sign
+ * __Host-auth_cookie=0Jp36T8T…     the rotating credential for the binding
+ * __Host-dbsc-challenge=…          the single-use JTI to sign
  * </pre>
  *
  * <p>The registration route is not in this list on purpose: it names its session
