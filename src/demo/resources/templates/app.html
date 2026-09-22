@@ -27,9 +27,10 @@
 
 <h2>2. /app/payment</h2>
 <p class="hint">
-    An ordinary authenticated POST. Nothing per-request is verified here: the
-    library no longer ships a proof guard, so a valid login session and a CSRF
-    token are the whole requirement.
+    A guarded route: declared as a <code>GuardedRoute</code>, so the guard filter
+    refuses it unless the login session's tier is currently <code>dbsc</code>.
+    Unbind DBSC in the browser and the same POST answers 403
+    <code>DBSC_REQUIRED</code> — a valid login cookie and CSRF token are not enough.
 </p>
 <button onclick="hit('/app/payment', 'POST')">POST /app/payment</button>
 <pre id="payment"></pre>

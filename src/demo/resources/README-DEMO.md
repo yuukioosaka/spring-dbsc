@@ -258,9 +258,11 @@ of or work around here:
 - `@Order(0)` — `securityMatcher` on the DBSC paths, with `DbscFilter`, stateless,
   CSRF disabled. Chromium drives these routes before any user session exists and
   posts no CSRF token with them.
-- `@Order(1)` — the application chain: form login, logout, the `/app` routes
-  (`/app/payment` is an ordinary authenticated POST — nothing per-request is
-  verified, because the library no longer ships a proof guard).
+- `@Order(1)` — the application chain: form login, logout, the `/app` routes. The
+  `dbscGuardFilter` is added here and `/app/payment` is declared as a `GuardedRoute`,
+  so it answers 403 `DBSC_REQUIRED` unless the session's tier is currently `dbsc`.
+  `/app/whoami` is deliberately left unguarded, so it reports the tier on a bare
+  login cookie.
 
 `bind()` is called from an `AuthenticationSuccessHandler`, declared inline in the
 chain rather than as a separate class, because form login never reaches a handler

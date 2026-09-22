@@ -269,6 +269,75 @@ class HttpFlowTest {
     }
 
     // ------------------------------------------------------------------
+    // The route guard
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("guard: an unbound request to a guarded route is 403 DBSC_REQUIRED")
+    void guardedRouteRefusesUnboundRequest() throws Exception {
+        // Logged in, so bind() has run and the registration cookie is set, but the
+        // browser has not completed registration: the session is still tier none.
+        LoginState login = loginWithState();
+
+        MvcResult result = mvc.perform(post("/host/payment")
+                        .contentType("application/json")
+                        .content("{\"amount\":1000}")
+                        .cookie(login.registrationCookie(), login.challengeCookie()))
+                .andReturn();
+
+        assertEquals(403, result.getResponse().getStatus(),
+                "an unbound session must not reach a guarded handler");
+        Map<String, Object> body = Json.parseObject(result.getResponse().getContentAsString());
+        assertEquals("DBSC_REQUIRED", body.get("error"));
+    }
+
+    @Test
+    @DisplayName("guard: no DBSC cookie at all is also 403, not a redirect to login")
+    void guardedRouteRefusesAnonymousRequest() throws Exception {
+        MvcResult result = mvc.perform(post("/host/payment")
+                        .contentType("application/json")
+                        .content("{\"amount\":1000}"))
+                .andReturn();
+
+        assertEquals(403, result.getResponse().getStatus());
+        assertEquals("DBSC_REQUIRED",
+                Json.parseObject(result.getResponse().getContentAsString()).get("error"));
+    }
+
+    @Test
+    @DisplayName("guard: a registered session reaches the guarded handler")
+    void guardedRouteAdmitsBoundRequest() throws Exception {
+        LoginState login = loginWithState();
+        register(login, TestKey.generate());
+
+        MvcResult result = mvc.perform(post("/host/payment")
+                        .contentType("application/json")
+                        .content("{\"amount\":1000}")
+                        .cookie(login.bindingCookie()))
+                .andReturn();
+
+        assertEquals(200, result.getResponse().getStatus(),
+                result.getResponse().getContentAsString());
+        Map<String, Object> body = Json.parseObject(result.getResponse().getContentAsString());
+        assertEquals("authorized", body.get("status"));
+    }
+
+    @Test
+    @DisplayName("guard: an unguarded route is unaffected by the tier")
+    void unguardedRouteIgnoresTheTier() throws Exception {
+        // /host/whoami is not declared as a guarded route, so DBSC only observes.
+        // That the two routes behave differently is the whole point of the guard
+        // being opt-in per route rather than a blanket filter.
+        LoginState login = loginWithState();
+
+        MvcResult result = mvc.perform(get("/host/whoami").cookie(login.registrationCookie()))
+                .andReturn();
+
+        assertEquals(200, result.getResponse().getStatus());
+        assertEquals("none", Json.parseObject(result.getResponse().getContentAsString()).get("tier"));
+    }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
 

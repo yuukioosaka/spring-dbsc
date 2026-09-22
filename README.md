@@ -10,7 +10,7 @@ specification.
 
 This artifact is meant to be **embedded in an existing Spring Boot application**:
 it ships no `@SpringBootApplication` and no controllers. You add it as a
-dependency, call `bind()` from your own login route, and wire one filter into your
+dependency, call `bind()` from your own login route, and add its filters to your
 own security chain.
 
 The point of DBSC: a session cookie stolen off the wire is useless on another
@@ -27,6 +27,7 @@ and the theft is reported as `session_stolen`.
 | Hardware-backed key binding (TPM / Secure Enclave) | ✅ `ES256` + `RS256` |
 | Atomic challenge consumption | ✅ in-memory + JDBC |
 | Tier model + demotion-on-failure | ✅ `dbsc` / `none` |
+| Route guard | ✅ opt-in per route, refuses anything not currently `dbsc` |
 | Telemetry events | ✅ 6 event types |
 | Rate limiting | ✅ per-IP, with a separate failure budget |
 
@@ -66,22 +67,21 @@ recognise reads as `none` rather than being trusted.
 
 Two things are easy to assume from the name, and both are false here:
 
-- **It does not guard your routes.** No filter verifies a per-request proof. The
-  protocol surface (`/dbsc/registration`, `/dbsc/refresh`,
-  `/.well-known/device-bound-sessions`) is all the library serves, and it does not
-  touch any other path. Your own authentication and authorization remain the only
-  thing standing in front of your endpoints.
-- **It does not sign anything per request.** DBSC has no per-request proof to
-  verify: the browser signs only when it registers and when it refreshes, and the
-  signature never leaves the browser's own protocol flow. What the library gives
-  you is **freshness** — a session whose browser has stopped proving possession
-  gets demoted — so the security decision available to you is "is this session's
-  tier currently `dbsc`?", not "did this request carry a valid proof?".
+- **It does not verify a per-request proof.** DBSC has none to verify: the browser
+  signs only when it registers and when it refreshes, and that signature never
+  leaves the browser's own protocol flow. What the library gives you is
+  **freshness** — a session whose browser has stopped proving possession gets
+  demoted — so the decision available to you is "is this session's tier currently
+  `dbsc`?", not "did this request carry a valid proof?".
+- **It does not authenticate, and it does not replace your authorization.** The
+  guard refuses a request whose session is not currently DBSC-protected; it does
+  not admit anyone, and it must not be the only thing in front of a route. Every
+  route you guard still needs your own authentication, and DBSC's refusal is a
+  step-up prompt rather than proof of who the caller is.
 
-Wiring a DBSC session only makes an endpoint **DBSC-aware** if you make it so:
-gate that endpoint on `dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)` (see
-[Act on the tier](#act-on-the-tier)). Adopting the library never silently changes
-the behaviour of an existing endpoint.
+DBSC is **additive**: adopting the library never silently changes the behaviour of
+an existing endpoint, because nothing is guarded until you declare a
+`GuardedRoute`.
 
 ## Requirements
 
@@ -107,22 +107,25 @@ That is the whole installation. A normal Boot app picks up `DbscAutoConfiguratio
 from the JAR's `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`
 — no extra annotation.
 
-### 2. Wire `DbscFilter` into your chain
+### 2. Wire the DBSC filters into your chain
 
-The library ships **one `OncePerRequestFilter` bean and no `SecurityFilterChain`** — the
-filter is *not* wired into Security for you, and is not auto-registered as a servlet
-filter either, so a JAR that is merely on the classpath does nothing until you add it.
-See [below](#2-wire-dbscfilter-into-your-chain-1) for the registration that is easiest
-to leave out.
-Nothing is registered into Spring Security for you, because *where* the filter sits,
-which paths bypass authentication, and what authorization runs elsewhere in the chain
-are policy decisions that belong to your application. A library-supplied chain would
-either collide with yours (two chains matching `/**` is a hard startup error) or,
+The library ships **two `OncePerRequestFilter` beans and no `SecurityFilterChain`** —
+they are *not* wired into Security for you, and are not auto-registered as servlet
+filters either, so a JAR that is merely on the classpath does nothing until you add
+them. Nothing is registered into Spring Security for you, because *where* the filters
+sit, which paths bypass authentication, and what authorization runs elsewhere in the
+chain are policy decisions that belong to your application. A library-supplied chain
+would either collide with yours (two chains matching `/**` is a hard startup error) or,
 worse, be kept and silently replace your authorization rules.
 
-`DbscFilter` arrives as a bean named `dbscFilter` from `DbscFilterConfiguration`.
-Put it in **your** chain — usually its own protocol chain, so the routes it serves
-stay unauthenticated:
+Two beans arrive from `DbscFilterConfiguration`:
+
+| Bean | Serves | Goes in |
+|---|---|---|
+| `dbscFilter` | the protocol routes (`/dbsc/**`, the well-known document) | its own protocol chain, unauthenticated |
+| `dbscGuardFilter` | nothing by default — the routes you declare | your application chain, next to your authorization |
+
+Put them where their subjects live:
 
 ```java
 @Configuration
@@ -152,31 +155,55 @@ public class MySecurityConfig {
     /** Your application, under your own authentication and authorization. */
     @Bean
     @Order(1)
-    public SecurityFilterChain appChain(HttpSecurity http) throws Exception {
+    public SecurityFilterChain appChain(HttpSecurity http, DbscGuardFilter dbscGuardFilter)
+            throws Exception {
         http
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/login", "/css/**").permitAll()
-                        .requestMatchers("/api/transfer").authenticated());
+                        .requestMatchers("/api/transfer").authenticated())
+                // The guard, after authentication: it answers "is this session
+                // currently DBSC-protected?", which is a question about a session
+                // that must already exist.
+                .addFilterBefore(dbscGuardFilter, CsrfFilter.class);
         return http.build();
+    }
+
+    /** The one route whose session must be device bound. */
+    @Bean
+    public GuardedRoute transferRequiresDbsc() {
+        return GuardedRoute.at("/api/transfer");
     }
 }
 ```
 
-The two details that actually matter, and how each one fails:
+The three details that actually matter, and how each one fails:
 
 | Detail | If you get it wrong |
 |---|---|
 | `OrRequestMatcher` for the protocol paths — `securityMatcher()` **sets**, it does not accumulate | Only the last path is matched; the rest fall through to your chain, which answers a Spring 403 before `DbscFilter` runs |
 | `addFilterBefore(..., CsrfFilter.class)` **and** CSRF off on the protocol chain | The browser's registration POST carries no CSRF token, so a chain that applies CSRF to `/dbsc/**` rejects it before `DbscFilter` runs |
-| The bean is registered in **one** chain only | `OncePerRequestFilter` records itself in a request attribute, so the same instance in a second chain silently skips it |
+| Each bean is registered in **one** chain only | `OncePerRequestFilter` records itself in a request attribute, so the same instance in a second chain silently skips it |
+
+**Declaring no `GuardedRoute` guards nothing**, which is the default and the reason
+adoption is safe: the guard filter is then a single list lookup on every request.
+Skipping the guard entirely is also fine — see
+[Act on the tier](#act-on-the-tier) for the inline form, which is the same check
+without a filter.
 
 **Disable Boot's automatic servlet registration.** A `Filter` bean is picked up by the
-servlet container as well as by the security chain, which would run `DbscFilter` a
+servlet container as well as by the security chain, which would run each filter a
 second time on every request:
 
 ```java
 @Bean
 FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
+    var registration = new FilterRegistrationBean<>(filter);
+    registration.setEnabled(false);
+    return registration;
+}
+
+@Bean
+FilterRegistrationBean<DbscGuardFilter> dbscGuardFilterRegistration(DbscGuardFilter filter) {
     var registration = new FilterRegistrationBean<>(filter);
     registration.setEnabled(false);
     return registration;
@@ -289,17 +316,22 @@ public class OidcSecurityConfig {
 
 ## Architecture
 
-The protocol is served by **one `OncePerRequestFilter` that your own Spring Security
-chain invokes**, not by controllers:
+The protocol is served by **filters that your own Spring Security chain invokes**, not by
+controllers:
 
 | Component | Responsibility |
 |---|---|
 | `DbscFilter` | Owns every protocol route (`/dbsc/*`, `/.well-known/device-bound-sessions`). Terminates the chain for those paths; passes everything else through untouched. |
+| `DbscGuardFilter` | Refuses a request whose session is not currently at tier `dbsc`, for the routes the application declared. Passes everything else through untouched. |
 
-`DbscService` sits below it as the HTTP facade, and `DbscProtocolEngine` below that as
+`DbscService` sits below both as the HTTP facade, and `DbscProtocolEngine` below that as
 the protocol itself — neither depends on Spring Security. See
-[How it is wired (and why)](#how-it-is-wired-and-why) for the reasoning. There is no
-second filter: the library does not guard application routes.
+[How it is wired (and why)](#how-it-is-wired-and-why) for the reasoning.
+
+The two filters answer different questions and belong in different chains. `DbscFilter`
+is about the browser's protocol flow, which runs before any session exists;
+`DbscGuardFilter` is about your routes, which have one. Neither one inspects the other's
+paths.
 
 ## Wiring it into your own app
 
@@ -352,30 +384,35 @@ public void logout(HttpServletRequest request, HttpServletResponse response) {
 
 ### 3. Act on the tier
 
-Your authorization does not change: the library guards no routes, and DBSC is additional
-state your own code consults. The check is in
+Your authorization does not change. DBSC is additional state your own code consults, and
+nothing is guarded until you say so: declare a `GuardedRoute` and `dbscGuardFilter`
+enforces the tier there, or read the tier inline. Both forms are in
 [Act on the tier](#act-on-the-tier).
 
 ## How it is wired (and why)
 
-DBSC is implemented as **one `OncePerRequestFilter`** rather than controllers,
-and it runs inside the Spring Security chain because that is where your application
-decides what is reachable:
+DBSC is implemented as **`OncePerRequestFilter`s** rather than controllers, and they run
+inside the Spring Security chain because that is where your application decides what is
+reachable:
 
 ```mermaid
 flowchart TD
     A[Request] --> B{DBSC protocol paths?}
     B -- yes --> C[DbscFilter<br/>before CsrfFilter]
     C --> C2[terminates:<br/>writes status + headers + body]
-    B -- no --> E[your authentication<br/>and authorization]
-    E --> F[your controller]
+    B -- no --> D[your authentication<br/>and authorization]
+    D --> G{guarded route?}
+    G -- yes --> H[DbscGuardFilter<br/>tier must be dbsc]
+    H -- ok --> F[your controller]
+    G -- no --> F
 ```
 
-Neither branch consults DBSC state: the protocol paths are served and stop there, and
-everything else is your application's chain, unchanged. Gating an endpoint on the tier
-is your code, not a filter — see [Act on the tier](#act-on-the-tier).
+Each branch is independent. The protocol paths are served and stop there; a guarded
+route additionally has to be at tier `dbsc`; everything else is your application's
+chain, unchanged. Gating a single endpoint inline on the tier is equally valid — see
+[Act on the tier](#act-on-the-tier).
 
-The reasons for a filter rather than controllers:
+The reasons for filters rather than controllers:
 
 - **These are a protocol surface, not endpoints.** The routes must be reachable
   before any application session exists, and must answer with DBSC's own status
@@ -387,14 +424,14 @@ The reasons for a filter rather than controllers:
   401 first. `DbscFilter` is registered *before* Spring Security's CSRF filter — the
   earliest anchor that is still a Security filter — so nothing upstream can reject the
   browser's registration POST or replace that status.
-- **It owns no state the application needs to configure.** The filter is handed the
-  session-agnostic protocol surface only, so it adds no ordering constraints to your
-  chain beyond the one above and no policy of its own over your routes.
+- **It owns no state the application needs to configure.** The filters are handed the
+  protocol surface and the list of guarded paths, so they add no ordering constraints to
+  your chain beyond the two above and no policy of its own over your routes.
 
 ### Using your own `SecurityFilterChain`
 
 That is the only way to use the library — [Getting Started](#getting-started) is the
-full worked example, and the two chains there are the shape to copy. The three details
+full worked example, and the two chains there are the shape to copy. The four details
 worth restating here, because each one fails silently:
 
 - **The protocol paths belong in a chain with CSRF disabled.** The browser's
@@ -404,7 +441,10 @@ worth restating here, because each one fails silently:
 - **`dbscFilter` goes before `CsrfFilter`**, not merely before authentication.
   Anything `addFilterBefore` anchors on is still ordered *after* CSRF, so the
   registration POST would be rejected first.
-- **The filter goes in exactly one chain.** `OncePerRequestFilter` records itself in a
+- **`dbscGuardFilter` goes in the application chain, after authentication.** It asks
+  whether an existing session is protected; running it before authentication would
+  make it answer questions about a session that has not been established yet.
+- **Each filter goes in exactly one chain.** `OncePerRequestFilter` records itself in a
   request attribute, so the same instance in a second chain is skipped without a word.
 
 ### Replace the collaborators you have opinions about
@@ -440,6 +480,7 @@ this is what they do.
 | `dbsc.bind(sessionId, userId, ttlMillis, request, response)` | From an authenticated request, usually at the end of your login flow |
 | `dbsc.terminate(sessionId, request, response)` | On logout, so the browser forgets the binding instead of retrying against a dead session |
 | `dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)` | Whenever your own code wants to know whether this browser is bound |
+| `GuardedRoute.at(path)` | To have the filter enforce the tier on a whole route instead |
 
 **`bind()` is the only thing that starts a binding.** It persists the session record,
 sets the registration + challenge cookies, and adds `Secure-Session-Registration`;
@@ -453,9 +494,19 @@ paths is better.
 
 ### Act on the tier
 
-There is nothing to declare and nothing to enable: the library does not guard routes.
-Your authentication and authorization keep working exactly as they did, and DBSC is
-**additional state** your own code can consult when a decision deserves it:
+Two ways to enforce it, and they check the same thing. **Declaring a route** hands the
+decision to `DbscGuardFilter`, which refuses with `403` and `DBSC_REQUIRED` before your
+handler runs:
+
+```java
+@Bean
+GuardedRoute transferRequiresDbsc() {
+    return GuardedRoute.at("/api/transfer");
+}
+```
+
+**Reading the tier inline** is for a route where a blanket refusal is the wrong answer —
+where the response should differ, or where only part of the handler needs protection:
 
 ```java
 @PostMapping("/api/transfer")
@@ -469,22 +520,30 @@ public ResponseEntity<?> transfer(@RequestBody Transfer body, HttpServletRequest
 }
 ```
 
-Three things to be deliberate about in that check:
+Both forms make the same decision, so these three hold for either:
 
 - **It is a step-up decision, not an authentication one.** A `dbsc` tier never
   substitutes for being authenticated; read it *in addition to* your own checks, as
-  above.
-- **`tierFor` is the live answer, not the value on the record.** It accounts for the
+  above. That is also why the guard lives in the application chain rather than the
+  protocol one, and why its refusal is a `403` with `DBSC_REQUIRED` rather than a
+  `401` — a `401` reads as signed out, and Chromium treats one on the refresh route
+  as fatal.
+- **The tier is the live answer, not the value on the record.** It accounts for the
   refresh cadence and the grace window, so a session whose browser has stopped
   refreshing reads `none` — which is the demotion you are actually trying to surface.
+  A session with a perfectly good registered key reads `none` too, once it has
+  lapsed.
 - **Expect `none` to be normal.** A browser without DBSC support (or a user who has
   just logged in, before registration completes) is legitimately unbound, so decide in
-  advance whether that is a hard refusal or a softer "verify again" prompt.
+  advance whether that is a hard refusal or a softer "verify again" prompt. Inside a
+  handler you can branch; through the guard, every unbound session gets the same
+  `DBSC_REQUIRED`.
 
 If your application cannot act on a weaker tier — for example a compliance rule that
 says a stolen cookie must never be usable — say so explicitly rather than assuming the
-handshake alone covers it: `bind()` and the routes are all the library does, and it is
-application code like the block above that turns a bound session into an enforced one.
+handshake alone covers it: the protocol routes and `bind()` are what the library does,
+and it is the guard or a check like the block above that turns a bound session into an
+enforced one.
 
 ## Configuration
 

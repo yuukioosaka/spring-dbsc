@@ -5,19 +5,21 @@ import click.yukio.dbsc.config.DbscProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.util.List;
+
 /**
- * The DBSC filter as a plain bean.
+ * The DBSC filters as plain beans.
  *
  * <p>The library declares no {@link org.springframework.security.web.SecurityFilterChain}.
- * Where the filter sits, which paths bypass authentication and what authorization runs
- * underneath it are policy decisions that belong to the application, and a chain
+ * Where the filters sit, which paths bypass authentication and what authorization runs
+ * underneath them are policy decisions that belong to the application, and a chain
  * shipped here would either collide with the adopter's own or quietly replace their
- * rules. Adopters wire this bean into their chain; the README's "Getting Started"
+ * rules. Adopters wire these beans into their chain; the README's "Getting Started"
  * has the block to copy.
  *
- * <p>Nothing here depends on Spring Security, so this bean exists whether or not
+ * <p>Nothing here depends on Spring Security, so these beans exist whether or not
  * Security is on the classpath. An application with no Security at all can take
- * it and register it as an ordinary servlet filter.
+ * them and register them as ordinary servlet filters.
  */
 @Configuration(proxyBeanMethods = false)
 public class DbscFilterConfiguration {
@@ -29,5 +31,20 @@ public class DbscFilterConfiguration {
     @Bean
     public DbscFilter dbscFilter(DbscService dbsc, DbscProperties properties) {
         return new DbscFilter(dbsc, properties);
+    }
+
+    /**
+     * The route guard: refuses a request whose session DBSC does not currently
+     * protect.
+     *
+     * <p>Built from the application's own {@link GuardedRoute} beans, so it
+     * guards nothing until at least one is declared. An application that wants
+     * the tier check inline instead, on a route that is not worth a filter, can
+     * call {@code sessionFor} and {@code tierFor} directly — this filter exists
+     * so that the common case does not have to repeat that block everywhere.
+     */
+    @Bean
+    public DbscGuardFilter dbscGuardFilter(DbscService dbsc, List<GuardedRoute> guardedRoutes) {
+        return new DbscGuardFilter(dbsc, guardedRoutes);
     }
 }

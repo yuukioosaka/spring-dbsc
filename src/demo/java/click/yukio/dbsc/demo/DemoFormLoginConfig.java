@@ -2,6 +2,8 @@ package click.yukio.dbsc.demo;
 
 import click.yukio.dbsc.DbscService;
 import click.yukio.dbsc.web.DbscFilter;
+import click.yukio.dbsc.web.DbscGuardFilter;
+import click.yukio.dbsc.web.GuardedRoute;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
@@ -92,7 +94,9 @@ public class DemoFormLoginConfig {
          */
         @Bean
         @Order(1)
-        SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc) throws Exception {
+        SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
+                                     @Qualifier("dbscGuardFilter") DbscGuardFilter dbscGuardFilter)
+                throws Exception {
 
             http
                     .securityMatcher(new AntPathRequestMatcher("/**"))
@@ -100,6 +104,10 @@ public class DemoFormLoginConfig {
                             .requestMatchers("/login", "/css/**", "/favicon.ico").permitAll()
                             .requestMatchers("/app/payment").authenticated()
                             .anyRequest().authenticated())
+                    // The guard, on the application chain: /app/payment needs a
+                    // session DBSC currently protects, /app/whoami does not. Both
+                    // are authenticated; that is the difference the tier makes.
+                    .addFilterBefore(dbscGuardFilter, CsrfFilter.class)
                     // The one DBSC call the application has to make, and it belongs
                     // here rather than in a separate handler class: it needs the
                     // request, the response and the authenticated principal together,
@@ -159,6 +167,16 @@ public class DemoFormLoginConfig {
     }
 
     /**
+     * The routes whose session must currently be DBSC-protected. Declaring none
+     * leaves the guard filter a no-op, which is the library's default: DBSC
+     * protects nothing until the application says which requests matter.
+     */
+    @Bean
+    GuardedRoute paymentRequiresDbsc() {
+        return GuardedRoute.at("/app/payment");
+    }
+
+    /**
      * Boot auto-registers every {@code Filter} bean as a plain servlet filter,
      * outside the security chain — which would run the filter a second time,
      * before authentication and on every path. Disabling the registration keeps
@@ -167,6 +185,13 @@ public class DemoFormLoginConfig {
     @Bean
     FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
         FilterRegistrationBean<DbscFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    @Bean
+    FilterRegistrationBean<DbscGuardFilter> dbscGuardFilterRegistration(DbscGuardFilter filter) {
+        FilterRegistrationBean<DbscGuardFilter> registration = new FilterRegistrationBean<>(filter);
         registration.setEnabled(false);
         return registration;
     }

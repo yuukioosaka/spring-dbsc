@@ -5,6 +5,8 @@ import click.yukio.dbsc.core.Json;
 import click.yukio.dbsc.core.ProtectionTier;
 import click.yukio.dbsc.core.Session;
 import click.yukio.dbsc.web.DbscFilter;
+import click.yukio.dbsc.web.DbscGuardFilter;
+import click.yukio.dbsc.web.GuardedRoute;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -92,14 +94,28 @@ public class DbscTestHostApplication {
 
         @Bean
         @Order(1)
-        SecurityFilterChain hostApplicationChain(HttpSecurity http) throws Exception {
+        SecurityFilterChain hostApplicationChain(
+                HttpSecurity http, DbscGuardFilter dbscGuardFilter) throws Exception {
             http
                     .securityMatcher(new AntPathRequestMatcher("/**"))
                     .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                     .sessionManagement(session -> session
                             .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                    .csrf(csrf -> csrf.disable());
+                    .csrf(csrf -> csrf.disable())
+                    // The guard sits in the application chain, not the protocol one:
+                    // it is about the host's routes. /host/payment is declared below.
+                    .addFilterBefore(dbscGuardFilter, CsrfFilter.class);
             return http.build();
+        }
+
+        /**
+         * One guarded route, so the tier check has a real path to refuse. The
+         * other host routes stay unguarded, which is what lets a test compare a
+         * request that DBSC enforces against one it only observes.
+         */
+        @Bean
+        GuardedRoute hostPaymentRequiresDbsc() {
+            return GuardedRoute.at("/host/payment");
         }
     }
 

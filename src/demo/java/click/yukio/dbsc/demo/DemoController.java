@@ -45,7 +45,7 @@ class DemoController {
     ResponseEntity<String> payment(@RequestBody(required = false) String rawBody) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("status", "authorized");
-        body.put("note", "the login session was valid; DBSC did not inspect this request");
+        body.put("note", "the login session was valid and DBSC currently protects it");
         body.put("receivedBody", rawBody);
         return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(Json.write(body));
     }
