@@ -7,7 +7,7 @@
   <parent>
     <groupId>org.springframework.boot</groupId>
     <artifactId>spring-boot-starter-parent</artifactId>
-    <version>3.5.6</version>
+    <version>3.5.16</version>
     <relativePath/>
   </parent>
 
@@ -82,6 +82,25 @@
       only working place to add one.
     -->
     <dbsc.demo.profiles></dbsc.demo.profiles>
+
+    <!--
+      Pins Netty past the versions Spring Boot 3.5.x manages.
+
+      Netty is not a direct dependency: it arrives transitively with Lettuce, which
+      is itself optional and only used by dbsc.storage=redis. So this pin reaches
+      only adopters who opted into the Redis adapter, and the default JDBC/memory
+      builds are unaffected either way.
+
+      The pin is needed because Boot 3.5.16 still ships Netty 4.1.135 via Lettuce
+      6.6.x, while the advisories against netty-handler and netty-codec are fixed
+      only in 4.1.137+. Overriding the BOM property here rather than excluding and
+      re-declaring keeps every Netty artifact on one version; a mixed set is worse
+      than a slightly stale one.
+
+      Remove this once a Boot release manages 4.1.137 or later on its own, which is
+      the point at which the pin stops being a fix and starts being a liability.
+    -->
+    <netty.version>4.1.138.Final</netty.version>
   </properties>
 
   <dependencies>
