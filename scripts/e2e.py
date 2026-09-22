@@ -804,10 +804,16 @@ def main():
               and "SESSION_NOT_FOUND" not in text, text[:160])
 
         # A JTI that never existed is a different failure and must stay distinct.
+        # It needs its own session and token: the attempt above does not consume
+        # the token (validation precedes consumption) but it does arm a fresh
+        # challenge, and reusing the spent one would report CHALLENGE_CONSUMED
+        # rather than the unknown-JTI branch under test.
+        k4_opener, k4_jar = new_client()
+        _, _, k4_reg, _ = login(k4_opener, k4_jar)
         status, _, text = request(
-            k3_opener, "POST", k3_reg, body=b"", headers={
+            k4_opener, "POST", k4_reg, body=b"", headers={
                 "Secure-Session-Response": k3_key.jws({"jti": "n" * 43}),
-                "Cookie": challenge_cookie_header(k3_jar, "n" * 43),
+                "Cookie": challenge_cookie_header(k4_jar, "n" * 43),
                 "Content-Type": "application/json"})
         check("an unknown JTI -> CHALLENGE_NOT_FOUND",
               "CHALLENGE_NOT_FOUND" in text, f"{status} {text[:160]}")

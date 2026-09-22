@@ -132,7 +132,7 @@ public class DbscService {
         response.addHeader(DbscHeaders.LEGACY_REGISTRATION, DbscHeaderCodec.buildRegistrationHeader(
                 "ES256", registrationPathFor(registrationToken), challenge.jti()));
 
-        setCookie(response, cookieScope.challengeCookieName(), challenge.jti(),
+        setChallengeCookie(response, cookieScope.challengeCookieName(), challenge.jti(),
                 properties.challengeTtlMs());
         // The binding cookie is sent from the start, not only after registration.
         // The session is not protected until registration completes (tier is
@@ -193,7 +193,10 @@ public class DbscService {
                                          HttpServletResponse response) {
         storage.revokeSession(sessionId);
         response.addHeader("Set-Cookie", cookieScope.deleteCookieValue(cookieScope.bindingCookieName()));
-        response.addHeader("Set-Cookie", cookieScope.deleteCookieValue(cookieScope.challengeCookieName()));
+        // The challenge cookie uses the SameSite=None attribute set, so it must be
+        // deleted with the same attributes or the browser keeps the old one.
+        response.addHeader("Set-Cookie",
+                cookieScope.deleteChallengeCookieValue(cookieScope.challengeCookieName()));
         return SessionConfig.terminated(
                 OriginResolver.resolve(request, trustForwardedHeaders),
                 sessionId, properties.getRefreshPath(), cookieScope, properties);
@@ -240,7 +243,8 @@ public class DbscService {
         storage.consumeRegistrationToken(registrationToken);
 
         // The challenge cookie carried the JTI the browser signed and is spent.
-        response.addHeader("Set-Cookie", cookieScope.deleteCookieValue(cookieScope.challengeCookieName()));
+        response.addHeader("Set-Cookie",
+                cookieScope.deleteChallengeCookieValue(cookieScope.challengeCookieName()));
         setCookie(response, cookieScope.bindingCookieName(), sessionId, properties.bindingCookieTtlMs());
 
         return sessionConfig(request, sessionId);
@@ -303,7 +307,8 @@ public class DbscService {
                 .orElseThrow(DbscException::challengeNotFound);
         engine.handleRefresh(sessionId, responseHeader, expectedJti);
 
-        response.addHeader("Set-Cookie", cookieScope.deleteCookieValue(cookieScope.challengeCookieName()));
+        response.addHeader("Set-Cookie",
+                cookieScope.deleteChallengeCookieValue(cookieScope.challengeCookieName()));
         setCookie(response, cookieScope.bindingCookieName(), sessionId, properties.bindingCookieTtlMs());
 
         return sessionConfig(request, sessionId);
@@ -337,7 +342,8 @@ public class DbscService {
         String challengeHeader = DbscHeaderCodec.buildChallengeHeader(challenge.jti(), sessionId);
         response.addHeader(DbscHeaders.CHALLENGE, challengeHeader);
         response.addHeader(DbscHeaders.LEGACY_CHALLENGE, challengeHeader);
-        setCookie(response, cookieScope.challengeCookieName(), challenge.jti(), properties.challengeTtlMs());
+        setChallengeCookie(response, cookieScope.challengeCookieName(), challenge.jti(),
+                properties.challengeTtlMs());
         response.setStatus(HttpServletResponse.SC_FORBIDDEN);
     }
 
@@ -520,6 +526,15 @@ public class DbscService {
      */
     private void setCookie(HttpServletResponse response, String name, String value, long maxAgeMs) {
         response.addHeader("Set-Cookie", cookieScope.setCookieValue(name, value, maxAgeMs));
+    }
+
+    /**
+     * Writes the challenge cookie with its own attribute set, which differs from
+     * the binding cookie's in {@code SameSite}. See
+     * {@link CookieScope#challengeAttributesString()}.
+     */
+    private void setChallengeCookie(HttpServletResponse response, String name, String value, long maxAgeMs) {
+        response.addHeader("Set-Cookie", cookieScope.setChallengeCookieValue(name, value, maxAgeMs));
     }
 
     private void checkRegistrationRateLimit(HttpServletRequest request) {

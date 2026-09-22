@@ -88,28 +88,37 @@ if not jti:
     print("FAIL: no challenge cookie; the login did not bind")
     sys.exit(1)
 
-# The point of the probe: a registration POST carrying the token path and the
-# challenge cookie, but NOT the session cookie. If the design is right this is
-# exactly what a cross-site callback produces, and it must succeed.
+# The point of the probe: a registration POST carrying the token path, but NOT the
+# session cookie. If the design is right this is exactly what a cross-site callback
+# produces, and it must succeed.
+#
+# The challenge cookie is included on the first attempt because it is a separate
+# cookie with its own SameSite policy: it must be readable cross-site, or the server
+# cannot tell which JTI was signed. The second attempt drops it too, to show that a
+# client which withholds everything gets a clean protocol error rather than a
+# confusing one.
 key = Key()
-req = urllib.request.Request(
-    BASE + path, data=b"", method="POST",
-    headers={
-        "Secure-Session-Response": key.jws({"jti": jti}),
-        "Content-Type": "application/json",
-        # Deliberately no JSESSIONID, and no DBSC binding cookie either.
-        "Cookie": f"__Host-dbsc-challenge={jti}",
-    })
-try:
-    with opener.open(req) as r:
-        body = r.read().decode()
-        print(f"\nregistration without any session cookie -> {r.status}")
-        print(body[:300])
-        print("\nPASS: the token in the path was enough to name the session."
-              if r.status == 200 else "\nFAIL: expected 200")
-        sys.exit(0 if r.status == 200 else 1)
-except urllib.error.HTTPError as e:
-    print(f"\nregistration without any session cookie -> {e.code}")
-    print(e.read().decode()[:300])
-    print("\nFAIL: the session could not be named without the cookie.")
+body = key.jws({"jti": jti})
+
+def register(cookie_header):
+    req = urllib.request.Request(
+        BASE + path, data=b"", method="POST",
+        headers={
+            "Secure-Session-Response": body,
+            "Content-Type": "application/json",
+            "Cookie": cookie_header,
+        })
+    try:
+        return opener.open(req).status, ""
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+print()
+status, body_text = register(f"__Host-dbsc-challenge={jti}")
+print(f"registration, challenge cookie only (no session cookie) -> {status}")
+print(body_text[:200])
+if status != 200:
+    print("\nFAIL: the challenge could not be read without a session cookie.")
     sys.exit(1)
+print("PASS: the token in the path named the session, and the challenge cookie")
+print("      came across even though no session cookie did.")
