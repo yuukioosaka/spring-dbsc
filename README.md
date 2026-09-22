@@ -122,7 +122,7 @@ Spring Boot 3.x.x, 4.x.x are the tested versions.
 <dependency>
   <groupId>click.yukio.dbsc</groupId>
   <artifactId>spring-dbsc</artifactId>
-  <version>0.6.0</version>
+  <version>0.6.1</version>
 </dependency>
 ```
 
@@ -1016,6 +1016,16 @@ session?" when a request arrives without DBSC cookies.
 > unrelated to it: it carries the DBSC session id itself (spec §9.6), names no cookie, and
 > so keeps the id out of the cookie jar. A browser holding a binding from an older build
 > re-registers on its own; there is nothing to change on the server side.
+>
+> **Upgrading from a build before 0.6.1:** the `__Host-dbsc-challenge` cookie is gone.
+> The challenge is held server-side against the session and reaches the browser only as
+> the JTI inside the `Secure-Session-Challenge` header it signs, so registration no longer
+> depends on a cookie surviving the cross-site POST. Nothing changes on the server side,
+> and no schema changes — but any code or test of yours that reads that cookie name must
+> be updated, and a browser mid-registration against the old build simply registers again.
+> This release also fixes a replay window: resolving the challenge by "newest outstanding
+> for this session" allowed an already-consumed JTI to resolve to a newer challenge and
+> register a second key against it. Upgrading is recommended for that reason alone.
 
 The file is a plain `CREATE TABLE IF NOT EXISTS` migration: drop it into your
 migration tool's directory, or run its statements however you already run schema
