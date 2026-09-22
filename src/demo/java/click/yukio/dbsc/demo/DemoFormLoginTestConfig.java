@@ -43,7 +43,7 @@ import java.util.UUID;
  */
 @Configuration(proxyBeanMethods = false)
 @EnableWebSecurity
-public class DemoFormLoginConfig {
+public class DemoFormLoginTestConfig {
 
     /** Stands in for the application's own session/TTL policy. */
     private static final long SESSION_TTL_MS = 7L * 24 * 60 * 60 * 1000;

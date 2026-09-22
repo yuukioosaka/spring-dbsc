@@ -66,7 +66,7 @@ public class DbscTestHostApplication {
      * <p>Both chains are the application's. DBSC supplies the filters and the
      * protocol paths they serve; the shape of the chain around them is the host's,
      * which is why the library declares no chain of its own.
-     * {@code DemoFormLoginConfig} in the demo is the same pattern with form login.
+     * {@code DemoFormLoginTestConfig} in the demo is the same pattern with form login.
      */
     @Configuration(proxyBeanMethods = false)
     @EnableWebSecurity

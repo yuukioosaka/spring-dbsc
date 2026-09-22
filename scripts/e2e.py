@@ -90,8 +90,8 @@ DENY_BASE = os.environ.get("DBSC_DENY_BASE") or ""
 ROTATION_BASE = os.environ.get("DBSC_ROTATION_BASE") or ""
 ROTATION_GRACE_S = float(os.environ.get("DBSC_ROTATION_GRACE") or 0) or None
 
-# The guarded route both instances agree on. Declared in DemoFormLoginConfig's
-# DbscGuardRoutes; keep this in step with src/demo/java/.../DemoFormLoginConfig.java.
+# The guarded route both instances agree on. Declared in DemoFormLoginTestConfig's
+# DbscGuardRoutes; keep this in step with src/demo/java/.../DemoFormLoginTestConfig.java.
 GUARDED_PATH = "/app/payment"
 
 

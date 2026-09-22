@@ -19,7 +19,7 @@
 
 demo:
   oidc:
-    # Gates DemoOidcConfig and switches the form-login chains off.
+    # Gates DemoOidcTestConfig and switches the form-login chains off.
     enabled: true
 
 spring:

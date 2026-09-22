@@ -308,7 +308,7 @@ database file, and needs no JVM property: the policy comes from
 
 ## Notes on the wiring
 
-Two chains, in order, both defined in `DemoFormLoginConfig`. This is the whole
+Two chains, in order, both defined in `DemoFormLoginTestConfig`. This is the whole
 integration — the library declares no chains of its own, so there is nothing to opt out
 of or work around here:
 

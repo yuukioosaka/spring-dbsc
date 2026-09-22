@@ -33,14 +33,14 @@ import java.util.UUID;
  * authenticates: the protocol chain is wired exactly as in the form login demo,
  * and only the application chain's authentication differs.
  *
- * <p>The form-login chains live in {@link DemoFormLoginConfig} and are switched
+ * <p>The form-login chains live in {@link DemoFormLoginTestConfig} and are switched
  * off here, because two chains matching {@code /**} would leave the winner up to
  * bean ordering.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableWebSecurity
 @ConditionalOnProperty(name = "demo.oidc.enabled", havingValue = "true")
-public class DemoOidcConfig {
+public class DemoOidcTestConfig {
 
     /**
      * The DBSC protocol routes: reachable unauthenticated, no CSRF, and reaching

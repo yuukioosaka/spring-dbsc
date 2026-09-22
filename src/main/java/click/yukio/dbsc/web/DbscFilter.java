@@ -39,7 +39,7 @@ import java.util.Map;
  * other request passes straight through untouched.
  *
  * <p>The demo registers it before the application's authentication filter; see
- * {@code DemoFormLoginConfig}. The ordering matters because a 403 from DBSC must not
+ * {@code DemoFormLoginTestConfig}. The ordering matters because a 403 from DBSC must not
  * be replaced by Spring Security's 401, which Chromium treats as a hard failure and
  * responds to by terminating the session.
  */
