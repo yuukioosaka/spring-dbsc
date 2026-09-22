@@ -42,15 +42,8 @@ import org.springframework.security.web.util.matcher.OrRequestMatcher;
 @EnableWebSecurity
 public class DemoFormLoginConfig {
 
-    /**
-     * The one DBSC call an application has to make. It runs after Spring Security
-     * has authenticated the user and created the session, because that is the
-     * earliest point at which both exist.
-     */
-    @Bean
-    DemoLoginSuccessHandler demoLoginSuccessHandler(DbscService dbsc) {
-        return new DemoLoginSuccessHandler(dbsc);
-    }
+    /** Stands in for the application's own session/TTL policy. */
+    private static final long SESSION_TTL_MS = 7L * 24 * 60 * 60 * 1000;
 
     /**
      * The DBSC protocol routes, unauthenticated by construction.
@@ -99,10 +92,7 @@ public class DemoFormLoginConfig {
          */
         @Bean
         @Order(1)
-        SecurityFilterChain appChain(
-                HttpSecurity http,
-                DemoLoginSuccessHandler successHandler,
-                DbscService dbsc) throws Exception {
+        SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc) throws Exception {
 
             http
                     .securityMatcher(new AntPathRequestMatcher("/**"))
@@ -110,9 +100,29 @@ public class DemoFormLoginConfig {
                             .requestMatchers("/login", "/css/**", "/favicon.ico").permitAll()
                             .requestMatchers("/app/payment").authenticated()
                             .anyRequest().authenticated())
+                    // The one DBSC call the application has to make, and it belongs
+                    // here rather than in a separate handler class: it needs the
+                    // request, the response and the authenticated principal together,
+                    // and after Security's own authentication this is the earliest
+                    // point where all three exist.
                     .formLogin(form -> form
                             .loginPage("/login")
-                            .successHandler(successHandler)
+                            .successHandler((request, response, authentication) -> {
+                                // The demo asserts the session id is stable; forcing
+                                // creation here means a login always has one, even if
+                                // nothing touched it earlier. bind() keys the DBSC
+                                // session on exactly this id, so a DBSC binding and a
+                                // login session cannot drift apart.
+                                HttpSession session = request.getSession();
+
+                                // The TTL is the application's policy, not DBSC's.
+                                // Pass the same lifetime the login session gets, or
+                                // the two expire on different clocks.
+                                dbsc.bind(session.getId(), authentication.getName(),
+                                        SESSION_TTL_MS, request, response);
+
+                                response.sendRedirect("/app");
+                            })
                             .permitAll())
                     // Spring Security keeps the CSRF token in the session and, by
                     // default, only accepts it as a request parameter. The demo's

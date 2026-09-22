@@ -23,17 +23,12 @@ and the theft is reported as `session_stolen`.
 
 | Area | Status |
 |---|---|
-| Native protocol (Chromium, spec 02) | ✅ registration, refresh, well-known document |
+| Native protocol | ✅ registration, refresh, well-known document |
 | Hardware-backed key binding (TPM / Secure Enclave) | ✅ `ES256` + `RS256` |
 | Atomic challenge consumption | ✅ in-memory + JDBC |
 | Tier model + demotion-on-failure | ✅ `dbsc` / `none` |
 | Telemetry events | ✅ 6 event types |
 | Rate limiting | ✅ per-IP, with a separate failure budget |
-| DPoP (spec 10) | ❌ out of scope — an orthogonal layer |
-
-**Test status: 72 tests passing**, including the toolkit's language-neutral
-conformance vectors (`registration-header`, `registration`, `refresh`) replayed
-through the real engine.
 
 ## The protection model
 
@@ -114,7 +109,11 @@ from the JAR's `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfi
 
 ### 2. Wire `DbscFilter` into your chain
 
-The library ships **one `OncePerRequestFilter` bean and no `SecurityFilterChain`.**
+The library ships **one `OncePerRequestFilter` bean and no `SecurityFilterChain`** — the
+filter is *not* wired into Security for you, and is not auto-registered as a servlet
+filter either, so a JAR that is merely on the classpath does nothing until you add it.
+See [below](#2-wire-dbscfilter-into-your-chain-1) for the registration that is easiest
+to leave out.
 Nothing is registered into Spring Security for you, because *where* the filter sits,
 which paths bypass authentication, and what authorization runs elsewhere in the chain
 are policy decisions that belong to your application. A library-supplied chain would
@@ -142,7 +141,11 @@ public class MySecurityConfig {
                 .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .csrf(CsrfConfigurer::disable)
-                .addFilterBefore(dbscFilter, UsernamePasswordAuthenticationFilter.class);
+                // CsrfFilter, not UsernamePasswordAuthenticationFilter: a filter placed
+                // relative to the latter still runs after CSRF, which would reject the
+                // browser's registration POST (it carries no CSRF token) before DBSC
+                // ever sees it.
+                .addFilterBefore(dbscFilter, CsrfFilter.class);
         return http.build();
     }
 
@@ -159,23 +162,17 @@ public class MySecurityConfig {
 }
 ```
 
-The three details that actually matter, and how each one fails:
+The two details that actually matter, and how each one fails:
 
 | Detail | If you get it wrong |
 |---|---|
 | `OrRequestMatcher` for the protocol paths — `securityMatcher()` **sets**, it does not accumulate | Only the last path is matched; the rest fall through to your chain, which answers a Spring 403 before `DbscFilter` runs |
-| `addFilterBefore(..., UsernamePasswordAuthenticationFilter.class)` **and** CSRF off on the protocol chain | The browser's registration POST is rejected by CSRF first, or Security's entry point turns DBSC's 403 into a 401 — which Chromium treats as fatal and deletes the session |
+| `addFilterBefore(..., CsrfFilter.class)` **and** CSRF off on the protocol chain | The browser's registration POST carries no CSRF token, so a chain that applies CSRF to `/dbsc/**` rejects it before `DbscFilter` runs |
 | The bean is registered in **one** chain only | `OncePerRequestFilter` records itself in a request attribute, so the same instance in a second chain silently skips it |
 
-Anchoring on `UsernamePasswordAuthenticationFilter.class` is **not** a dependency on
-form login. `HttpSecurity` registers that class as an ordering *position* when it is
-constructed; `formLogin()` merely adds an instance at that position. Only an anchor
-naming a filter **instance** would require the filter to exist, so this is valid for
-OIDC, HTTP Basic, pre-authentication, and no authentication at all.
-
-Boot also auto-registers every `Filter` bean as a plain servlet filter *outside* the
-security chain, which would run the DBSC filter a second time on every path. Disable
-that:
+**Disable Boot's automatic servlet registration.** A `Filter` bean is picked up by the
+servlet container as well as by the security chain, which would run `DbscFilter` a
+second time on every request:
 
 ```java
 @Bean
@@ -186,172 +183,13 @@ FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
 }
 ```
 
-One instance per chain. `OncePerRequestFilter` records that it has run in a request
-attribute, so registering the *same* instance in two chains makes the second chain
-silently skip it.
-
-If you do not use Spring Security at all, see
-[No Spring Security at all](#no-spring-security-at-all) — `DbscFilter` is not a
-Security component and registers as a plain servlet filter.
+Anchoring on `CsrfFilter.class` is not a dependency on CSRF being *enabled* — only on
+it being **ordered**, which `HttpSecurity` guarantees whenever it is in the chain. It is
+the earliest anchor that is still a Spring Security filter, which is what keeps DBSC's
+`403` from being turned into a `401` by Security's entry point. The demo README
+(`src/demo/resources/README-DEMO.md`) records what the other anchors cost.
 
 ### Examples
-
-#### OIDC / `oauth2Login()`
-
-DBSC binds a session that already exists, so it composes with any authentication
-mechanism. For OIDC and SAML, however, **the obvious place to bind does not work** —
-read [Binding behind OIDC or SAML](#binding-behind-oidc-or-saml-why-the-first-offer-fails)
-before wiring this up, because the fix is application code and the failure is silent.
-
-The shape below is the *retry* variant: the callback only decides where to land, and
-the binding happens on the first ordinary same-site request.
-
-```java
-@Configuration
-@EnableWebSecurity
-public class OidcSecurityConfig {
-
-    @Bean
-    SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc) throws Exception {
-        http
-                .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/login/**", "/oauth2/**").permitAll()
-                        .requestMatchers("/api/transfer").authenticated()
-                        .anyRequest().authenticated())
-                .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) ->
-                        // No bind() here: this response is cross-site, so the
-                        // registration POST it triggers loses the session cookie.
-                        response.sendRedirect("/")));
-        return http.build();
-    }
-}
-```
-
-Then bind from a route the browser reaches on its own, for example the landing page:
-
-```java
-@GetMapping("/")
-public String home(HttpServletRequest request, HttpServletResponse response, Model model) {
-    dbsc.bind(request.getSession().getId(), request.getUserPrincipal().getName(),
-              86_400_000L, request, response);
-    return "home";
-}
-```
-
-`request.getSession().getId()` is the right session id whenever the app keeps an
-`HttpSession`. Note the ordering: `bind()` reads the session, so the session must
-already exist at that point. In a success handler it does, because authentication
-created it.
-
-**The user id must not come from a mutable claim.** Whichever claim you read, do not
-take it from `preferred_username` or `email`: the binding would change owner if the
-address did. The OIDC `sub` claim is the stable choice — for `oauth2Login()` that
-means setting `user-name-attribute: sub`, which is what `auth.getName()` then returns.
-
-If your app has no `HttpSession`, bind to whatever opaque id you already mint per
-client — as in [the stateless example](#stateless-api--bearer-tokens) — rather than
-inventing one for this.
-
-##### Binding behind OIDC or SAML: why the first offer fails
-
-This is the one part of DBSC integration that is not a one-liner, and it fails in a way
-that looks like a server bug. Worth understanding before choosing a strategy.
-
-Chromium makes a DBSC request inherit the **initiator** of the request that produced
-it. For an OIDC or SAML login, the response carrying your `Secure-Session-Registration`
-header is the **callback** — and the callback's initiator is the identity provider,
-not your site. So the registration POST Chromium fires in response counts as
-**cross-site**, and Chromium withholds your `SameSite=Lax` session cookie from it:
-
-```
-GET  /login/oauth2/code/entraid   302   session cookie set
-POST /dbsc/registration           403   session cookie NOT sent
-```
-
-Your registration route sees a request with no session and answers `403`. Worse,
-Chromium records that failure as permanent and does not retry for the rest of that
-login, so the session stays at `tier: none` no matter how long it lives.
-
-A server-side redirect does **not** help: `302`/`303` to your own page keeps the
-callback as the initiator. Only a navigation the *browser* issues on its own — a
-click, a page load, a script-driven location change — resets it.
-
-**This library does not work around it.** `bind()` advertises the header on whatever
-request you call it from and does not inspect `Sec-Fetch-Site`; deciding when to try
-again is application policy, and it depends on your login flow. Two strategies work;
-both are the app's code, not the library's.
-
-###### Strategy 1: bounce through a page the browser navigates to
-
-Do not bind in the callback. Bind from a same-site page the browser reaches by
-trusting a navigation it issued itself:
-
-```java
-// The success handler only decides where to land. No bind() here.
-.oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) ->
-        response.sendRedirect("/post-login")))
-```
-
-```html
-<!-- Templates, not a redirect: the script issues a navigation the browser owns. -->
-<script>location.replace('/post-login/bind')</script>
-```
-
-```java
-@GetMapping("/post-login/bind")
-public void bind(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    dbsc.bind(request.getSession().getId(), request.getUserPrincipal().getName(),
-              86_400_000L, request, response);
-    response.sendRedirect("/");            // registration lands: same-site, cookie present
-}
-```
-
-The extra hop is the cost, and it reveals the session id in a URL. It also adds a
-page the user passes through, which is why it is the fallback rather than the
-default.
-
-###### Strategy 2: retry from any same-site route the app already has
-
-Do not special-case the login at all. Call `bind()` from the first ordinary request
-the user makes after landing — `/`, a dashboard, an API call. That request is
-same-site, so its cookie is present and registration succeeds:
-
-```java
-@GetMapping("/")
-public String home(HttpServletRequest request, HttpServletResponse response, Model model) {
-    // Idempotent, and cheap when the session is already bound: bind() records the
-    // session again and re-advertises the header. Chromium ignores the offer once
-    // it has registered.
-    dbsc.bind(request.getSession().getId(), request.getUserPrincipal().getName(),
-              86_400_000L, request, response);
-    return "home";
-}
-```
-
-But the same trap applies at one remove: if `/` is *itself* reached by a redirect
-from the callback, that navigation is still the provider's. Strategy 2 needs the user
-to arrive by a route the browser initiates — a bookmark, a typed URL, clicking a link
-on a page. In a flow that ends with an automatic redirect, that may never happen, and
-the session quietly stays unbound. **If you cannot point at the browser-initiated
-navigation in your flow, use Strategy 1.**
-
-###### Choosing, and the cost of retrying
-
-| | Strategy 1 | Strategy 2 |
-|---|---|---|
-| Extra hop | yes, one | no |
-| Needs a browser-initiated navigation | yes, guaranteed by the script | yes, and you must find one |
-| Works with a pure redirect chain | yes | **no** |
-| Bind location | a dedicated route | an existing route |
-
-Whichever you pick, keep the call **idempotent and unbudgeted** — that is what
-`bind()` is. It costs one challenge and two cookie writes per call. Do not put it on a
-hot path, and do not call it from an unauthenticated route: `bind()` trusts its
-arguments, and `getUserPrincipal()` is what makes the session id trustworthy.
-
-For the form-login case none of this applies. Form login owns the POST the browser
-made to your own origin, so the callback *is* same-site and a single `bind()` in the
-success handler is complete.
 
 #### Form login (password)
 
@@ -360,7 +198,8 @@ the success handler there too:
 
 ```java
 @Bean
-SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc) throws Exception {
+SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
+                             DbscFilter dbscFilter) throws Exception {
     http
             .authorizeHttpRequests(auth -> auth
                     .requestMatchers("/login", "/css/**").permitAll()
@@ -374,7 +213,8 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc) throws Excepti
                     }))
             .logout(logout -> logout.logoutSuccessHandler((request, response, auth) ->
                     dbsc.sessionFor(request)
-                            .ifPresent(s -> dbsc.terminate(s.id(), request, response))));
+                            .ifPresent(s -> dbsc.terminate(s.id(), request, response))))
+            .addFilterBefore(dbscFilter, CsrfFilter.class);
     return http.build();
 }
 ```
@@ -382,54 +222,70 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc) throws Excepti
 `src/demo` is a complete, runnable form-login app over HTTPS, and
 `src/demo/resources/README-DEMO.md` records the failure modes it exists to catch.
 
-#### Stateless API / bearer tokens
+#### OIDC / `oauth2Login()`
 
-With no HTTP session at all, choose a session id that is stable for the *client*, not
-the request, and route the cookie through the response yourself:
+DBSC binds a session that already exists, so it composes with any authentication
+mechanism. For OIDC and SAML, however, **the obvious place to bind does not work**, and
+the fix is application code. The example below already applies it; the reasoning is in
+[Binding behind OIDC or SAML](#binding-behind-oidc-or-saml-why-the-first-offer-fails)
+near the end of this document.
 
-```java
-@PostMapping("/login")
-public TokenResponse login(@RequestBody Credentials credentials,
-                           HttpServletRequest request,
-                           HttpServletResponse response) {
-    var principal = authenticate(credentials);          // your own auth
-    var sessionId = "sess_" + UUID.randomUUID();         // your own session store
-    dbsc.bind(sessionId, principal.id(), 86_400_000L, request, response);
-    return new TokenResponse(sessionId);
-}
-```
-
-#### No Spring Security at all
-
-`DbscFilter` is not a Security component — nothing in it touches a Security request
-wrapper or context. Register it as a plain servlet filter:
+The shape below is the fix: the callback's response is a small page that navigates, and
+the route it navigates to does the binding. Both parts are in the same config class on
+purpose — the handler that puts the browser on the route and the route itself are one
+mechanism.
 
 ```java
-@Bean
-FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
-    var registration = new FilterRegistrationBean<>(filter);
-    registration.addUrlPatterns("/dbsc/*", "/.well-known/*");
-    registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
-    return registration;
+@Configuration
+@EnableWebSecurity
+public class OidcSecurityConfig {
+
+    @Bean
+    SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
+                                 DbscFilter dbscFilter) throws Exception {
+        http
+                .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/login/**", "/oauth2/**", "/error").permitAll()
+                        .requestMatchers("/api/transfer").authenticated()
+                        .anyRequest().authenticated())
+                .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) -> {
+                    // No bind() here: this response is cross-site, so the registration
+                    // POST it would trigger loses its SameSite=Lax session cookie.
+                    request.getSession();
+                    // A navigation the browser issues itself is the only thing that
+                    // re-originates the request on this site. Serve a page that makes
+                    // one — a redirect would not, because it keeps this response's
+                    // initiator.
+                    //
+                    // text/html, not text/javascript: a navigation response is only
+                    // executed when the browser reads it as a document.
+                    response.setContentType("text/html");
+                    response.setCharacterEncoding("UTF-8");
+                    response.getWriter().write(
+                            "<script>location.replace('/post-login/bind');</script>");
+                }))
+                .addFilterBefore(dbscFilter, CsrfFilter.class);
+        return http.build();
+    }
+
+    /**
+     * The one route the binding runs on. Reached by the navigation above, so this
+     * request is same-site and its session cookie comes with it.
+     */
+    @Bean
+    RouterFunction<ServerResponse> bindRoute(DbscService dbsc) {
+        return route().GET("/post-login/bind", request -> {
+            HttpServletRequest req = request.servletRequest();
+            HttpServletResponse res =
+                    ((ServletRequestAttributes) RequestContextHolder.currentRequestAttributes())
+                            .getResponse();
+            dbsc.bind(req.getSession().getId(), req.getUserPrincipal().getName(),
+                      86_400_000L, req, res);
+            return ServerResponse.temporaryRedirect(URI.create("/")).build();
+        }).build();
+    }
 }
 ```
-
-### 3. Bind, terminate, act on the tier
-
-Details and the reasoning are in
-[Wiring it into your own app](#wiring-it-into-your-own-app); the short version:
-
-- **`dbsc.bind(sessionId, userId, ttlMillis, request, response)`** — from an
-  authenticated request, usually at the end of your login flow. Binding is idempotent
-  per session; the browser does the rest of the native registration on its own. Behind
-  an OIDC or SAML callback the first call cannot succeed — see
-  [Binding behind OIDC or SAML](#binding-behind-oidc-or-saml-why-the-first-offer-fails)
-  for where to call it instead.
-- **`dbsc.terminate(...)`** — on logout, so the browser forgets the binding instead of
-  retrying against a dead session.
-- **`dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)`** — the DBSC state your own
-  code reads when it wants to require a bound session. See
-  [Act on the tier](#act-on-the-tier).
 
 ## Architecture
 
@@ -444,42 +300,6 @@ chain invokes**, not by controllers:
 the protocol itself — neither depends on Spring Security. See
 [How it is wired (and why)](#how-it-is-wired-and-why) for the reasoning. There is no
 second filter: the library does not guard application routes.
-
-## Running the tests
-
-The build is on GitHub Actions:
-
-- **[`build.yml`](./.github/workflows/build.yml)** — `mvn verify` on Java 17, 21 and 25
-  (blocking) and 26 (experimental). Uploads the library JAR.
-- **[`e2e.yml`](./.github/workflows/e2e.yml)** — boots two demo instances over HTTPS
-  and runs `scripts/e2e.py` against them, then checks error-code coverage.
-
-The E2E workflow exists because some scenarios are only reachable under test
-conditions: the expiry checks need a tiny challenge TTL, and the throttling check
-needs an instance whose rate-limit budget is small enough to exhaust on purpose
-(the main demo's are set to 1000 so the suite's own deliberate failures do not
-throttle the run that is testing them). At the production defaults the suite skips
-those checks rather than testing them.
-
-`scripts/check-error-coverage.py` is a gate, not a convenience: it fails the build
-when an error code is defined but no scenario reaches it. Both `RATE_LIMITED` and
-`INVALID_JWK` were reaching real code paths that nothing tested before it existed.
-
-Locally:
-
-```sh
-mvn verify
-
-# E2E, both instances (see src/demo/resources/README-DEMO.md for detail)
-sh scripts/run-demos.sh
-DBSC_CHALLENGE_TTL=2 DBSC_RATE_LIMIT_FAILURES=5 python3 scripts/e2e.py
-python3 scripts/check-error-coverage.py
-```
-
-The web tests run against `DbscTestHostApplication` in `src/test` — a miniature
-host app that stands in for yours: a login route that calls `bind()`, a `whoami`
-route, a `payment` route, and a logout route. Read it first when wiring
-the library up; it is the smallest complete integration.
 
 ## Wiring it into your own app
 
@@ -505,8 +325,10 @@ work is a worse failure mode than an absent one.
 
 ### 2. Bind a session from your login route
 
-DBSC does not authenticate. It **binds a session that already exists**, so the
-call goes at the end of your existing login handler:
+DBSC does not authenticate. It **binds a session that already exists**, so the call goes
+at the end of your existing login handler — see
+[The application API](#the-application-api) for what `bind()` does and why the call is
+required:
 
 ```java
 @PostMapping("/login")
@@ -517,21 +339,8 @@ public Session login(HttpServletRequest request, HttpServletResponse response) {
 }
 ```
 
-That single call persists the session record, sets the registration + challenge
-cookies, and adds `Secure-Session-Registration`. Chromium then calls
-`/dbsc/registration` on its own within about a second — there is no client code to
-write for the native path.
-
-**This call is required for a binding to exist.** `DbscFilter` handles the DBSC
-protocol routes only — it never adds the registration header to your application's
-own responses, so a login flow that never calls `bind()` produces no binding at all.
-Call it from an authenticated request, and call it again from a same-site one if the
-first attempt was lost (see the OIDC note above). The call is idempotent, so a route
-that binds on every request is fine; it is not free, though — each call issues a
-challenge and rewrites two cookies, so keep it off hot paths.
-
-On logout, call `dbsc.terminate(...)` so the browser forgets the binding
-immediately instead of retrying against a dead session:
+On logout, call `dbsc.terminate(...)` so the browser forgets the binding immediately
+instead of retrying against a dead session:
 
 ```java
 @PostMapping("/logout")
@@ -542,6 +351,107 @@ public void logout(HttpServletRequest request, HttpServletResponse response) {
 ```
 
 ### 3. Act on the tier
+
+Your authorization does not change: the library guards no routes, and DBSC is additional
+state your own code consults. The check is in
+[Act on the tier](#act-on-the-tier).
+
+## How it is wired (and why)
+
+DBSC is implemented as **one `OncePerRequestFilter`** rather than controllers,
+and it runs inside the Spring Security chain because that is where your application
+decides what is reachable:
+
+```mermaid
+flowchart TD
+    A[Request] --> B{DBSC protocol paths?}
+    B -- yes --> C[DbscFilter<br/>before CsrfFilter]
+    C --> C2[terminates:<br/>writes status + headers + body]
+    B -- no --> E[your authentication<br/>and authorization]
+    E --> F[your controller]
+```
+
+Neither branch consults DBSC state: the protocol paths are served and stop there, and
+everything else is your application's chain, unchanged. Gating an endpoint on the tier
+is your code, not a filter — see [Act on the tier](#act-on-the-tier).
+
+The reasons for a filter rather than controllers:
+
+- **These are a protocol surface, not endpoints.** The routes must be reachable
+  before any application session exists, and must answer with DBSC's own status
+  contract. A filter that terminates the chain enforces that structurally: the
+  routes cannot be re-mapped, shadowed by a peer controller, or re-secured.
+- **403 vs 401 is load-bearing, and only a filter can guarantee it.** Chromium
+  treats a 401 on the refresh route as fatal and terminates the session, so DBSC
+  must answer 403. If Spring Security handled these paths itself it would answer
+  401 first. `DbscFilter` is registered *before* Spring Security's CSRF filter — the
+  earliest anchor that is still a Security filter — so nothing upstream can reject the
+  browser's registration POST or replace that status.
+- **It owns no state the application needs to configure.** The filter is handed the
+  session-agnostic protocol surface only, so it adds no ordering constraints to your
+  chain beyond the one above and no policy of its own over your routes.
+
+### Using your own `SecurityFilterChain`
+
+That is the only way to use the library — [Getting Started](#getting-started) is the
+full worked example, and the two chains there are the shape to copy. The three details
+worth restating here, because each one fails silently:
+
+- **The protocol paths belong in a chain with CSRF disabled.** The browser's
+  registration POST carries no CSRF token, so a chain that applies CSRF to `/dbsc/**`
+  rejects it with `403` before `DbscFilter` ever runs — and the status looks like a
+  DBSC refusal.
+- **`dbscFilter` goes before `CsrfFilter`**, not merely before authentication.
+  Anything `addFilterBefore` anchors on is still ordered *after* CSRF, so the
+  registration POST would be rejected first.
+- **The filter goes in exactly one chain.** `OncePerRequestFilter` records itself in a
+  request attribute, so the same instance in a second chain is skipped without a word.
+
+### Replace the collaborators you have opinions about
+
+`DbscAutoConfiguration` backs off with `@ConditionalOnMissingBean` on every
+bean, so defining your own replaces the default. The ones most worth replacing:
+
+| Bean | Default | Replace when |
+|---|---|---|
+| `StorageAdapter` | JDBC when a `DataSource` is present, else in-memory | You already have a key/session store — implement the interface; the only hard requirement is an **atomic** `consumeChallenge` |
+| `RateLimiter` | In-memory, per-IP | You run more than one process (the in-memory limiter is per-JVM) — or you use a gateway/bucket you already have |
+| `CookieScope` | Resolved from `secure` / `cookie-scope` / `cookie-domain` | You build cookie names or attributes yourself |
+| `ChallengeService`, `DbscProtocolEngine`, `TelemetryPublisher` | Library defaults | You need different challenge or telemetry behaviour |
+| `Clock` | `Clock.systemUTC()` | You need to freeze time. Override the bean **named `dbscClock`** (`@ConditionalOnMissingBean(name = "dbscClock")`) |
+
+```java
+@Bean
+StorageAdapter dbscStorage(MyRedisClient redis) {
+    return new RedisStorageAdapter(redis);   // must make consumeChallenge atomic
+}
+```
+
+`DbscService` itself is also `@ConditionalOnMissingBean`, but it is a plain
+facade — wrapping or replacing it is rarely worth it.
+
+## The application API
+
+Three calls are the whole integration surface. The examples above show where they go;
+this is what they do.
+
+| Call | When |
+|---|---|
+| `dbsc.bind(sessionId, userId, ttlMillis, request, response)` | From an authenticated request, usually at the end of your login flow |
+| `dbsc.terminate(sessionId, request, response)` | On logout, so the browser forgets the binding instead of retrying against a dead session |
+| `dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)` | Whenever your own code wants to know whether this browser is bound |
+
+**`bind()` is the only thing that starts a binding.** It persists the session record,
+sets the registration + challenge cookies, and adds `Secure-Session-Registration`;
+Chromium then calls `/dbsc/registration` on its own within about a second, with no
+client code to write. `DbscFilter` never adds that header to your application's own
+responses, so a login flow that never calls `bind()` produces no binding at all.
+
+The call is idempotent per session and cheap but not free — one challenge and two
+cookie writes — so a route that binds on every request is fine, and keeping it off hot
+paths is better.
+
+### Act on the tier
 
 There is nothing to declare and nothing to enable: the library does not guard routes.
 Your authentication and authorization keep working exactly as they did, and DBSC is
@@ -575,81 +485,6 @@ If your application cannot act on a weaker tier — for example a compliance rul
 says a stolen cookie must never be usable — say so explicitly rather than assuming the
 handshake alone covers it: `bind()` and the routes are all the library does, and it is
 application code like the block above that turns a bound session into an enforced one.
-
-## How it is wired (and why)
-
-DBSC is implemented as **one `OncePerRequestFilter`** rather than controllers,
-and it runs inside the Spring Security chain because that is where your application
-decides what is reachable:
-
-```mermaid
-flowchart TD
-    A[Request] --> B{DBSC protocol paths?}
-    B -- yes --> C[DbscFilter<br/>before UsernamePasswordAuthenticationFilter]
-    C --> C2[terminates:<br/>writes status + headers + body]
-    B -- no --> E[your authentication<br/>and authorization]
-    E --> F[your controller]
-```
-
-Neither branch consults DBSC state: the protocol paths are served and stop there, and
-everything else is your application's chain, unchanged. Gating an endpoint on the tier
-is your code, not a filter — see [Act on the tier](#act-on-the-tier).
-
-The reasons for a filter rather than controllers:
-
-- **These are a protocol surface, not endpoints.** The routes must be reachable
-  before any application session exists, and must answer with DBSC's own status
-  contract. A filter that terminates the chain enforces that structurally: the
-  routes cannot be re-mapped, shadowed by a peer controller, or re-secured.
-- **403 vs 401 is load-bearing, and only a filter can guarantee it.** Chromium
-  treats a 401 on the refresh route as fatal and terminates the session, so DBSC
-  must answer 403. If Spring Security handled these paths itself it would answer
-  401 first. `DbscFilter` is registered *before* Spring Security's authentication
-  entry points precisely so nothing upstream can replace that status.
-- **It owns no state the application needs to configure.** The filter is handed the
-  session-agnostic protocol surface only, so it adds no ordering constraints to your
-  chain beyond the one above and no policy of its own over your routes.
-
-### Using your own `SecurityFilterChain`
-
-That is the only way to use the library — [Getting Started](#getting-started) is the
-full worked example, and the two chains there are the shape to copy. This section only
-adds the reasoning behind the filter placement.
-
-- **`dbscFilter` goes in the chain that owns the protocol paths, before
-  authentication.** Security would otherwise answer 401 there, and Chromium treats 401
-  on the refresh route as fatal. It belongs in exactly one chain.
-
-And the detail that is easy to miss: **the protocol paths must be served by a chain with
-CSRF disabled.** The browser's registration POST carries no CSRF token, so a chain that
-applies CSRF to `/dbsc/**` rejects it before `DbscFilter` ever runs.
-
-If you do not use Spring Security at all, see
-[No Spring Security at all](#no-spring-security-at-all) — `DbscFilter` is not a Security
-component and registers as a plain servlet filter.
-
-### Replace the collaborators you have opinions about
-
-`DbscAutoConfiguration` backs off with `@ConditionalOnMissingBean` on every
-bean, so defining your own replaces the default. The ones most worth replacing:
-
-| Bean | Default | Replace when |
-|---|---|---|
-| `StorageAdapter` | JDBC when a `DataSource` is present, else in-memory | You already have a key/session store — implement the interface; the only hard requirement is an **atomic** `consumeChallenge` |
-| `RateLimiter` | In-memory, per-IP | You run more than one process (the in-memory limiter is per-JVM) — or you use a gateway/bucket you already have |
-| `CookieScope` | Resolved from `secure` / `cookie-scope` / `cookie-domain` | You build cookie names or attributes yourself |
-| `ChallengeService`, `DbscProtocolEngine`, `TelemetryPublisher` | Library defaults | You need different challenge or telemetry behaviour |
-| `Clock` | `Clock.systemUTC()` | You need to freeze time. Override the bean **named `dbscClock`** (`@ConditionalOnMissingBean(name = "dbscClock")`) |
-
-```java
-@Bean
-StorageAdapter dbscStorage(MyRedisClient redis) {
-    return new RedisStorageAdapter(redis);   // must make consumeChallenge atomic
-}
-```
-
-`DbscService` itself is also `@ConditionalOnMissingBean`, but it is a plain
-facade — wrapping or replacing it is rarely worth it.
 
 ## Configuration
 
@@ -728,6 +563,65 @@ milliseconds throughout, matching how the protocol carries them.
 If you would rather not carry the migration at all, `initialize()` is also safe to call
 yourself from a schema-management hook — the DDL statements are quoted at the top of
 `JdbcStorageAdapter`.
+
+## Binding behind OIDC or SAML: why the first offer fails
+
+This is the one part of DBSC integration that is not a one-liner, and it fails in a way
+that looks like a server bug. Worth understanding before wiring OIDC or SAML up.
+
+Chromium makes a DBSC request inherit the **initiator** of the request that produced
+it. For an OIDC or SAML login, the response carrying your `Secure-Session-Registration`
+header is the **callback** — and the callback's initiator is the identity provider,
+not your site. So the registration POST Chromium fires in response counts as
+**cross-site**, and Chromium withholds your `SameSite=Lax` session cookie from it:
+
+```
+GET  /login/oauth2/code/entraid   302   session cookie set
+POST /dbsc/registration           403   session cookie NOT sent
+```
+
+Your registration route sees a request with no session and answers `403`. Worse,
+Chromium records that failure as permanent and does not retry for the rest of that
+login, so the session stays at `tier: none` no matter how long it lives.
+
+A server-side redirect does **not** help: `302`/`303` to your own page keeps the
+callback as the initiator. Only a navigation the *browser* issues on its own — a
+click, a page load, a script-driven location change — resets it. This is the part that
+surprises people: the page you redirect to after the callback is *still* cross-site,
+so binding there fails exactly like binding in the callback did.
+
+**This library does not work around it.** `bind()` advertises the header on whatever
+request you call it from and does not inspect `Sec-Fetch-Site`; deciding where to call
+it from is application policy, and it depends on your login flow. The pattern below is
+the app's code, not the library's, and it is the one that always works.
+
+### Let the callback answer with a navigation
+
+Shown in full in [the OIDC example](#oidc--oauth2login) above. The two rules to take
+away: do not call `bind()` on the callback's response, and do not call it from a route
+a `302` led to either — both carry the identity provider as their initiator. Serve a
+page that navigates instead, and bind on the route that navigation reaches.
+
+The cost is one extra request. Two details worth copying: use `location.replace` rather
+than `location.href`, so the hop does not enter the history and Back from the app does
+not trigger a second binding; and serve the script as `text/html`, since a navigation
+response is only executed when the browser reads it as a document.
+
+Why not bind from some route the user navigated to themselves, saving the hop? Because
+you cannot rely on one existing. A flow that ends in `sendRedirect("/")` reaches `/` as
+the callback's navigation — still cross-site — so `bind()` there looks like it should
+work and silently never does, leaving the session at `tier: none` while every request
+appears to succeed. The relay route is the only navigation you control.
+
+Whichever route you bind on, `bind()` is safe to call more than once: it is idempotent
+per session, and it costs one challenge plus two cookie writes each time. Chromium
+ignores the offer once the session has registered. Keep it off hot paths, and never call
+it from an unauthenticated route — `bind()` trusts its arguments, and the authenticated
+principal is what makes the session id trustworthy.
+
+For form login none of this applies. Form login owns the POST the browser made to your
+own origin, so the success handler *is* same-site and a single `bind()` there is
+complete.
 
 ## Things worth knowing
 

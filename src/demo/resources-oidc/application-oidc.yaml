@@ -9,8 +9,10 @@
 #
 # Redirect URI to register on the app registration:
 #   https://localhost:8443/login/oauth2/code/entraid
-# That is Spring Security's callback path, not /oidc — /oidc is only the page the
-# browser lands on afterwards, and is where the DBSC binding actually happens.
+# That is Spring Security's callback path. The callback answers with a one-line HTML
+# script whose location.replace reaches /oidc/bind, where the DBSC binding happens. The
+# extra navigation is required and not optional — the callback response is cross-site,
+# so a registration header on it would never complete. See README-DEMO.md.
 #
 # `entraid` is only a local registration name; it is what appears in that callback
 # URL. The provider itself is whatever the issuer resolves to.
@@ -45,6 +47,6 @@ spring:
 
 logging:
   level:
-    # DBSC's own decisions, including the cross-site deferral in bind().
+    # DBSC's own decisions, including how it treats a session with no binding.
     click.yukio.dbsc: DEBUG
     org.springframework.security: INFO

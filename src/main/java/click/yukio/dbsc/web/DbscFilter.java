@@ -81,7 +81,9 @@ public class DbscFilter extends OncePerRequestFilter {
     /**
      * The filter must not run late: Spring Security's authentication entry point
      * answers 401, and on the refresh route Chromium treats 401 as fatal. Register
-     * before {@code UsernamePasswordAuthenticationFilter}.
+     * it before {@code CsrfFilter} — the earliest anchor that is still a Security
+     * filter, and therefore the only one that also keeps CSRF from rejecting the
+     * browser's registration POST first.
      */
     @Override
     protected boolean shouldNotFilterAsyncDispatch() {

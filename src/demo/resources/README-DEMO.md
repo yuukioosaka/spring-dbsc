@@ -129,21 +129,21 @@ but a secret is, and it is read from the environment only.
 
 Open <https://localhost:8443/app> and sign in at the identity provider. The
 redirect URI to register on the app is Spring Security's callback path, **not**
-`/oidc`:
+`/oidc/bind`:
 
 ```
 https://localhost:8443/login/oauth2/code/entraid
 ```
 
-`/oidc` is only the page the browser lands on after the callback. It does not call
-`bind()` itself — see the next section for why.
+The callback itself does not call `bind()`; it answers with a one-line script that
+navigates to `/oidc/bind`, where the binding happens. See the next section for why.
 
 `entraid` is only a local registration name; it is what appears in that callback
 URL. For a non-Entra provider, change the name (here and in the redirect URI) and
 set `ENTRA_ISSUER_URI`. The `user-name-attribute: sub` default suits any provider
 that issues a stable subject claim.
 
-### Why `/oidc` does not bind
+### Why the binding happens on `/oidc/bind`
 
 The OIDC callback response is **cross-site**: Chromium makes DBSC requests inherit the
 initiator of the request that caused them, and the initiator here is the identity
@@ -152,20 +152,29 @@ produces a registration POST whose `SameSite=Lax` session cookie is withheld, an
 Chromium records that failure as permanent and never retries for the rest of the
 login.
 
-So this demo does not bind from the callback. It uses **Strategy 2** from the README:
-`bind()` is called from `/app`, the first ordinary same-site request the user makes
-after landing. That request carries the session cookie, so the native registration
-completes there. `GET /app` happens to be the very next thing the page does, so in
-practice the binding is established about as fast as the callback would have been.
+The trap is that this does **not** stop at the callback. A server-side redirect keeps
+the original initiator, so an earlier revision of this demo redirected to `/oidc` and
+bound there — and `bind()` set `__Host-dbsc-reg` correctly, yet the very next
+`POST /dbsc/registration` still arrived without it and was refused with
+`SESSION_NOT_FOUND`. `/oidc` was a redirect target, so it was cross-site too.
 
-`DbscFilter` plays no part in this. It serves the protocol routes only and never adds
-the registration header to an application response, so the `bind()` calls in
-`DemoOidcConfig` and `DemoFormLoginConfig` are the whole mechanism.
+What works is a navigation the browser issues on its own. So the success handler answers
+the callback with a one-line `text/html` document whose script calls
+`location.replace('/oidc/bind')`, and the binding is made on the route it reaches.
 
-The alternative — the strategy this demo deliberately does *not* use — is to have the
-page issue `location.replace('/post-login/bind')` and bind there, which resets the
-initiator at the cost of an extra hop. See the README for when that is necessary:
-especially, when your flow has no browser-initiated navigation to hang Strategy 2 on.
+There is no relay route and no template: it is one line of script, so it lives inline in
+the handler. It has to be HTML rather than bare JavaScript — a navigation response is
+only executed when the browser reads it as a document, so serving `text/javascript`
+here would get it downloaded or shown as text instead of run. The document needs no
+`<html>` wrapper or doctype; a served page whose only content is the script is enough.
+
+This is the pattern the README describes under "Binding behind OIDC or SAML", and it is
+the variant that works unconditionally; hanging the binding on a route the user happened
+to navigate to needs that navigation to exist, which a redirect chain never provides.
+
+`DbscFilter` plays no part in any of this. It serves the protocol routes only and never
+advertises the registration header on an application response, so the `bind()` calls in
+`DemoOidcConfig.oidcBindRoute` and `DemoFormLoginConfig` are the whole mechanism.
 
 Form login never hits any of this: it binds from a POST the browser made to this
 origin, so the success handler is the right and only place.
@@ -253,10 +262,10 @@ of or work around here:
   (`/app/payment` is an ordinary authenticated POST — nothing per-request is
   verified, because the library no longer ships a proof guard).
 
-`bind()` is called from an `AuthenticationSuccessHandler` rather than a
-controller, because form login never reaches a handler method on the way in. A
-success handler is the only place that sees the request, the response and the
-authenticated user together.
+`bind()` is called from an `AuthenticationSuccessHandler`, declared inline in the
+chain rather than as a separate class, because form login never reaches a handler
+method on the way in. The success handler is the only place that sees the request,
+the response and the authenticated user together.
 
 Both filters are declared with `FilterRegistrationBean.setEnabled(false)`. Boot
 would otherwise auto-register them as plain servlet filters running *outside* the
@@ -293,7 +302,7 @@ and it is independent of how many routes there are. Chaining two calls to it
 silently keeps only the last, which is why the demo builds one `OrRequestMatcher`
 in a single call.
 
-### Anchor the DBSC filter on `CsrfFilter`, not `UsernamePasswordAuthenticationFilter`
+### Anchor the DBSC filter on `CsrfFilter`
 
 The order is `CsrfFilter` → `LogoutFilter` → `UsernamePasswordAuthenticationFilter`.
 A filter placed before the last of those still lands *after* CSRF, so the browser's
@@ -301,16 +310,16 @@ registration POST is rejected by CSRF first and DBSC never sees it. The demo anc
 `CsrfFilter` *and* disables CSRF on the protocol chain — either alone would do, but the
 demo keeps both so the chain reads correctly on its own.
 
-### The `UsernamePasswordAuthenticationFilter` anchor does not require form login
+### An anchor naming a filter *position* does not require that filter
 
-Anchoring on `UsernamePasswordAuthenticationFilter.class` looks like a dependency on
-`formLogin()`, so it is worth stating explicitly that it is not. `HttpSecurity`
-registers that class as an ordering *position* in `FilterOrderRegistration` when it is
-constructed; `formLogin()` merely adds an instance at that position. Anchoring on a
-position is valid whether or not an instance exists, so the DBSC filters install
-identically in a chain using OIDC (`oauth2Login()`), HTTP Basic, pre-authentication, or
-no authentication at all. Only an anchor naming a filter **instance** creates a real
-dependency. Verified in `NonFormLoginChainTest`.
+`addFilterBefore(..., CsrfFilter.class)` looks like a dependency on CSRF being enabled,
+and `UsernamePasswordAuthenticationFilter.class` looks like one on `formLogin()`. Neither
+is. `HttpSecurity` registers those classes as ordering *positions* in
+`FilterOrderRegistration` when it is constructed, and anchoring on a position is valid
+whether or not an instance ever exists at it — only an anchor naming a filter
+**instance** creates a real dependency. That is why the DBSC filter installs identically
+in a chain using OIDC (`oauth2Login()`), HTTP Basic, pre-authentication, or no
+authentication at all.
 
 ### A `403` with a Spring error body did not come from DBSC
 
