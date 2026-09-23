@@ -48,6 +48,12 @@ $MVN -DskipTests test-compile > /tmp/demo-compile.log 2>&1 || {
   exit 1
 }
 
+# The H2 files live under ./data, which four JVMs starting at once would each try to
+# create. H2's createDirectory is not atomic: the losers fail with "Error while
+# creating file .../data (a file with this name already exists)" at startup, so the
+# directory is made here, once, before any instance is launched.
+mkdir -p data
+
 nohup $MVN -Pdemo \
   -Dspring-boot.run.jvmArguments="$TTL" \
   spring-boot:run > /tmp/demo.log 2>&1 &

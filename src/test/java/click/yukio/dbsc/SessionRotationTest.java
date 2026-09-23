@@ -68,7 +68,7 @@ class SessionRotationTest {
     @Test
     @DisplayName("rotation: a successful refresh issues a different credential ticket")
     void refreshRotatesTheTicket() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, csrfTokenRepository);
         HttpFlowTest.TestKey key = HttpFlowTest.TestKey.generate();
         HttpFlowTest.register(mvc, cookieScope, login, key);
 
@@ -100,7 +100,7 @@ class SessionRotationTest {
     @Test
     @DisplayName("rotation: the retired ticket still resolves during the grace window")
     void retiredTicketKeepsWorkingDuringGrace() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, csrfTokenRepository);
         HttpFlowTest.TestKey key = HttpFlowTest.TestKey.generate();
         HttpFlowTest.register(mvc, cookieScope, login, key);
 
@@ -122,7 +122,7 @@ class SessionRotationTest {
     @Test
     @DisplayName("rotation: a failed signature never issues a ticket")
     void failedSignatureDoesNotRotate() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, csrfTokenRepository);
         HttpFlowTest.TestKey key = HttpFlowTest.TestKey.generate();
         HttpFlowTest.register(mvc, cookieScope, login, key);
 
@@ -152,7 +152,7 @@ class SessionRotationTest {
     @Test
     @DisplayName("rotation: a guarded route admits a request still carrying the retired ticket")
     void guardAdmitsRetiredTicketDuringGrace() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, csrfTokenRepository);
         HttpFlowTest.TestKey key = HttpFlowTest.TestKey.generate();
         HttpFlowTest.register(mvc, cookieScope, login, key);
 

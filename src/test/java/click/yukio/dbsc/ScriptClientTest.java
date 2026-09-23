@@ -76,7 +76,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("bind route: re-offers registration as the same headers bind() writes")
     void bindRouteOffersTheSameWireFormat() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
 
         MvcResult result = bind(login);
         var response = result.getResponse();
@@ -108,7 +108,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("bind route: the session it offers for is the one the login bound")
     void bindRouteNamesTheSameSession() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
 
         var response = bind(login).getResponse();
         String challengeHeader = response.getHeader("Secure-Session-Challenge");
@@ -129,7 +129,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("bind route: each call mints a fresh token, and only the newest one works")
     void bindRouteTokenIsSingleUsePerOffer() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
 
         var first = bind(login).getResponse();
         String firstPath = pathOf(first.getHeader("Secure-Session-Registration"));
@@ -153,7 +153,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("bind route: an offer is spent by the registration POST, and replayed offers are refused")
     void bindRouteOffersAreSingleUseOncePresented() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
         HttpFlowTest.TestKey key = HttpFlowTest.TestKey.generate();
 
         String registration = bind(login).getResponse().getHeader("Secure-Session-Registration");
@@ -175,7 +175,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("bind route: a fresh offer supersedes the challenge the login issued")
     void bindRouteSupersedesThePreviousOffer() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
 
         var response = bind(login).getResponse();
         String registration = response.getHeader("Secure-Session-Registration");
@@ -189,7 +189,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("bind route: the re-offered challenge registers a key on the normal path")
     void bindRouteOfferActuallyRegisters() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
         HttpFlowTest.TestKey key = HttpFlowTest.TestKey.generate();
 
         var offer = bind(login).getResponse();
@@ -233,7 +233,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("bind route: a session that already has a key is not offered a second one")
     void bindRouteRefusesAnAlreadyRegisteredSession() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
         HttpFlowTest.register(mvc, cookieScope, login, HttpFlowTest.TestKey.generate());
 
         MvcResult result = bind(login);
@@ -252,7 +252,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("X-Session-Id names the session on the refresh first leg")
     void xSessionIdResolvesTheRefreshSession() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
         HttpFlowTest.register(mvc, cookieScope, login, HttpFlowTest.TestKey.generate());
 
         MvcResult result = mvc.perform(post("/dbsc/refresh")
@@ -271,7 +271,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("X-Session-Id completes a full refresh, same as the Sec- name")
     void xSessionIdCompletesARefresh() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
         HttpFlowTest.TestKey key = HttpFlowTest.TestKey.generate();
         HttpFlowTest.register(mvc, cookieScope, login, key);
 
@@ -314,7 +314,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("X-Session-Id: the value may be a quoted sf-string, as the Sec- name may")
     void xSessionIdAcceptsAQuotedValue() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
         HttpFlowTest.register(mvc, cookieScope, login, HttpFlowTest.TestKey.generate());
 
         MvcResult result = mvc.perform(post("/dbsc/refresh")
@@ -333,13 +333,13 @@ class ScriptClientTest {
     @Test
     @DisplayName("X-Session-Id: when both names are present the X- one wins")
     void xSessionIdTakesPrecedenceWhenBothAreSent() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
         HttpFlowTest.TestKey key = HttpFlowTest.TestKey.generate();
         HttpFlowTest.register(mvc, cookieScope, login, key);
 
         // Two sessions, so the two headers name genuinely different sessions and the
         // outcome says which one was read.
-        HttpFlowTest.LoginState other = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState other = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
         HttpFlowTest.register(mvc, cookieScope, other, HttpFlowTest.TestKey.generate());
 
         MvcResult result = mvc.perform(post("/dbsc/refresh")
@@ -362,7 +362,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("bind route: refuses a session that is not carried in a cookie")
     void bindRouteRefusesASessionThatIsNotInACookie() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
 
         // The session is real and the route is authenticated, but the caller names it
         // by a header rather than by a cookie. Nothing in the request shows the caller
@@ -385,7 +385,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("bind route: refuses a request the browser calls cross-site")
     void bindRouteRefusesCrossSite() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
 
         var response = mvc.perform(post("/dbsc/bind")
                         .session(login.appSession())
@@ -402,7 +402,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("bind route: a same-origin request with no Sec-Fetch-Site is still served")
     void bindRouteServesRequestsWithoutFetchMetadata() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
 
         // Firefox before 90 and anything that is not a browser send no Sec-Fetch-Site.
         // Refusing the absent header would break the clients this route exists for, so
@@ -421,7 +421,7 @@ class ScriptClientTest {
     @Test
     @DisplayName("bind route: the offer names a session whose value the cookie actually carried")
     void bindRouteNamesOnlyTheCookieProvenSession() throws Exception {
-        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope);
+        HttpFlowTest.LoginState login = HttpFlowTest.loginWithState(mvc, cookieScope, tokenRepository);
 
         // A cookie that is present but carries someone else's value proves nothing,
         // and must not be accepted as evidence: the offer would name the session this

@@ -68,18 +68,6 @@ class HttpFlowTest {
     @Autowired
     private CsrfTokenRepository csrfTokenRepository;
 
-    /**
-     * The repository, reachable from the static helpers below. The Spring context is
-     * shared by every test class here, so one bean serves them all and a static holder is
-     * the honest way to say so — the alternative is threading it through every call site.
-     */
-    private static CsrfTokenRepository sharedCsrfTokenRepository;
-
-    @Autowired
-    void rememberCsrfTokenRepository(CsrfTokenRepository repository) {
-        sharedCsrfTokenRepository = repository;
-    }
-
     /** The header a browser sends the token in, matching {@code dbsc-soft-client.js}. */
     private static final String CSRF_HEADER = "X-CSRF-TOKEN";
 
@@ -746,22 +734,20 @@ class HttpFlowTest {
     }
 
     private LoginState loginWithState() throws Exception {
-        return loginWithState(mvc, cookieScope);
+        return loginWithState(mvc, cookieScope, csrfTokenRepository);
     }
 
     /**
      * Logs in and returns the state a client holds before registration. Shared with
-     * {@link SessionRotationTest} and {@link ScriptClientTest}.
+     * {@link SessionRotationTest} and {@link ScriptClientTest}, which pass the
+     * repository they autowired: the token is minted against the session the login
+     * request carries, so only the caller's own dependency can serve it.
      *
      * <p>The session is created here rather than left to the request, because the CSRF
      * token is bound to it: the caller cannot send a token for a session it has not named
      * yet. That is the same shape a browser is in — it has a session from rendering the
      * login form, and the token it posts was minted against that session.
      */
-    static LoginState loginWithState(MockMvc mvc, CookieScope cookieScope) throws Exception {
-        return loginWithState(mvc, cookieScope, sharedCsrfTokenRepository);
-    }
-
     static LoginState loginWithState(MockMvc mvc, CookieScope cookieScope,
                                     CsrfTokenRepository csrfTokenRepository) throws Exception {
         MockHttpSession session = new MockHttpSession();
