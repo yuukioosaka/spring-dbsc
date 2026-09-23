@@ -74,7 +74,7 @@ const REFRESH_MARGIN_MS = 5_000;
  * guarded route missing here is that its credential is never refreshed proactively and
  * the route starts refusing at the TTL. List what the guard protects.
  */
-const PROTECTED_PREFIXES = ["/app/payment"];
+const PROTECTED_PREFIXES = ["/app/"];
 
 /**
  * Request destinations that carry a session.
