@@ -974,59 +974,6 @@ session id (`app_session_id`) as two independent columns — see
 `app_session_id` exists solely to answer "is there a binding for this application
 session?" when a request arrives without DBSC cookies.
 
-> **Upgrading from a build before 0.6.0:** `dbsc_sessions` gained `app_session_id`
-> (`NOT NULL`) and `revoked` (`BOOLEAN NOT NULL`), plus a unique index on
-> `app_session_id`. `CREATE TABLE IF NOT EXISTS` will **not** add them to an existing
-> table — it silently skips it, and the app then fails at runtime on the missing column.
-> Apply an `ALTER TABLE` before deploying:
->
-> ```sql
-> ALTER TABLE dbsc_sessions ADD COLUMN app_session_id VARCHAR(255);
-> ALTER TABLE dbsc_sessions ADD COLUMN revoked BOOLEAN NOT NULL DEFAULT false;
-> UPDATE dbsc_sessions SET app_session_id = id WHERE app_session_id IS NULL;
-> ALTER TABLE dbsc_sessions ALTER COLUMN app_session_id SET NOT NULL;
->
-> > CREATE UNIQUE INDEX dbsc_sessions_app_session_idx ON dbsc_sessions (app_session_id);
-> ```
->
-> The same release added a new table, `dbsc_registration_tokens`, which holds the
-> single-use registration tokens. `CREATE TABLE IF NOT EXISTS` creates it on its own, so
-> no manual step is needed for it — but note that `__Host-dbsc-reg` no longer exists, so
-> any code or test of yours referencing that cookie name must be updated.
->
-> Existing rows are backfilled with their own DBSC id as the application session id,
-> which is a safe placeholder: it preserves the "a binding exists" answer for those
-> sessions and can never collide, since `id` is already unique. Those sessions will be
-> refused once by the guard and recover on the next login, which re-binds them with the
-> real application session id.
->
-> The release that added [credential rotation](#credential-rotation) replaced
-> `dbsc_session_aliases` with `dbsc_credential_tickets`. `CREATE TABLE IF NOT EXISTS`
-> creates the new table on its own, so an upgrade needs no manual step — but the old
-> table is neither migrated nor dropped, and is left as dead weight. It held only
-> retired session ids from a scheme that no longer exists, so dropping it is safe and
-> loses nothing:
->
-> ```sql
-> DROP TABLE IF EXISTS dbsc_session_aliases;
-> ```
->
-> The same release settled the cookie layout on a single cookie. `credentials[].name`
-> names `__Host-auth_cookie`, whose value is a rotating ticket. `session_identifier` is
-> unrelated to it: it carries the DBSC session id itself (spec §9.6), names no cookie, and
-> so keeps the id out of the cookie jar. A browser holding a binding from an older build
-> re-registers on its own; there is nothing to change on the server side.
->
-> **Upgrading from a build before 0.6.1:** the `__Host-dbsc-challenge` cookie is gone.
-> The challenge is held server-side against the session and reaches the browser only as
-> the JTI inside the `Secure-Session-Challenge` header it signs, so registration no longer
-> depends on a cookie surviving the cross-site POST. Nothing changes on the server side,
-> and no schema changes — but any code or test of yours that reads that cookie name must
-> be updated, and a browser mid-registration against the old build simply registers again.
-> This release also fixes a replay window: resolving the challenge by "newest outstanding
-> for this session" allowed an already-consumed JTI to resolve to a newer challenge and
-> register a second key against it. Upgrading is recommended for that reason alone.
-
 The file is a plain `CREATE TABLE IF NOT EXISTS` migration: drop it into your
 migration tool's directory, or run its statements however you already run schema
 changes. It is **byte-identical** to what `initialize()` issues and both are
