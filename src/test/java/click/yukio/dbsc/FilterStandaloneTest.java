@@ -105,24 +105,27 @@ class FilterStandaloneTest {
     }
 
     /**
-     * Soft DBSC is opt-in, and the gate is route registration rather than a check
-     * inside the handler. The difference is observable: with the feature off the
-     * request reaches the application untouched, so whatever it answers (a 404, a
-     * login redirect, a handler of the same name) is what the client sees, and the
-     * DBSC service is never consulted at all.
+     * The gate is route registration rather than a check inside the handler. The
+     * difference is observable: with the feature off the request reaches the
+     * application untouched, so whatever it answers (a 404, a login redirect, a
+     * handler of the same name) is what the client sees, and the DBSC service is
+     * never consulted at all.
+     *
+     * <p>Soft DBSC is on by default, so "off" has to be asked for explicitly — this
+     * asserts what {@code dbsc.soft.enabled=false} produces, not what an untouched
+     * configuration produces.
      */
     @Test
     @DisplayName("POST to the bind path passes through when Soft DBSC is off")
-    void bindRouteIsAbsentByDefault() throws Exception {
-        // The default is off, so the setUp() filter already has no such route.
-        assertFalse(properties.getSoft().isEnabled(),
-                "the default must stay false: enabling it widens the trust model");
+    void bindRouteIsAbsentWhenDisabled() throws Exception {
+        properties.getSoft().setEnabled(false);
+        DbscFilter disabled = new DbscFilter(dbsc, properties);
 
         MockHttpServletRequest request = new MockHttpServletRequest("POST", "/dbsc/bind");
         MockHttpServletResponse response = new MockHttpServletResponse();
         MockFilterChain chain = new MockFilterChain();
 
-        dbscFilter.doFilter(request, response, chain);
+        disabled.doFilter(request, response, chain);
 
         assertNotNull(chain.getRequest(),
                 "with the feature off the request must reach the application");
@@ -140,7 +143,7 @@ class FilterStandaloneTest {
         // What DbscFilter owns is the decision of whether the route exists at all.
         DbscFilter enabled = new DbscFilter(dbsc, properties);
         Mockito.when(dbsc.handleBind(Mockito.any(), Mockito.any()))
-                .thenReturn(java.util.Map.of("sessionId", "sess_1"));
+                .thenReturn(java.util.Map.of("registrationPath", "/dbsc/regist/tok_1"));
 
         MockHttpServletRequest request = new MockHttpServletRequest("POST", "/dbsc/bind");
         MockHttpServletResponse response = new MockHttpServletResponse();
@@ -166,6 +169,7 @@ class FilterStandaloneTest {
     @Test
     @DisplayName("the bind filter is inert when Soft DBSC is off")
     void bindFilterIsInertWhenDisabled() throws Exception {
+        properties.getSoft().setEnabled(false);
         DbscBindFilter bindFilter = new DbscBindFilter(dbsc, properties);
 
         MockHttpServletRequest request = new MockHttpServletRequest("POST", "/dbsc/bind");

@@ -117,7 +117,11 @@ class ScriptClientTest {
                 "the offer must name the session the login bound: " + challengeHeader);
 
         Map<String, Object> body = Json.parseObject(response.getContentAsString());
-        assertEquals(login.sessionId(), body.get("sessionId"));
+        // The session id is deliberately not echoed in the body: the client reads it
+        // from the registration response instead, and the value is what a refresh names
+        // its session with, so publishing it here would be a needless second copy.
+        assertNull(body.get("sessionId"),
+                "the bind body must not disclose the session id: " + body);
         assertNotNull(body.get("registrationPath"));
         assertNotNull(body.get("challenge"));
     }

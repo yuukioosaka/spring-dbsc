@@ -27,13 +27,13 @@ class SoftDbscConfigTest {
             .withPropertyValues("dbsc.storage=memory", "dbsc.secure=false");
 
     @Test
-    @DisplayName("dbsc.soft.enabled defaults to false")
-    void offByDefault() {
+    @DisplayName("dbsc.soft.enabled defaults to true")
+    void onByDefault() {
         runner.run(context -> {
             assertThat(context).hasSingleBean(DbscProperties.class);
             assertThat(context.getBean(DbscProperties.class).getSoft().isEnabled())
-                    .as("enabling the script fallback widens the trust model, so it is opt-in")
-                    .isFalse();
+                    .as("a browser with no native DBSC would otherwise get no protection at all")
+                    .isTrue();
         });
     }
 
@@ -45,7 +45,7 @@ class SoftDbscConfigTest {
     }
 
     @Test
-    @DisplayName("dbsc.soft.enabled=false binds to off, not just to the default")
+    @DisplayName("dbsc.soft.enabled=false turns it off")
     void disablingBinds() {
         runner.withPropertyValues("dbsc.soft.enabled=false").run(context ->
                 assertThat(context.getBean(DbscProperties.class).getSoft().isEnabled()).isFalse());

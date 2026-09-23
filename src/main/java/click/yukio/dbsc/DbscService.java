@@ -428,8 +428,14 @@ public class DbscService {
         // only one whose challenge matches the challenge header just written, and the
         // older ones expire on their own TTL.
 
+        // The session id is deliberately absent from the body. The client never needs
+        // it -- it reads session_identifier out of the registration response's
+        // session_config -- and the value is exactly what a refresh names its session
+        // with (Sec-Secure-Session-Id / X-Session-Id), so publishing it here would hand
+        // the caller a second way to name the session for no gain. The challenge header
+        // above still carries it in its id="..." parameter, which the wire format
+        // requires.
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("sessionId", session.id());
         body.put("registrationPath", path);
         body.put("challenge", challenge.jti());
         addSkipped(body, parseSkipped(request));
@@ -439,20 +445,23 @@ public class DbscService {
     /**
      * The application's own session id, as proven by its own cookie, or a refusal.
      *
-     * <p>Possession of the container's session cookie is the proof of ownership: the
-     * container will only accept {@code JSESSIONID} from the cookie of that name, so
-     * a request arriving with it is a request the browser sent as that session. That
-     * is what makes it safe to hand the caller a registration offer for the session
-     * — an offer is an instruction to bind a key to it, and issuing one to a caller
-     * that merely knows or guesses the id would let a third party attach their own
-     * device key to someone else's session, and then prove possession of it forever
-     * after.
+     * <p>The container will only resolve a session from a cookie, so a request that has
+     * one at all is a request the browser sent as that session. That is the guarantee
+     * this method relies on, and it is what makes it safe to hand the caller a
+     * registration offer for the session — an offer is an instruction to bind a key to
+     * it, and a caller that merely knows or guesses the id must not be able to attach
+     * their own device key to someone else's session.
      *
-     * <p>The cookie's <em>value</em> is compared to the container's id, and the
-     * container's session is only reachable if the request's cookies named one in the
-     * first place, so finding that id among the request's cookies confirms the cookie
-     * was its source. The cookie's <em>name</em> is not assumed, because the container
-     * may call it anything ({@code JSESSIONID}, {@code SESSION}, a deployment's own).
+     * <p>Two checks stand behind that, and neither is sufficient alone. The container
+     * resolves the session ({@code getSession(false)} non-null), which proves a session
+     * cookie was accepted; and the route sits behind the application's authentication
+     * and CSRF, which proves the caller holds that session's token. This method adds
+     * {@link #sessionIdTravelsInCookie} on top, but it is a <strong>corroboration rather
+     * than the control</strong>: once the container has resolved a session and Spring
+     * Security's CSRF has accepted the session's token, the id is already known to have
+     * travelled in a cookie, so this check is normally true by construction. It is kept
+     * because it makes the requirement explicit and fails loudly if a deployment
+     * changes how the session is named — not because it is what stops an attacker.
      *
      * <p>An application whose session id is <strong>not</strong> carried in a cookie
      * cannot get this guarantee, and is refused with {@code UNSUPPORTED_CLIENT}: there
@@ -482,13 +491,17 @@ public class DbscService {
      * Whether the request carries, as one of its cookies, the session id the container
      * resolved.
      *
+     * <p>This is a corroboration, not the control. What actually admits the caller is
+     * the container resolving the session plus Spring Security's CSRF accepting that
+     * session's token — by which point the id is already known to have travelled in a
+     * cookie. See {@link #requireAppSessionId}.
+     *
      * <p>The cookie's <em>name</em> is deliberately not consulted. A cookie called
      * {@code JSESSIONID} carrying any value at all is not evidence — a request could
      * declare one and then present whatever session it liked — so accepting the name
-     * alone would restore exactly the hole this closes. What is checked is the value:
-     * the container will only have resolved a session at all if the request's own
-     * cookies named one, and finding the id it resolved among them confirms the cookie
-     * was the source.
+     * alone would be meaningless. What is checked is the value: the container will only
+     * have resolved a session at all if the request's own cookies named one, and
+     * finding the id it resolved among them confirms the cookie was its source.
      *
      * <p>An application whose session id is not a cookie's value — Spring Session, a
      * custom container whose cookie carries an opaque handle rather than the id — fails

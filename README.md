@@ -750,7 +750,7 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `registration-path` | `/dbsc/regist` | **prefix** for the registration route, not a full path: the advertised route is `<prefix>/<token>` |
 | `refresh-path` | `/dbsc/refresh` | also the `refresh_url` in the JSON config |
 | `bind-path` | `/dbsc/bind` | the re-offer route for a client that manages its own key. See [Soft DBSC](#soft-dbsc-the-fallback-for-browsers-without-native-support) |
-| `soft.enabled` | `false` | registers `POST /dbsc/bind` and the Soft DBSC fallback. Off means the route is a 404. See [Soft DBSC](#soft-dbsc-the-fallback-for-browsers-without-native-support) |
+| `soft.enabled` | `true` | registers `POST /dbsc/bind` and the Soft DBSC fallback. Off means the route is a 404. See [Soft DBSC](#soft-dbsc-the-fallback-for-browsers-without-native-support) |
 | `session-identifier-name` | — | **removed.** `session_identifier` carries the session id itself (spec §9.6), so there was no name left to configure. Setting it now has no effect |
 | `credential-cookie-name` | `__Host-auth_cookie` | the protected cookie named in `credentials[].name`, whose value rotates. Used verbatim — a prefix is your choice |
 | `binding-cookie-ttl` | `10m` | lifetime of the credential cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
@@ -1207,23 +1207,33 @@ gates the whole thing — no `register()` call, no worker, no hook. `bindSession
 performs the check as well, because a client that reaches it another way must not bind a
 software key to a session that is about to get a hardware-backed one.
 
-#### Turning it on
+#### Turning it off
+
+Soft DBSC is **on by default**. That is a deliberate choice: the browsers this exists
+for — Safari, Firefox — have no native DBSC at all, so leaving it off means the whole
+feature does nothing for them, and a deployment that never noticed the property would
+inherit an inert feature rather than a weaker one. On is the more useful default and the
+one that matches what the client code in this repository expects.
+
+To turn it off anyway — because the trade below is not one you want to make — set:
 
 ```yaml
 dbsc:
   soft:
-    enabled: true      # default false
+    enabled: false
 ```
 
-That single switch does two things: it registers `POST /dbsc/bind` (otherwise a 404,
-so no client can start a soft binding) and it is what `DbscBindFilter` checks before it
-will answer the route. Nothing else about the server changes — the device key table and
-the native path are unaffected, and turning it off does not invalidate a key that is
-already registered.
+That single switch does two things: it stops registering `POST /dbsc/bind` (so the route
+is a 404 and no client can start a soft binding) and it is what `DbscBindFilter` checks
+before it will answer the route. Nothing else about the server changes — the device key
+table and the native path are unaffected, and turning it off does not invalidate a key
+that is already registered.
 
-The default is **false** because enabling it widens the trust model, as the intro to
-this section describes. That is a deployment decision an operator has to make rather
-than inherit.
+The reason to turn it off is the trust model, as the intro to this section describes: the
+key lives in IndexedDB where any script on the origin can use it, so it is strictly
+weaker than a hardware-backed one. On is the better default because the alternative for
+these browsers is no protection rather than stronger protection — but it is a real
+trade, not a free win.
 
 Two files have to be reachable without authentication, since a module import or a
 worker registration that is redirected to a login page fails before any of it runs.

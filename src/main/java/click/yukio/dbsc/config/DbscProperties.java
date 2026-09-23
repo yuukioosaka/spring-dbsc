@@ -83,14 +83,15 @@ public class DbscProperties {
      * <p>"Soft" because the key is not hardware-backed: it is a WebCrypto key in
      * IndexedDB, reachable by any script on the origin, so it is an oracle rather
      * than a secret. It is a different tier from the native one precisely because
-     * it proves less, and enabling it is a deployment decision rather than a
-     * default — see the README's "Soft DBSC" section for what it does and does not
+     * it proves less. It is on by default because a browser with no native DBSC
+     * would otherwise get nothing, but it is a deployment decision rather than a
+     * free win — see the README's "Soft DBSC" section for what it does and does not
      * buy.
      */
     public static class Soft {
 
         /**
-         * Whether the fallback is offered at all. Default false.
+         * Whether the fallback is offered at all. Default true.
          *
          * <p>Off means the re-offer route is not registered, so {@code POST
          * bind-path} is a 404 and no client can start a soft binding. The device
@@ -98,12 +99,16 @@ public class DbscProperties {
          * registered natively keeps working, and turning this off does not
          * invalidate an existing soft key.
          *
-         * <p>The default is false because enabling it widens the trust model. A
-         * stolen cookie still cannot be replayed without the key, but the key now
-         * lives where an XSS can use it, which is a real reduction — an operator
-         * has to decide that trade rather than inherit it.
+         * <p>The default is true because the alternative is worse in practice on the
+         * browsers this exists for. A browser with no native DBSC — Safari, Firefox —
+         * gets no protection at all rather than the weaker protection this offers, and
+         * a deployment that never noticed the property would simply have an inert
+         * feature. It still widens the trust model, so the trade is worth knowing: a
+         * stolen cookie cannot be replayed without the key, but the key now lives
+         * where an XSS can use it. Deployments that would rather not make that trade
+         * set this to false, and the route stops existing.
          */
-        private boolean enabled = false;
+        private boolean enabled = true;
 
         public boolean isEnabled() {
             return enabled;

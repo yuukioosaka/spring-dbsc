@@ -56,6 +56,15 @@ dbsc:
   # only set it when the client population is known to be capable.
   unregistered: allow
 
+  # Soft DBSC: the script-driven fallback for browsers with no native support
+  # (Safari, Firefox). On by default — without it those browsers get no DBSC at all.
+  # The key is a WebCrypto key in IndexedDB rather than a hardware-backed one, so it
+  # is an oracle a script on the origin can reach, which is why it is a separate tier
+  # and why a deployment may prefer to turn it off. Off means POST bind-path is a 404
+  # and no soft binding can be started; existing keys and the native path are unaffected.
+  soft:
+    enabled: true
+
   # Which URLs the session covers, written into the JSON config as
   # scope.scope_specification (spec 9.7, 9.8). These are instructions to the browser,
   # not server-side checks: the user agent decides where to attach the credential and
