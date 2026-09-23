@@ -9,6 +9,12 @@ dbsc:
   # Deliberately different from the session cookie name, so the tests prove the
   # two names in the JSON config are independent.
   credential-cookie-name: __Host-auth_cookie
+  # Soft DBSC is off by default and the shipped value must stay that way, but the
+  # route it gates has no other way to be reached: with the flag off it is not
+  # registered at all, so every test of the re-offer path needs this on. The
+  # default itself is asserted separately, in SoftDbscConfigTest.
+  soft:
+    enabled: true
 
 spring:
   datasource:

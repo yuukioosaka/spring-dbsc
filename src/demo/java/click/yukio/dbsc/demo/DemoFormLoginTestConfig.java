@@ -1,6 +1,7 @@
 package click.yukio.dbsc.demo;
 
 import click.yukio.dbsc.DbscService;
+import click.yukio.dbsc.web.DbscBindFilter;
 import click.yukio.dbsc.web.DbscFilter;
 import click.yukio.dbsc.web.DbscGuardFilter;
 import click.yukio.dbsc.web.DbscGuardRoutes;
@@ -22,6 +23,7 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.logout.LogoutHandler;
 import org.springframework.security.web.csrf.CsrfFilter;
+import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
@@ -72,8 +74,15 @@ public class DemoFormLoginTestConfig {
                     // One OrRequestMatcher rather than chained securityMatcher() calls:
                     // each call SETS the matcher, so chaining silently keeps only the
                     // last path and the other routes fall through to the app chain.
+                    //
+                    // The bind path is deliberately NOT here. It is the one DBSC route
+                    // that names its session from the application's own cookie and is
+                    // therefore authenticated -- see ScriptClientTest. Leaving it on the
+                    // protocol chain would put an unauthenticated route next to an
+                    // authenticated one and lose the distinction entirely.
                     .securityMatcher(new OrRequestMatcher(
-                            new AntPathRequestMatcher("/dbsc/**"),
+                            new AntPathRequestMatcher("/dbsc/regist/**"),
+                            new AntPathRequestMatcher("/dbsc/refresh"),
                             new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
                     .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                     // Chromium drives these routes before any user session exists and
@@ -96,13 +105,29 @@ public class DemoFormLoginTestConfig {
         @Bean
         @Order(1)
         SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
-                                     @Qualifier("dbscGuardFilter") DbscGuardFilter dbscGuardFilter)
+                                     @Qualifier("dbscGuardFilter") DbscGuardFilter dbscGuardFilter,
+                                     DbscBindFilter dbscBindFilter)
                 throws Exception {
 
             http
                     .securityMatcher(new AntPathRequestMatcher("/**"))
                     .authorizeHttpRequests(auth -> auth
-                            .requestMatchers("/login", "/css/**", "/favicon.ico").permitAll()
+                            // The Soft DBSC client and its Service Worker. A module
+                            // import that 302s to the login page fails before any of
+                            // it runs, and neither file is a secret: they are the
+                            // same scripts every visitor gets. They are served even
+                            // when the feature is off (the page does not reference
+                            // them then), which keeps the static paths independent of
+                            // the property.
+                            .requestMatchers("/login", "/css/**", "/favicon.ico",
+                                    "/dbsc-soft-client.js", "/dbsc-soft-sw.js").permitAll()
+                            // The script client's re-offer route, and the reason it is on
+                            // this chain rather than the protocol one: it names its
+                            // session from the request's own cookie, so being able to
+                            // reach it means being logged in. Authentication and CSRF
+                            // are the ordinary ones, and there is nothing DBSC-specific
+                            // about either.
+                            .requestMatchers("/dbsc/bind").authenticated()
                             .requestMatchers("/app/payment").authenticated()
                             .anyRequest().authenticated())
                     // The guard, on the application chain: /app/payment needs a
@@ -145,9 +170,18 @@ public class DemoFormLoginTestConfig {
                     // fetch() calls send JSON, so the token has to be accepted as a
                     // header instead; without this every POST is refused by
                     // CsrfFilter and the 403 is indistinguishable from DBSC's own.
+                    //
+                    // The bind route needs nothing beyond this: it is an ordinary
+                    // application route, so CsrfFilter protects it with no help from
+                    // the library.
                     .csrf(csrf -> csrf
                             .csrfTokenRepository(new HttpSessionCsrfTokenRepository())
                             .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
+                    // The re-offer route, after everything that could refuse it. It
+                    // writes its own response, so it has to be last: an authenticated
+                    // and token-checked request that gets here is one the host has
+                    // already allowed.
+                    .addFilterAfter(dbscBindFilter, CsrfFilter.class)
                     .logout(logout -> logout
                             .logoutUrl("/logout")
                             .addLogoutHandler(demoLogoutHandler(dbsc))
@@ -206,6 +240,30 @@ public class DemoFormLoginTestConfig {
     @Bean
     FilterRegistrationBean<DbscGuardFilter> dbscGuardFilterRegistration(DbscGuardFilter filter) {
         FilterRegistrationBean<DbscGuardFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    /**
+     * The re-offer route. It runs in the application chain, after authentication and
+     * CSRF, because unlike the protocol routes it is not something a browser proves
+     * its way into -- it is an application route that names its session from the
+     * request's own cookie. Registering it as a bean also lets Boot's "every filter is
+     * a servlet filter" rule be switched off for it below.
+     */
+    @Bean
+    DbscBindFilter dbscBindFilter(DbscService dbsc, click.yukio.dbsc.config.DbscProperties properties) {
+        return new DbscBindFilter(dbsc, properties);
+    }
+
+    /**
+     * Boot would otherwise register the filter above as a plain servlet filter, outside
+     * the security chain and before authentication -- which would answer the route
+     * with none of the checks this chain applies.
+     */
+    @Bean
+    FilterRegistrationBean<DbscBindFilter> dbscBindFilterRegistration(DbscBindFilter filter) {
+        FilterRegistrationBean<DbscBindFilter> registration = new FilterRegistrationBean<>(filter);
         registration.setEnabled(false);
         return registration;
     }

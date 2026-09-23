@@ -38,6 +38,9 @@
         <code>Secure-Session-Registration</code> plus two short-lived cookies.</p>
     <p><strong>Chromium 145+</strong> then POSTs <code>/dbsc/regist/&lt;token&gt;</code> on its
         own within about a second — no JavaScript involved. Watch the network tab for it.</p>
+    <p>On a browser without native DBSC (<strong>Firefox, Safari</strong>), the next page
+        loads a script that does the same work with Web Crypto. It is opt-in per page —
+        see <code>index.js</code> next to this demo's static resources.</p>
 </div>
 </body>
 </html>

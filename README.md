@@ -33,6 +33,7 @@ and the theft is reported as `session_stolen`.
 | Session scope rules | ✅ `scope.scope_specification` — include/exclude by domain and path |
 | Refresh-initiator allow-list | ✅ `allowed_refresh_initiators`, closing the out-of-scope timing side channel |
 | Application-session binding | ✅ the DBSC session id is bound to your own session id (`JSESSIONID`, Spring Session, …), so the guard can tell a client that never bound from one that dropped its DBSC cookies — see [What the guard actually decides](#what-the-guard-actually-decides) |
+| Soft DBSC fallback | ✅ `dbsc-soft-sw.js` + `dbsc-soft-client.js` for browsers with no native support — a WebCrypto key in IndexedDB driving the same routes, refreshed from a Service Worker `fetch` hook. Off by default; see [Soft DBSC](#soft-dbsc-the-fallback-for-browsers-without-native-support) |
 
 ## The protection model
 
@@ -131,7 +132,7 @@ from the JAR's `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfi
 
 ### 2. Wire the DBSC filters into your chain
 
-The library ships **two `OncePerRequestFilter` beans and no `SecurityFilterChain`** —
+The library ships **three `OncePerRequestFilter` beans and no `SecurityFilterChain`** —
 they are *not* wired into Security for you, and are not auto-registered as servlet
 filters either, so a JAR that is merely on the classpath does nothing until you add
 them. Nothing is registered into Spring Security for you, because *where* the filters
@@ -140,14 +141,19 @@ chain are policy decisions that belong to your application. A library-supplied c
 would either collide with yours (two chains matching `/**` is a hard startup error) or,
 worse, be kept and silently replace your authorization rules.
 
-Two beans arrive from `DbscFilterConfiguration`:
+Three beans arrive from `DbscFilterConfiguration`:
 
 | Bean | Serves | Goes in |
 |---|---|---|
-| `dbscFilter` | the protocol routes (`/dbsc/**`, the well-known document) | its own protocol chain, unauthenticated |
+| `dbscFilter` | the protocol routes (`/dbsc/regist/**`, `/dbsc/refresh`, the well-known document) | its own protocol chain, unauthenticated |
+| `dbscBindFilter` | `POST /dbsc/bind`, only when `dbsc.soft.enabled` is on | your **application** chain, after authentication and CSRF |
 | `dbscGuardFilter` | nothing by default — the routes you declare | your application chain, next to your authorization |
 
-Put them where their subjects live:
+Put them where their subjects live. Note the split inside the DBSC routes themselves:
+the protocol routes are the ones the *browser* drives on its own, and they must be
+answered before Security's entry point can turn DBSC's `403` into a `401`. `/dbsc/bind`
+is the opposite — an application route that names its session from your own cookie —
+and it belongs on your chain, behind your authentication and CSRF.
 
 ```java
 @Configuration
@@ -161,7 +167,8 @@ public class MySecurityConfig {
             throws Exception {
         http
                 .securityMatcher(new OrRequestMatcher(
-                        new AntPathRequestMatcher("/dbsc/**"),
+                        new AntPathRequestMatcher("/dbsc/regist/**"),
+                        new AntPathRequestMatcher("/dbsc/refresh"),
                         new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
                 .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
@@ -177,16 +184,34 @@ public class MySecurityConfig {
     /** Your application, under your own authentication and authorization. */
     @Bean
     @Order(1)
-    public SecurityFilterChain appChain(HttpSecurity http, DbscGuardFilter dbscGuardFilter)
-            throws Exception {
+    public SecurityFilterChain appChain(HttpSecurity http, DbscGuardFilter dbscGuardFilter,
+                                        DbscBindFilter dbscBindFilter) throws Exception {
         http
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/login", "/css/**").permitAll()
+                        .requestMatchers("/login", "/css/**",
+                                "/dbsc-soft-client.js", "/dbsc-soft-sw.js").permitAll()
+                        // Optional: only if you run the Soft DBSC client, which is what
+                        // needs this route. See dbsc.soft.enabled.
+                        .requestMatchers("/dbsc/bind").authenticated()
                         .requestMatchers("/api/transfer").authenticated())
+                // Ordinary Spring Security CSRF, left on. The bind route is a
+                // state-changing application route, so it gets no exemption — the same
+                // CsrfFilter that protects your other POSTs protects it.
+                //
+                // The plain token handler rather than the default: the default masks
+                // the token per request with a BREACH nonce, which is right for a form
+                // the server renders and wrong for a script client that holds the raw
+                // value from a meta tag.
+                .csrf(csrf -> csrf
+                        .csrfTokenRepository(new HttpSessionCsrfTokenRepository())
+                        .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
                 // The guard, after authentication: it answers "is this session
                 // currently DBSC-protected?", which is a question about a session
                 // that must already exist.
-                .addFilterBefore(dbscGuardFilter, CsrfFilter.class);
+                .addFilterBefore(dbscGuardFilter, CsrfFilter.class)
+                // Last: it writes its own response, so everything that could refuse the
+                // request — authentication and the token check — must have run already.
+                .addFilterAfter(dbscBindFilter, CsrfFilter.class);
         return http.build();
     }
 
@@ -208,7 +233,9 @@ The three details that actually matter, and how each one fails:
 |---|---|
 | `OrRequestMatcher` for the protocol paths — `securityMatcher()` **sets**, it does not accumulate | Only the last path is matched; the rest fall through to your chain, which answers a Spring 403 before `DbscFilter` runs |
 | `addFilterBefore(..., CsrfFilter.class)` **and** CSRF off on the protocol chain | The browser's registration POST carries no CSRF token, so a chain that applies CSRF to `/dbsc/**` rejects it before `DbscFilter` runs |
+| The protocol matcher must **not** be `/dbsc/**` | That would swallow `/dbsc/bind` too, and `DbscFilter` terminates every request it serves — so authentication and CSRF would never run on that route |
 | Each bean is registered in **one** chain only | `OncePerRequestFilter` records itself in a request attribute, so the same instance in a second chain silently skips it |
+| `IF_REQUIRED` sessions on the chain that holds `/dbsc/bind` — the default | `HttpSessionCsrfTokenRepository` stores the token on the session; a `STATELESS` chain has nowhere to put it, so every bind POST is refused with a bare 403 that looks like a DBSC refusal |
 
 **Declaring no `DbscGuardRoutes` guards nothing**, which is the default and the reason
 adoption is safe. Note that a wide matcher is not the same as strict enforcement: a
@@ -233,6 +260,13 @@ FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
 
 @Bean
 FilterRegistrationBean<DbscGuardFilter> dbscGuardFilterRegistration(DbscGuardFilter filter) {
+    var registration = new FilterRegistrationBean<>(filter);
+    registration.setEnabled(false);
+    return registration;
+}
+
+@Bean
+FilterRegistrationBean<DbscBindFilter> dbscBindFilterRegistration(DbscBindFilter filter) {
     var registration = new FilterRegistrationBean<>(filter);
     registration.setEnabled(false);
     return registration;
@@ -266,8 +300,7 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
                         // The DBSC session id is minted here, independent of the
                         // application's session id, which is passed as the second
                         // argument. Keep the value if you want to call terminate()
-                        // by value; otherwise read it back with sessionFor(request)
-                        // with sessionFor(request).
+                        // by value; otherwise read it back with sessionFor(request).
                         dbsc.bind(UUID.randomUUID().toString(),
                                   request.getSession().getId(), auth.getName(),
                                   86_400_000L, request, response);
@@ -281,6 +314,12 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
 }
 ```
 
+**This works on the redirect that follows a form POST** — the `302` to `/` is a
+navigation, so Chromium reads the `Secure-Session-Registration` header and starts
+registering. It does **not** work when the response that carries the offer is itself the
+result of a cross-site callback, which is where OIDC and SAML differ — see
+[Binding behind OIDC or SAML](#binding-behind-oidc-or-saml-why-the-first-offer-fails).
+
 `src/demo` is a complete, runnable form-login app over HTTPS, and
 `src/demo/resources/README-DEMO.md` records the failure modes it exists to catch.
 
@@ -290,7 +329,7 @@ DBSC binds a session that already exists, so it composes with any authentication
 mechanism — including OIDC, whose callback is cross-site. `bind()` names the session
 with a single-use token in the registration URL rather than a cookie, so the
 registration POST Chromium issues needs no session cookie and the cross-site initiator
-does not matter. There is nothing extra to wire:
+does not matter:
 
 ```java
 @Configuration
@@ -299,10 +338,12 @@ public class OidcSecurityConfig {
 
     @Bean
     SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
-                                 DbscFilter dbscFilter) throws Exception {
+                                 DbscFilter dbscFilter, DbscBindFilter dbscBindFilter)
+            throws Exception {
         http
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/login/**", "/oauth2/**", "/error").permitAll()
+                        .requestMatchers("/dbsc/bind").authenticated()
                         .requestMatchers("/api/transfer").authenticated()
                         .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) -> {
@@ -314,14 +355,26 @@ public class OidcSecurityConfig {
                               auth.getName(), 86_400_000L, request, response);
                     response.sendRedirect("/");
                 }))
-                .addFilterBefore(dbscFilter, CsrfFilter.class);
+                .csrf(csrf -> csrf
+                        .csrfTokenRepository(new HttpSessionCsrfTokenRepository())
+                        .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
+                .addFilterBefore(dbscFilter, CsrfFilter.class)
+                .addFilterAfter(dbscBindFilter, CsrfFilter.class);
         return http.build();
     }
 }
 ```
 
-Historically this did not work, and the reasoning is worth knowing because it explains
-why the token is in the URL at all — see
+**The callback's own response cannot carry the offer.** When the IdP redirects back
+to `/login/oauth2/code/...`, that navigation is cross-site, and Chromium does not act
+on `Secure-Session-Registration` from a cross-site initiator. The offer in the
+`successHandler` above therefore goes unread, and the session stays unbound. The
+reliable answer is the Soft DBSC client's `POST /dbsc/bind`, which the *page* calls
+after the redirect has landed — that is what `DbscBindFilter` and the `/dbsc/bind`
+matcher above are for. See [Clients that manage their own key](#clients-that-manage-their-own-key).
+
+Historically this did not work at all, and the reasoning is worth knowing because it
+explains why the registration token is in the URL rather than a cookie — see
 [Binding behind OIDC or SAML](#binding-behind-oidc-or-saml-why-the-first-offer-fails).
 `src/demo/java-oidc` is this example, runnable.
 
@@ -341,17 +394,19 @@ controllers:
 
 | Component | Responsibility |
 |---|---|
-| `DbscFilter` | Owns every protocol route (`/dbsc/*`, `/.well-known/device-bound-sessions`). Terminates the chain for those paths; passes everything else through untouched. |
+| `DbscFilter` | Owns every **protocol** route (`/dbsc/regist/**`, `/dbsc/refresh`, `/.well-known/device-bound-sessions`). Terminates the chain for those paths; passes everything else through untouched. |
+| `DbscBindFilter` | Owns `POST /dbsc/bind` when Soft DBSC is enabled. Terminates the chain for that one path. |
 | `DbscGuardFilter` | Decides whether a request to a route the application declared may proceed, via `DbscService.guardDecision`. Refuses with `403` + `DBSC_REQUIRED`; passes everything else through untouched. |
 
-`DbscService` sits below both as the HTTP facade, and `DbscProtocolEngine` below that as
-the protocol itself — neither depends on Spring Security. See
+`DbscService` sits below all three as the HTTP facade, and `DbscProtocolEngine` below
+that as the protocol itself — neither depends on Spring Security. See
 [How it is wired (and why)](#how-it-is-wired-and-why) for the reasoning.
 
-The two filters answer different questions and belong in different chains. `DbscFilter`
-is about the browser's protocol flow, which runs before any session exists;
-`DbscGuardFilter` is about your routes, which have one. Neither one inspects the other's
-paths.
+The filters answer different questions and belong in different chains. `DbscFilter` is
+about the browser's protocol flow, which runs before any session exists and must never
+meet Security's entry point; `DbscBindFilter` and `DbscGuardFilter` are about your
+routes, which have a session and your authentication behind them. None of them inspects
+another's paths.
 
 The guard is not a tier comparison, though the tier is most of it — the decision also
 covers the session that dropped its DBSC cookies, which no tier check can see. See
@@ -425,24 +480,26 @@ reachable:
 
 ```mermaid
 flowchart TD
-    A[Request] --> B{DBSC protocol paths?}
+    A[Request] --> B{DBSC protocol path?}
     B -- yes --> C[DbscFilter<br/>before CsrfFilter]
     C --> C2[terminates:<br/>writes status + headers + body]
-    B -- no --> D[your authentication<br/>and authorization]
-    D --> G{guarded route?}
-    G -- yes --> H[DbscGuardFilter<br/>guardDecision]
+    B -- no --> E{auth + CSRF}
+    E -- refused --> X[Security's refusal]
+    E -- passed --> G{/dbsc/bind or a guarded route?}
+    G -- bind --> HB[DbscBindFilter<br/>re-offers registration]
+    G -- guard --> H[DbscGuardFilter<br/>guardDecision]
     H -- allow --> F[your controller]
-    G -- no --> F
+    E -- neither --> F
 ```
 
-Each branch is independent. The protocol paths are served and stop there; a guarded
-route additionally has to pass the guard's decision; everything else is your
+Each branch is independent. The protocol paths are served and stop there; a re-offer or a
+guarded route has to pass the application's own checks first; everything else is your
 application's chain, unchanged. Gating a single endpoint inline is equally valid — see
 [Act on the tier](#act-on-the-tier).
 
 The reasons for filters rather than controllers:
 
-- **These are a protocol surface, not endpoints.** The routes must be reachable
+- **These are a protocol surface, not endpoints.** The protocol routes must be reachable
   before any application session exists, and must answer with DBSC's own status
   contract. A filter that terminates the chain enforces that structurally: the
   routes cannot be re-mapped, shadowed by a peer controller, or re-secured.
@@ -452,23 +509,31 @@ The reasons for filters rather than controllers:
   401 first. `DbscFilter` is registered *before* Spring Security's CSRF filter — the
   earliest anchor that is still a Security filter — so nothing upstream can reject the
   browser's registration POST or replace that status.
+- **`/dbsc/bind` is deliberately not a protocol route.** It names its session from your
+  own cookie and changes state, so it belongs on your chain behind your authentication
+  and CSRF, where a terminating filter cannot pre-empt those checks. That is
+  `DbscBindFilter`.
 - **It owns no state the application needs to configure.** The filters are handed the
-  protocol surface and the list of guarded paths, so they add no ordering constraints to
-  your chain beyond the two above and no policy of its own over your routes.
+  protocol surface, the bind path and the list of guarded paths, so they add no ordering
+  constraints to your chain beyond the two above and no policy of its own over your
+  routes.
 
 ### Using your own `SecurityFilterChain`
 
 That is the only way to use the library — [Getting Started](#getting-started) is the
-full worked example, and the two chains there are the shape to copy. The four details
-worth restating here, because each one fails silently:
+full worked example, and the two chains there are the shape to copy. The details worth
+restating here, because each one fails silently:
 
-- **The protocol paths belong in a chain with CSRF disabled.** The browser's
-  registration POST carries no CSRF token, so a chain that applies CSRF to `/dbsc/**`
-  rejects it with `403` before `DbscFilter` ever runs — and the status looks like a
-  DBSC refusal.
+- **The protocol paths belong in a chain with CSRF disabled**, and that matcher must
+  **not** be a bare `/dbsc/**`. The browser's registration POST carries no CSRF token, so
+  a chain that applies CSRF to it rejects it with `403` before `DbscFilter` ever runs —
+  and the status looks like a DBSC refusal. A bare `/dbsc/**` additionally swallows
+  `/dbsc/bind`, so authentication and CSRF never run on the one route that needs them.
 - **`dbscFilter` goes before `CsrfFilter`**, not merely before authentication.
   Anything `addFilterBefore` anchors on is still ordered *after* CSRF, so the
   registration POST would be rejected first.
+- **`dbscBindFilter` goes in the application chain, after CSRF.** It terminates the
+  request, so anything that could refuse the request has to have run already.
 - **`dbscGuardFilter` goes in the application chain, after authentication.** It asks
   whether an existing session is protected; running it before authentication would
   make it answer questions about a session that has not been established yet.
@@ -684,6 +749,8 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `cookie-domain` | — | e.g. `example.com`; required for `site` scope |
 | `registration-path` | `/dbsc/regist` | **prefix** for the registration route, not a full path: the advertised route is `<prefix>/<token>` |
 | `refresh-path` | `/dbsc/refresh` | also the `refresh_url` in the JSON config |
+| `bind-path` | `/dbsc/bind` | the re-offer route for a client that manages its own key. See [Soft DBSC](#soft-dbsc-the-fallback-for-browsers-without-native-support) |
+| `soft.enabled` | `false` | registers `POST /dbsc/bind` and the Soft DBSC fallback. Off means the route is a 404. See [Soft DBSC](#soft-dbsc-the-fallback-for-browsers-without-native-support) |
 | `session-identifier-name` | — | **removed.** `session_identifier` carries the session id itself (spec §9.6), so there was no name left to configure. Setting it now has no effect |
 | `credential-cookie-name` | `__Host-auth_cookie` | the protected cookie named in `credentials[].name`, whose value rotates. Used verbatim — a prefix is your choice |
 | `binding-cookie-ttl` | `10m` | lifetime of the credential cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
@@ -980,8 +1047,328 @@ on PostgreSQL, MySQL, MariaDB, H2 and SQL Server. Timestamps are `BIGINT` epoch
 milliseconds throughout, matching how the protocol carries them.
 
 If you would rather not carry the migration at all, `initialize()` is also safe to call
-yourself from a schema-management hook — the DDL statements are quoted at the top of
+from a schema-management hook — the DDL statements are quoted at the top of
 `JdbcStorageAdapter`.
+
+## Clients that manage their own key
+
+Native DBSC keeps the private key somewhere the page cannot reach it — a TPM, a secure
+enclave, or at least a browser process boundary. A client that does its own key
+management has none of that: the key is a `CryptoKey` it generated, and an XSS on the
+origin can ask it to sign. That is a real reduction in what the binding proves, and it
+is worth being explicit about before adopting it: **a script-managed key is an oracle,
+not a secret.** It still buys something — a cookie stolen from a different device
+cannot be replayed, because the thief does not have the key — but it does not survive
+compromise of the origin itself.
+
+The library supports such a client with two additions, neither of which changes what
+native browsers do.
+
+### Soft DBSC: the fallback for browsers without native support
+
+Everything above describes the wire contract, and any client can implement it. That is
+the deliberate shape, but writing one from scratch means getting a lot right: the JWS
+shapes, the single-use token, raw `r||s` signatures, and a refresh schedule nothing on
+the server will remind you about. **Soft DBSC** is a ready-made implementation of that
+contract — `dbsc-soft-sw.js` and the module it imports, `dbsc-soft-client.js`, both at
+the repository root — so the only thing left is to load it.
+
+```html
+<meta name="csrf" th:content="${_csrf.token}"/>
+<meta name="csrf-header" th:content="${_csrf.headerName}"/>
+
+<script src="/dbsc-soft-client.js"></script>
+<script>
+  // Do not start a worker on a browser that binds natively. Chromium on
+  // Windows/Android has the hardware-backed tier, and a worker there would be a
+  // `fetch` hook on every request, for a binding that will never happen.
+  if (!DbscSoft.expectsNativeDbsc()) {
+    const registration = await navigator.serviceWorker.register('/dbsc-soft-sw.js');
+    await navigator.serviceWorker.ready;
+
+    const csrf = document.querySelector('meta[name="csrf"]');
+    const header = document.querySelector('meta[name="csrf-header"]');
+    const worker = registration.active;
+
+    const channel = new MessageChannel();
+    channel.port1.onmessage = e => console.log(e.data);   // { phase: "registered", … }
+    worker.postMessage(
+      { type: 'bind', csrfToken: csrf.content, csrfHeader: header.content },
+      [channel.port2]);
+  }
+</script>
+```
+
+`dbsc-soft-client.js` is loaded as a **plain script**, not a module, and that is the
+one line that makes the check above possible: `expectsNativeDbsc()` lives in it, and the
+page has to be able to ask the question *before* a worker is installed. The two loads
+are independent scopes — the page's copy has a `document`, the worker's does not — so
+each gets its own `DbscSoft` and neither interferes with the other.
+
+That is the whole integration: skip on native browsers, register the worker, wait for it
+to be controlling the page, hand it the CSRF token, and ask it to bind. From then on the
+worker looks after the session on its own.
+
+#### Why a Service Worker, and not a timer
+
+The specification names two refresh triggers (`dbsc.html` §5, §6):
+
+> The refresh endpoint is contacted **every time a request is made with an expired
+> bound cookie**, and its response **blocks the original request**.
+>
+> If a session credential **will expire soon, and an in-scope document is active**, the
+> user agent can refresh proactively to eliminate latency on an upcoming request.
+
+The first is the primary one, and it is only implementable by something that **sees a
+request before it goes to the network**. A Service Worker's `fetch` event is the only
+place a script can do that. So `dbsc-soft-sw.js` refreshes ahead of any same-origin
+request when the binding is old, and lets the request through afterwards — the same
+blocking shape the specification describes, minus the TPM.
+
+A page-local `setTimeout`, which is what earlier versions of this client used, can only
+approximate the *second* trigger. It also dies with the document, so a page nobody is
+looking at stops refreshing and the session demotes to `tier: none`
+`binding-cookie-ttl` after the last refresh. The worker outlives navigations and tab
+closes: as long as the origin has any client at all, the session stays alive.
+
+Both triggers therefore live on the worker side, and the client module is context-free
+— `dbsc-soft-client.js` has no `document`, `window` or DOM dependency and can be driven
+from either. `initDbsc()` is still exported for deployments that cannot register a
+worker; it is the timer-shaped entry point, and the one to avoid if you can. See
+[below](#both-files-are-classic-scripts-and-that-is-not-cosmetic) for why both files are
+classic scripts rather than modules.
+
+A **SharedWorker** would not do here, which is worth stating because it is the obvious
+first idea. It can hold one timer for the origin, which covers the proactive trigger,
+but it cannot see a `fetch` at all, so the primary trigger is unreachable from it — and
+Safari, one of the two browsers this fallback exists for, does not implement it.
+
+#### Both files are classic scripts, and that is not cosmetic
+
+`dbsc-soft-sw.js` loads the client with `importScripts()`, which only works for classic
+scripts, so `dbsc-soft-client.js` publishes itself as `self.DbscSoft` instead of using
+`export`. The alternative — `register('/dbsc-soft-sw.js', { type: 'module' })` — would
+let the worker use `import`, but **Safari does not implement module workers**. A module
+worker here would mean a client written for Safari that does not run on Safari, so:
+
+- register the worker plainly, with no `{ type: "module" }`
+- the client is a classic script; do not `<script type="module">` it
+- `importScripts()` evaluates into the worker's own scope, so every call into the client
+  is qualified (`self.DbscSoft.refresh()`), never destructured
+
+It keeps its key in **IndexedDB** (non-extractable where the browser allows) and drives
+the same routes native Chromium drives — the same offer headers, the same registration
+path, the same refresh exchange. Nothing is special-cased server-side for it beyond the
+re-offer route below.
+
+#### Telling it how long the cookie lives
+
+The refresh cadence is not discoverable from a script. A native browser reads it off
+the credential cookie's `Max-Age`, which is `HttpOnly` and therefore invisible to both
+a document and a worker, and the JSON session config carries no such field. So the
+worker is configured with it:
+
+```js
+const BINDING_COOKIE_TTL_MS = 180_000;   // must match dbsc.binding-cookie-ttl
+const REFRESH_MARGIN_MS = 5_000;         // fire this far ahead of the TTL
+```
+
+Set it to `dbsc.binding-cookie-ttl`. Too long is the failure to watch for — the cookie
+lapses between refreshes, the session demotes to `tier: none`, and every guarded route
+starts refusing a client that looks otherwise healthy.
+
+The worker tracks the last exchange the server answered and compares against that
+figure, so a request arriving a second after a refresh does not trigger another. That
+matters: the `fetch` hook runs on *every* same-origin request, and without the check
+every page load would cost a refresh round trip.
+
+#### What the worker will not touch
+
+Three prefixes are passed straight through, because intercepting them would be wrong:
+`/dbsc/` (the refresh route is what the worker *calls* — intercepting it would have the
+refresh trigger itself), `/.well-known/device-bound-sessions`, and `/login`. A failed
+refresh never fails the request either: the server is about to answer that request
+anyway, and it is the authority on whether the session is still good.
+
+#### It declines to run on browsers that should register natively
+
+`expectsNativeDbsc()` returns true for the Chromium family on Windows and Android — the
+platforms with a hardware key facility. A false positive here would be worse than a
+false negative: it would skip the registration this client exists for, and the native
+path would not pick it up on a browser that does not really support it, leaving the
+session unbound with no error. Hence an explicit platform list rather than feature
+detection.
+
+**The check belongs on the page, before the worker is registered.** It is not enough for
+`bindSession()` to decline later: registering the worker installs a `fetch` hook that
+runs on every same-origin request of every page, for a binding that will never happen.
+On Chromium that is pure overhead against a tier that already works, so the snippet above
+gates the whole thing — no `register()` call, no worker, no hook. `bindSession()` still
+performs the check as well, because a client that reaches it another way must not bind a
+software key to a session that is about to get a hardware-backed one.
+
+#### Turning it on
+
+```yaml
+dbsc:
+  soft:
+    enabled: true      # default false
+```
+
+That single switch does two things: it registers `POST /dbsc/bind` (otherwise a 404,
+so no client can start a soft binding) and it is what `DbscBindFilter` checks before it
+will answer the route. Nothing else about the server changes — the device key table and
+the native path are unaffected, and turning it off does not invalidate a key that is
+already registered.
+
+The default is **false** because enabling it widens the trust model, as the intro to
+this section describes. That is a deployment decision an operator has to make rather
+than inherit.
+
+Two files have to be reachable without authentication, since a module import or a
+worker registration that is redirected to a login page fails before any of it runs.
+Neither is a secret — they are the same scripts every visitor gets:
+
+```java
+.requestMatchers("/dbsc-soft-client.js", "/dbsc-soft-sw.js").permitAll()
+```
+
+#### What it does not do
+
+- **It does not outlive the origin's compromise**, as above. It is `tier: dbsc` in the
+  same sense as a native binding, because the server cannot tell the difference — but
+  read [the tier](#the-protection-model) as a statement about what was verified, not
+  about how strong the key is.
+- **It does not detect a native binding; the server refuses it.** A browser that should
+  register natively never gets here, because `expectsNativeDbsc()` stands the client
+  down first. If the native tier has already registered for that session anyway, the
+  re-offer comes back `SESSION_ALREADY_REGISTERED` and the bind exchange reports
+  `{ phase: "already-bound" }` — it does not try to replace the native key. That is one
+  binding per session either way.
+- **It is not a polyfill.** It does not make `navigator` expose DBSC, does not change
+  what any other script sees, and does not affect the browser's own handling of the
+  offer headers. The server sees an ordinary DBSC client.
+- **It does not survive a browser shutdown.** The key persists in IndexedDB, and the
+  worker survives navigation and tab closes, but a browser that is closed entirely runs
+  no worker. The session demotes after `binding-cookie-ttl` and recovers on the next
+  visit, when the worker's next intercepted request refreshes it.
+- **It needs a Service Worker.** Where there is none, there is no interception and no
+  outliving the document. Use `initDbsc()` in that case and accept the timer's limits.
+- **Its two files must not be renamed independently.** The worker loads the client by
+  absolute path (`importScripts("/dbsc-soft-client.js")`), because a Service Worker's
+  scope is its own script's directory and it has no document to resolve a relative
+  import against. Serve both from the root, or change the path in the worker.
+
+### `POST /dbsc/bind` — ask for an offer
+
+`bind()` writes its offer onto the response of whatever request called it, and a script
+can only act once its own code is running. That is an ordering problem the native flow
+does not have: Chromium reads the offer from the navigation itself, whenever it happens.
+A service worker may not even be installed at the moment the login response goes out.
+
+This route is the way back. It answers with the headers `bind()` would have written — the
+same `Secure-Session-Registration`, the same `Secure-Session-Challenge` — so a client
+parses one wire format and POSTs to one registration path no matter which route offered
+it:
+
+```
+POST /dbsc/bind            (authenticated; names its session from your session cookie)
+    → 200
+      Secure-Session-Registration: (ES256);path="/dbsc/regist/<token>";challenge="<jti>"
+      Secure-Session-Challenge: "<jti>";id="<sessionId>"
+
+POST /dbsc/regist/<token>  (the ordinary registration route)
+      Secure-Session-Response: "<jws>"
+    → 200 + JSON session config
+```
+
+**The session comes from your own session cookie, not from the path.** That is the whole
+difference between this route and the registration route, and it is why this one is
+expected to sit behind your authentication: it is only ever reached by a same-origin
+`fetch` from a page the client is already logged in on. An unauthenticated caller has no
+session, so there is no session to re-offer for, and the answer is the same
+`SESSION_NOT_FOUND` any unknown session gets.
+
+**CSRF applies, because this is an ordinary application route.** There is no
+DBSC-specific check here: put the route on your application chain behind your
+authentication, leave your normal CSRF on, and the standard `CsrfFilter` protects it.
+The client sends the token as a header, read from a meta tag on the page:
+
+```html
+<meta name="csrf" th:content="${_csrf.token}"/>
+<meta name="csrf-header" th:content="${_csrf.headerName}"/>
+```
+
+`dbsc-soft-client.js` reads both spellings (`csrf` / `csrf-header`, and Thymeleaf's own
+`_csrf` / `_csrf_header`), so either markup works. Two configuration details matter:
+
+- **The chain must keep sessions.** The default `HttpSessionCsrfTokenRepository` stores
+the token on the `HttpSession`, so `SessionCreationPolicy.STATELESS` on the chain that
+holds this route leaves it nowhere to store one and every POST is refused. This is worth
+calling out because nothing fails at startup and the resulting bare 403 looks exactly
+like a DBSC refusal. The protocol chain can stay stateless — CSRF is off there.
+- **Use `CsrfTokenRequestAttributeHandler`.** Spring Security's default handler masks the
+token per request with a BREACH nonce, which is right for a form your server renders and
+wrong for a client that holds the raw value from a meta tag.
+
+A session that already holds a device key is refused with `SESSION_ALREADY_REGISTERED`.
+Letting it re-register would let a client replace the key it proved possession of
+without proving possession of the new one.
+
+Each call mints a fresh challenge and a fresh single-use token, superseding whatever the
+previous call offered. The token is *not* spent by this route — it is the credential for
+the registration POST that follows, so spending it here would hand out a path that is
+already dead. Single-use is enforced where it has to be: on the registration POST, which
+spends the token before it reads the proof.
+
+### `X-Session-Id` on refresh
+
+The refresh route names its session by header, because by then the credential cookie is
+expired. Native DBSC uses `Sec-Secure-Session-Id`; a script may use `X-Session-Id`
+instead, and both are read:
+
+```
+POST /dbsc/refresh
+X-Session-Id: <sessionId>          ← or Sec-Secure-Session-Id; both work
+    → 403 + Secure-Session-Challenge   (first leg: proof not yet supplied)
+
+POST /dbsc/refresh
+X-Session-Id: <sessionId>
+Secure-Session-Response: "<jws>"
+    → 200 + JSON session config + a fresh credential cookie
+```
+
+The second name exists because `Sec-` is reserved by RFC 6648 for protocol-defined
+headers and is outside the CORS safelist, so a `fetch` carrying it is preflighted and the
+name has to be allowed by every deployment. `X-Session-Id` carries the same value with
+none of that. It is read first when both are present, though neither takes precedence in
+any way that affects the outcome: an unusable value fails the same lookup from either
+name.
+
+Whatever the client sends must be the session id, not the credential cookie's value.
+That value is a ticket which rotates on every refresh, so it names a ticket rather than
+a session — a refresh that accepted it would be resolving a session by a value whose
+whole purpose is to stop being one.
+
+### What such a client has to do itself
+
+- **Generate the key.** P-256, and `extractable: false` if you can — it will not stop
+the origin from *using* the key, but it stops it from *copying* it.
+- **Sign in the shapes the route expects.** Registration carries `typ: "dbsc+jwt"` and
+the public key as a `jwk` header parameter; refresh carries the same `typ` and **no
+`jwk`**, which is a protocol error there. Both sign `{ "jti": <challenge> }`, and the
+signature is raw `r||s` — which is what WebCrypto's ECDSA already returns, so no DER
+conversion is needed (Java's `Signature` does return DER, which is why the test
+fixtures convert).
+- **Send the proof in `Secure-Session-Response`, not in the body.** A POST to either
+route without that header is `MISSING_RESPONSE_HEADER`.
+- **Refresh explicitly.** Nothing will do it for you: there is no browser-side timer to
+rely on. The one place a script *can* observe the specification's primary trigger —
+"contacted every time a request is made with an expired bound cookie" — is a Service
+Worker's `fetch` event, which is what `dbsc-soft-sw.js` does. A `setInterval` in a
+document works too, until the document goes away. Either way, refresh before the
+credential cookie's `binding-cookie-ttl` elapses, or the session demotes to
+`tier: none` and the guard will refuse the next request.
 
 ## Binding behind OIDC or SAML: why the first offer fails
 

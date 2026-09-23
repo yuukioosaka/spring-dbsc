@@ -1,9 +1,12 @@
 package click.yukio.dbsc.demo;
 
 import click.yukio.dbsc.DbscService;
+import click.yukio.dbsc.config.DbscProperties;
+import click.yukio.dbsc.web.DbscBindFilter;
 import click.yukio.dbsc.web.DbscFilter;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
@@ -19,6 +22,8 @@ import org.springframework.security.oauth2.core.oidc.user.DefaultOidcUser;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.csrf.CsrfFilter;
+import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
+import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.security.web.util.matcher.OrRequestMatcher;
 import java.util.LinkedHashSet;
@@ -45,6 +50,12 @@ public class DemoOidcTestConfig {
     /**
      * The DBSC protocol routes: reachable unauthenticated, no CSRF, and reaching
      * {@code DbscFilter} rather than Security's entry point.
+     *
+     * <p>Matched route by route rather than as {@code /dbsc/**}. The wildcard would
+     * also capture {@code /dbsc/bind}, which is the one DBSC route that is
+     * <em>not</em> unauthenticated — it names its session from the application's own
+     * cookie, so it belongs to the application chain where CSRF and authentication
+     * apply to it. Letting it fall into this chain would quietly strip both.
      */
     @Bean
     @Order(0)
@@ -52,7 +63,8 @@ public class DemoOidcTestConfig {
             HttpSecurity http, @Qualifier("dbscFilter") DbscFilter dbscFilter) throws Exception {
         http
                 .securityMatcher(new OrRequestMatcher(
-                        new AntPathRequestMatcher("/dbsc/**"),
+                        new AntPathRequestMatcher("/dbsc/regist/**"),
+                        new AntPathRequestMatcher("/dbsc/refresh"),
                         new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
                 .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                 .sessionManagement(session -> session.sessionCreationPolicy(
@@ -92,13 +104,27 @@ public class DemoOidcTestConfig {
     SecurityFilterChain appChain(
             HttpSecurity http,
             @Qualifier("dbscFilter") DbscFilter dbscFilter,
+            DbscBindFilter dbscBindFilter,
             ClientRegistrationRepository clientRegistrationRepository,
             DbscService dbsc) throws Exception {
 
         http
                 .securityMatcher(new AntPathRequestMatcher("/**"))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/oauth2/**", "/login/**", "/error").permitAll()
+                        // The Soft DBSC client and its Service Worker, served
+                        // unauthenticated for the same reason as the login page: a
+                        // module import or a worker registration that 302s to the
+                        // login page fails before any of it runs, and neither file is
+                        // a secret.
+                        .requestMatchers("/oauth2/**", "/login/**", "/error",
+                                "/dbsc-soft-client.js", "/dbsc-soft-sw.js").permitAll()
+                        // The script client's re-offer route. Authenticated, and CSRF
+                        // applies to it like any other state-changing POST: the offer
+                        // binds a key to whatever session the cookies name, so an
+                        // anonymous caller must not be able to ask for one on someone
+                        // else's behalf. The client sends the token from the page's
+                        // meta tag.
+                        .requestMatchers("/dbsc/bind").authenticated()
                         .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2
                         .userInfoEndpoint(userInfo -> userInfo.oidcUserService(subjectAsName()))
@@ -120,9 +146,33 @@ public class DemoOidcTestConfig {
                                     authentication.getName(), 86_400_000L, request, response);
                             response.sendRedirect("/app");
                         }))
-                .csrf(csrf -> csrf.disable())
-                .addFilterBefore(dbscFilter, CsrfFilter.class);
+                // The bind route is on this chain, so it needs ordinary CSRF, not a
+                // DBSC-specific check. It is enabled for that route alone: the
+                // protocol routes live on the other chain, where CSRF is off because
+                // the browser posts no token.
+                .csrf(csrf -> csrf
+                        .csrfTokenRepository(new HttpSessionCsrfTokenRepository())
+                        .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
+                .addFilterBefore(dbscFilter, CsrfFilter.class)
+                // Last: it writes its own response, so everything that could refuse
+                // the request must already have run.
+                .addFilterAfter(dbscBindFilter, CsrfFilter.class);
         return http.build();
+    }
+
+    /**
+     * The re-offer route, in the chain where its authentication and CSRF live.
+     */
+    @Bean
+    DbscBindFilter dbscBindFilter(DbscService dbsc, DbscProperties properties) {
+        return new DbscBindFilter(dbsc, properties);
+    }
+
+    @Bean
+    FilterRegistrationBean<DbscBindFilter> dbscBindFilterRegistration(DbscBindFilter filter) {
+        FilterRegistrationBean<DbscBindFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
     }
 
     /**

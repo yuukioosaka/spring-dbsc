@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpSession;
 import java.time.Clock;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -344,6 +345,163 @@ public class DbscService {
         return sessionConfig(sessionId, request);
     }
 
+    // ------------------------------------------------------------------
+    // The script client's re-offer (POST /dbsc/bind)
+    // ------------------------------------------------------------------
+
+    /**
+     * Re-issues the registration offer to a client that manages its own key.
+     *
+     * <p>{@link #bind} is called from the login route and writes its offer onto a
+     * response the client may not be able to read: a script can only act once its own
+     * code is running, which can be arbitrarily later than the navigation that carried
+     * the offer, and it cannot re-read a header that has already gone by. This route is
+     * the way back. It answers with exactly the headers {@code bind()} writes — the
+     * same {@code Secure-Session-Registration}, the same
+     * {@code Secure-Session-Challenge} — so the client parses one wire format and POSTs
+     * to one registration path regardless of which route offered it.
+     *
+     * <p>The session is found from the application's session cookie rather than from a
+     * token in the path. That is the difference from {@link #handleRegistration}: a
+     * registration POST can arrive from a cross-site navigation context where a
+     * {@code SameSite=Lax} cookie is withheld, which is why its token travels in the
+     * path; this route is only ever reached by a same-origin fetch from a page the
+     * client is already logged in on, so the cookie is present and the caller can be
+     * authenticated in the ordinary way.
+     *
+     * <p>A fresh challenge and a fresh token are minted on every call, superseding any
+     * offer still outstanding: the newest token is the only one whose challenge matches
+     * the challenge header just written, and the ones it replaces expire on their own
+     * TTL without ever being usable, since the registration POST also has to name a
+     * challenge that is live and belongs to the session.
+     *
+     * @throws DbscException {@code SESSION_NOT_FOUND} when the caller cannot be shown
+     *                       to own the session it names
+     * @throws DbscException {@code UNSUPPORTED_CLIENT} when the session is named by a
+     *                       header rather than by a cookie
+     */
+    public Map<String, Object> handleBind(HttpServletRequest request, HttpServletResponse response) {
+        Session session = storage.getSessionByAppSessionId(requireAppSessionId(request))
+                .orElseThrow(() -> new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
+                        "no DBSC session is bound to this application session"));
+        if (session.isRevoked()) {
+            // Deliberately SESSION_NOT_FOUND rather than a code naming revocation: a
+            // terminated session is indistinguishable from one that never existed, and
+            // saying which would confirm to a caller that the id it holds was once
+            // real.
+            throw new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
+                    "this DBSC session was terminated");
+        }
+
+        // A device that already holds a key has nothing to gain from a second
+        // registration, and issuing an offer would let it replace the key it proved
+        // possession of without ever proving possession of the new one. The native
+        // route refuses this too, as SESSION_ALREADY_REGISTERED; the difference is that
+        // there the refusal comes from the engine, after the proof is read.
+        if (storage.getDeviceKey(session.id()).isPresent()) {
+            throw new DbscException(DbscErrorCode.SESSION_ALREADY_REGISTERED,
+                    "this session already has a device key");
+        }
+
+        Challenge challenge = challenges.issue(session.id());
+        String registrationToken = issueRegistrationToken(session.id());
+        String path = registrationPathFor(registrationToken);
+
+        response.addHeader(DbscHeaders.REGISTRATION,
+                DbscHeaderCodec.buildRegistrationHeader("ES256", path, challenge.jti()));
+        // The legacy alias is emitted on this route for the same reason it is on bind():
+        // some Chromium builds straddle the header rename, and a client that reads the
+        // old name has to find it here too or it silently registers with neither.
+        response.addHeader(DbscHeaders.LEGACY_REGISTRATION,
+                DbscHeaderCodec.buildRegistrationHeader("ES256", path, challenge.jti()));
+        addChallengeHeader(response, challenge.jti(), session.id());
+
+        // The token is NOT consumed here. It is the single-use credential for the
+        // registration POST that follows, and spending it on the offer would make the
+        // offer unusable: the client would present a path that was already dead and be
+        // refused as REGISTRATION_TOKEN_CONSUMED. Single-use is enforced where it has to
+        // be -- on the registration POST itself, which spends the token before it reads
+        // the proof. What bounds this route is its authentication and the token's own
+        // TTL, not a consumption here.
+        //
+        // Re-calling supersedes any offer still outstanding: the newest token is the
+        // only one whose challenge matches the challenge header just written, and the
+        // older ones expire on their own TTL.
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("sessionId", session.id());
+        body.put("registrationPath", path);
+        body.put("challenge", challenge.jti());
+        addSkipped(body, parseSkipped(request));
+        return body;
+    }
+
+    /**
+     * The application's own session id, as proven by its own cookie, or a refusal.
+     *
+     * <p>Possession of the container's session cookie is the proof of ownership: the
+     * container will only accept {@code JSESSIONID} from the cookie of that name, so
+     * a request arriving with it is a request the browser sent as that session. That
+     * is what makes it safe to hand the caller a registration offer for the session
+     * — an offer is an instruction to bind a key to it, and issuing one to a caller
+     * that merely knows or guesses the id would let a third party attach their own
+     * device key to someone else's session, and then prove possession of it forever
+     * after.
+     *
+     * <p>The cookie's <em>value</em> is compared to the container's id, and the
+     * container's session is only reachable if the request's cookies named one in the
+     * first place, so finding that id among the request's cookies confirms the cookie
+     * was its source. The cookie's <em>name</em> is not assumed, because the container
+     * may call it anything ({@code JSESSIONID}, {@code SESSION}, a deployment's own).
+     *
+     * <p>An application whose session id is <strong>not</strong> carried in a cookie
+     * cannot get this guarantee, and is refused with {@code UNSUPPORTED_CLIENT}: there
+     * is nothing to check, and a header-supplied id is not proof of anything. Such a
+     * deployment can still bind at login, where it knows the session first-hand.
+     */
+    private String requireAppSessionId(HttpServletRequest request) {
+        HttpSession session = requireAppSession(request);
+        if (!sessionIdTravelsInCookie(request)) {
+            throw new DbscException(DbscErrorCode.UNSUPPORTED_CLIENT,
+                    "the session id is not carried in a cookie, so the caller cannot be "
+                            + "shown to own this session; bind at login instead");
+        }
+        return session.getId();
+    }
+
+    private static HttpSession requireAppSession(HttpServletRequest request) {
+        HttpSession session = request.getSession(false);
+        if (session == null) {
+            throw new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
+                    "no application session on the request");
+        }
+        return session;
+    }
+
+    /**
+     * Whether the request carries, as one of its cookies, the session id the container
+     * resolved.
+     *
+     * <p>The cookie's <em>name</em> is deliberately not consulted. A cookie called
+     * {@code JSESSIONID} carrying any value at all is not evidence — a request could
+     * declare one and then present whatever session it liked — so accepting the name
+     * alone would restore exactly the hole this closes. What is checked is the value:
+     * the container will only have resolved a session at all if the request's own
+     * cookies named one, and finding the id it resolved among them confirms the cookie
+     * was the source.
+     *
+     * <p>An application whose session id is not a cookie's value — Spring Session, a
+     * custom container whose cookie carries an opaque handle rather than the id — fails
+     * this check, which is why the refusal is a distinct code rather than
+     * {@code SESSION_NOT_FOUND}: see {@link DbscErrorCode#UNSUPPORTED_CLIENT}.
+     */
+    private static boolean sessionIdTravelsInCookie(HttpServletRequest request) {
+        String id = request.getSession(false).getId();
+        return DbscHeaderCodec
+                .parseCookieHeader(request.getHeader("Cookie"))
+                .containsValue(id);
+    }
+
     /**
      * Resolves the session identifier on a native refresh, from the
      * {@code Sec-Secure-Session-Id} header (or its legacy alias) and from nothing else.
@@ -357,7 +515,15 @@ public class DbscService {
      * refresh without it has no session to act on.
      */
     private String resolveRefreshSessionId(HttpServletRequest request) {
-        String sessionId = request.getHeader(DbscHeaders.SESSION_ID);
+        // A script client names its session with X-Session-Id: the Sec- prefixed name
+        // is not CORS-safelisted, so a fetch carrying it needs the name allowed by every
+        // deployment. Both names are read here and neither takes precedence in any way
+        // that affects the outcome -- an unusable value fails the same lookup from
+        // either one.
+        String sessionId = request.getHeader(DbscHeaders.JS_SESSION_ID);
+        if (sessionId == null || sessionId.isBlank()) {
+            sessionId = request.getHeader(DbscHeaders.SESSION_ID);
+        }
         if (sessionId == null || sessionId.isBlank()) {
             // The legacy alias is accepted inbound and is not a fallback to anything
             // else: either name carries the session id, or the request is refused.

@@ -1,9 +1,11 @@
 package click.yukio.dbsc;
 
 import click.yukio.dbsc.config.DbscAutoConfiguration;
+import click.yukio.dbsc.config.DbscProperties;
 import click.yukio.dbsc.core.Json;
 import click.yukio.dbsc.core.ProtectionTier;
 import click.yukio.dbsc.core.Session;
+import click.yukio.dbsc.web.DbscBindFilter;
 import click.yukio.dbsc.web.DbscFilter;
 import click.yukio.dbsc.web.DbscGuardFilter;
 import click.yukio.dbsc.web.DbscGuardRoutes;
@@ -21,6 +23,9 @@ import org.springframework.security.config.annotation.web.configuration.EnableWe
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.csrf.CsrfFilter;
+import org.springframework.security.web.csrf.CsrfTokenRepository;
+import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
+import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.security.web.util.matcher.OrRequestMatcher;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -81,8 +86,12 @@ public class DbscTestHostApplication {
                     // calls: each call SETS the matcher, so chaining keeps only the
                     // last path and the others silently fall through to the app
                     // chain, which answers 403 before DbscFilter runs.
+                    //
+                    // /dbsc/bind is deliberately not here: it is an application route,
+                    // and the app chain below is where its checks live.
                     .securityMatcher(new OrRequestMatcher(
-                            new AntPathRequestMatcher("/dbsc/**"),
+                            new AntPathRequestMatcher("/dbsc/regist/**"),
+                            new AntPathRequestMatcher("/dbsc/refresh"),
                             new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
                     .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                     .sessionManagement(session -> session
@@ -95,17 +104,58 @@ public class DbscTestHostApplication {
         @Bean
         @Order(1)
         SecurityFilterChain hostApplicationChain(
-                HttpSecurity http, DbscGuardFilter dbscGuardFilter) throws Exception {
+                HttpSecurity http, DbscGuardFilter dbscGuardFilter,
+                DbscBindFilter dbscBindFilter) throws Exception {
             http
                     .securityMatcher(new AntPathRequestMatcher("/**"))
                     .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
+                    // Standard Spring Security CSRF, deliberately on, because
+                    // /dbsc/bind is a state-changing application route. Nothing
+                    // library-specific is involved: the route is protected by the
+                    // very CsrfFilter every other POST route is protected by.
+                    //
+                    // The plain request handler rather than the default: the default
+                    // masks the token with a per-request BREACH nonce, which is right
+                    // for a browser reading it out of a rendered form and wrong for a
+                    // client that holds the raw value — which is what the demo's
+                    // script client does, and what these tests assert.
+                    .csrf(csrf -> csrf
+                            .csrfTokenRepository(csrfTokenRepository())
+                            .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
+                    // IF_REQUIRED, not STATELESS as on the protocol chain above: CSRF
+                    // stores its token on the session, so a chain that refuses to keep
+                    // one could never validate a token. This is the ordinary shape for
+                    // an application chain that has real sessions.
                     .sessionManagement(session -> session
-                            .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                    .csrf(csrf -> csrf.disable())
+                            .sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
                     // The guard sits in the application chain, not the protocol one:
                     // it is about the host's routes. /host/payment is declared below.
-                    .addFilterBefore(dbscGuardFilter, CsrfFilter.class);
+                    .addFilterBefore(dbscGuardFilter, CsrfFilter.class)
+                    // The re-offer route itself, after CSRF: it terminates the
+                    // request, so everything that is going to refuse it — auth and
+                    // the token check — must have run already.
+                    .addFilterAfter(dbscBindFilter, CsrfFilter.class);
             return http.build();
+        }
+
+        /**
+         * The re-offer route. Declared here rather than left to the library's
+         * auto-configuration because the chain it belongs to is the host's, and a
+         * terminating filter has to be ordered relative to the host's own checks.
+         */
+        @Bean
+        DbscBindFilter dbscBindFilter(DbscService dbsc, DbscProperties dbscProperties) {
+            return new DbscBindFilter(dbsc, dbscProperties);
+        }
+
+        /**
+         * The token store {@link CsrfFilter} uses. Only the application chain needs
+         * one; the protocol chain serves requests the browser issues on its own, with
+         * no page of ours to put a token in, which is why CSRF stays off there.
+         */
+        @Bean
+        CsrfTokenRepository csrfTokenRepository() {
+            return new HttpSessionCsrfTokenRepository();
         }
 
         /**

@@ -32,6 +32,15 @@ public enum DbscErrorCode {
     REGISTRATION_TOKEN_EXPIRED,
 
     /**
+     * The caller asked for something the deployment cannot safely do for it: a
+     * re-offer (see {@code DbscService#handleBind}) on an application whose session id
+     * does not travel in a cookie, so ownership of the session cannot be shown from
+     * the request alone. Not a protocol error — the client is doing nothing wrong, and
+     * the deployment has a working alternative (binding at login).
+     */
+    UNSUPPORTED_CLIENT,
+
+    /**
      * A structurally incomplete request: a missing cookie or body field. Spec 08
      * maps this to 400 rather than 403, because it is a client bug and not a
      * rejected signature.

@@ -54,6 +54,67 @@ public class DbscProperties {
     private String refreshPath = "/dbsc/refresh";
 
     /**
+     * Path a JavaScript client POSTs to in order to be re-offered a registration.
+     *
+     * <p>This route is for clients that do their own key management instead of the
+     * browser's, and it exists to solve an ordering problem the native flow does not
+     * have: such a client can only register once its own code is running, which may be
+     * arbitrarily later than the login response that carried the offer. Rather than
+     * hold an offer from a response it may not have been able to read, it asks for a
+     * fresh one here.
+     *
+     * <p>It answers with the same {@code Secure-Session-Registration} and
+     * {@code Secure-Session-Challenge} headers {@code bind()} writes, so a script reads
+     * the identical wire format and POSTs to the identical registration path. The
+     * session is named by the application's own session cookie — this route is
+     * authenticated — rather than by a token in the path, because the client is already
+     * logged in by the time it can ask.
+     */
+    private String bindPath = "/dbsc/bind";
+
+    /**
+     * Soft DBSC: the JavaScript fallback for browsers with no native support.
+     */
+    private Soft soft = new Soft();
+
+    /**
+     * Settings for Soft DBSC, the script-driven fallback.
+     *
+     * <p>"Soft" because the key is not hardware-backed: it is a WebCrypto key in
+     * IndexedDB, reachable by any script on the origin, so it is an oracle rather
+     * than a secret. It is a different tier from the native one precisely because
+     * it proves less, and enabling it is a deployment decision rather than a
+     * default — see the README's "Soft DBSC" section for what it does and does not
+     * buy.
+     */
+    public static class Soft {
+
+        /**
+         * Whether the fallback is offered at all. Default false.
+         *
+         * <p>Off means the re-offer route is not registered, so {@code POST
+         * bind-path} is a 404 and no client can start a soft binding. The device
+         * key table and the native path are unaffected either way: a session that
+         * registered natively keeps working, and turning this off does not
+         * invalidate an existing soft key.
+         *
+         * <p>The default is false because enabling it widens the trust model. A
+         * stolen cookie still cannot be replayed without the key, but the key now
+         * lives where an XSS can use it, which is a real reduction — an operator
+         * has to decide that trade rather than inherit it.
+         */
+        private boolean enabled = false;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+    }
+
+    /**
      * The cookie named in the JSON config's {@code credentials[]} and protected by
      * the binding (spec §9.6).
      *
@@ -285,6 +346,22 @@ public class DbscProperties {
 
     public void setRefreshPath(String refreshPath) {
         this.refreshPath = refreshPath;
+    }
+
+    public String getBindPath() {
+        return bindPath;
+    }
+
+    public void setBindPath(String bindPath) {
+        this.bindPath = bindPath;
+    }
+
+    public Soft getSoft() {
+        return soft;
+    }
+
+    public void setSoft(Soft soft) {
+        this.soft = soft;
     }
 
     public String getCredentialCookieName() {

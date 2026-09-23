@@ -29,6 +29,11 @@ dbsc:
   # HTTPS has to set dbsc.secure: false explicitly.
   secure: true
   storage: jdbc
+  # Soft DBSC: the WebCrypto fallback for Firefox/Safari. Enabled here because this
+  # is the demo, and the whole point of the demo is to exercise it. The library
+  # default is false -- see the README's Soft DBSC section for the trade being made.
+  soft:
+    enabled: true
   # The DBSC refresh cadence. Chromium re-runs /dbsc/refresh when the credential
   # cookie is this old, so it is also the window in which a captured cookie is worth
   # something. The library default is 10m; shortened here so a manual session still

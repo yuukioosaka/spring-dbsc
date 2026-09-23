@@ -18,6 +18,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,10 +55,27 @@ public class DbscFilter extends OncePerRequestFilter {
     public DbscFilter(DbscService dbsc, DbscProperties properties) {
         this.dbsc = dbsc;
         this.properties = properties;
-        this.routes = List.of(
+
+        List<RouteMatcher> registered = new ArrayList<>(List.of(
                 new PrefixRoute("POST", properties.getRegistrationPath(), this::registration),
                 new Route("POST", properties.getRefreshPath(), this::refresh),
-                new Route("GET", "/.well-known/device-bound-sessions", this::wellKnownDocument));
+                new Route("GET", "/.well-known/device-bound-sessions", this::wellKnownDocument)));
+
+        // The re-offer route is deliberately absent here even when Soft DBSC is on.
+        //
+        // Every route in this filter is a protocol route: the browser drives it, the
+        // request carries its own proof, and being answered *before* the application's
+        // security runs is the whole point. The re-offer route is the opposite -- it
+        // names its session from the application's own cookie, so reaching it means
+        // being logged in, and it changes state by offering a binding. Answering it
+        // here would terminate the request before the host's authentication and CSRF
+        // could apply, leaving a route the deployment believes is protected open to
+        // anyone who can name a session.
+        //
+        // So it is served by DbscBindFilter instead, which runs in the application's
+        // chain where those checks are. The wire format is identical -- that is what
+        // lets one client parse one format either way.
+        this.routes = List.copyOf(registered);
     }
 
     @Override
@@ -140,6 +158,26 @@ public class DbscFilter extends OncePerRequestFilter {
             return;
         }
         writeJson(response, HttpStatus.OK, config);
+    }
+
+    /**
+     * The configured re-offer path, for {@link DbscBindFilter}.
+     */
+    public String bindPath() {
+        return properties.getBindPath();
+    }
+
+    /**
+     * Whether the Soft DBSC re-offer route is on at all.
+     *
+     * <p>Off means {@link DbscBindFilter} does not register its route, so the path
+     * falls through to the application and answers whatever it would have answered
+     * without this library. That is the honest failure for a client asking for a
+     * capability the deployment turned off, and it keeps the route out of the attack
+     * surface rather than leaving it to refuse politely.
+     */
+    public boolean isBindRouteEnabled() {
+        return properties.getSoft().isEnabled();
     }
 
     // ------------------------------------------------------------------

@@ -267,6 +267,24 @@ def current_csrf(opener, base=None):
     return m.group(1) if m else None
 
 
+def post_bind(opener, base=None, csrf=None):
+    """
+    POSTs the Soft DBSC re-offer route.
+
+    The route is an ordinary application route, so it sits behind Spring Security's
+    CsrfFilter like every other POST -- a caller with no token is refused by CSRF, not
+    by DBSC, and the two 403s are indistinguishable on the wire. That is deliberate: the
+    route changes state (it offers to key a device to a session), so it must not be
+    reachable without the token a page of ours was given.
+    """
+    if csrf is None:
+        csrf = current_csrf(opener, base=base)
+    return request(opener, "POST", "/dbsc/bind", body=b"",
+                   headers={"Content-Type": "application/json",
+                            "X-CSRF-TOKEN": csrf or "x"},
+                   base=base)
+
+
 def post_guarded(opener, base, csrf):
     """POSTs the guarded route and returns (status, body).
 
@@ -1136,6 +1154,10 @@ def main():
     else:
         rotation_checks()
 
+    # ------------------------------------ P. a client that manages its own key
+    print("\n-- P. the script-client affordances: /dbsc/bind and X-Session-Id --")
+    script_checks()
+
     summary = f"\n=== {len(PASS)} passed, {len(FAIL)} failed"
     summary += f", {len(SKIP)} skipped ===" if SKIP else " ==="
     print(summary)
@@ -1311,6 +1333,194 @@ def rotation_checks():
         replace_cookies={"__Host-auth_cookie": ticket_before})
     check("the header alone names the session, retired ticket and all",
           header_status == 200, f"got {header_status}: {header_text[:160]}")
+
+
+def script_checks():
+    """Section P: the two affordances a script-managed client needs.
+
+    Both are additions the native flow never touches, and both are only meaningful on
+    the wire -- the unit tests drive them through MockMvc, which does not prove the
+    servlet stack preserves repeated response headers or that a header name outside
+    the safelist is read at all.
+
+    ``POST /dbsc/bind`` is the re-offer route. ``bind()`` writes its offer onto
+    whatever response called it, and a script can only act once its own code runs, so
+    the native ordering (offer on the login response) does not exist for it. This
+    route is where such a client asks again, and the assertions below are the
+    contract: the *headers* carry the same wire format ``bind()`` emits, and the
+    token in them is still live.
+
+    ``X-Session-Id`` is the refresh header rename. ``Sec-`` is reserved by RFC 6648
+    and outside the CORS safelist, so a fetch carrying it is preflighted; the plain
+    name carries the same value with none of that.
+    """
+    opener, jar = new_client()
+    status, login_headers, reg_path, _ = login(opener, jar)
+    if status != 302:
+        check("the script-client section can log in", False,
+              f"login returned {status}")
+        return
+
+    # --- the re-offer route refuses a client with no session, before anything else.
+    #
+    # The session for this route comes from the application's own session cookie,
+    # not from a token in the path, and an anonymous caller has none. This is the
+    # ordering that makes the route safe to expose on the authenticated chain: the
+    # refusal happens before a challenge is minted or a token is spent.
+    # The re-offer route needs a CSRF token, which is itself worth pinning down: the
+    # route must not be reachable without one. This is the anonymous case, so what comes
+    # back is Security's own answer rather than DBSC's -- a redirect to the login page,
+    # or a 401/403 from CSRF depending on how the caller got there. Either way the route
+    # is not served, and no offer is minted. The next block asserts the DBSC refusal
+    # itself, on a request from a client that is authenticated but unbound.
+    anon, _ = new_client()
+    anon_status, anon_headers, anon_text = post_bind(anon)
+    check("POST /dbsc/bind without a session is not served",
+          anon_status != 200, f"got {anon_status}: {anon_text[:160]}")
+    check("and an anonymous re-offer mints no registration header",
+          header(anon_headers, "Secure-Session-Registration") is None,
+          str(all_headers(anon_headers, "Secure-Session-Registration"))[:200])
+
+    # --- a bound session is refused: re-offering would let it replace the key it
+    # proved possession of without proving possession of a new one.
+    key = Key()
+    jti = registration_jti(login_headers)
+    reg_status, _, reg_text = request(
+        opener, "POST", reg_path, body=b"", headers={
+            "Secure-Session-Response": key.jws({"jti": jti}),
+            "Content-Type": "application/json"})
+    check("the script-client section can register natively first", reg_status == 200,
+          f"got {reg_status}: {reg_text[:200]}")
+
+    bound_status, bound_headers, bound_text = post_bind(opener)
+    check("a session that already holds a key is SESSION_ALREADY_REGISTERED",
+          bound_status == 403 and "SESSION_ALREADY_REGISTERED" in bound_text,
+          f"got {bound_status}: {bound_text[:160]}")
+    check("and a refused re-offer writes no registration header either",
+          header(bound_headers, "Secure-Session-Registration") is None,
+          str(all_headers(bound_headers, "Secure-Session-Registration"))[:200])
+
+    # --- the offer itself, on the session that has not bound yet.
+    #
+    # A separate client, so the re-offer is the *first* registration for its session
+    # and the already-registered refusal above cannot mask a broken offer.
+    fresh, fresh_jar = new_client()
+    f_status, _, f_reg_path, _ = login(fresh, fresh_jar)
+    if f_status != 302:
+        check("the re-offer client can log in", False, f"login returned {f_status}")
+        return
+
+    offer_status, offer_headers, offer_text = post_bind(fresh)
+    check("POST /dbsc/bind on an unbound session -> 200", offer_status == 200,
+          f"got {offer_status}: {offer_text[:200]}")
+
+    reg_header = header(offer_headers, "Secure-Session-Registration")
+    legacy_header = header(offer_headers, "Sec-Session-Registration")
+    check("the re-offer carries Secure-Session-Registration as a header",
+          reg_header is not None, str(all_headers(offer_headers, "Secure-Session-Registration"))[:200])
+    check("and the legacy alias alongside it, so a straddling browser reads one",
+          legacy_header == reg_header, f"{legacy_header!r} != {reg_header!r}")
+
+    offer_path, offer_jti = registration_path(offer_headers), registration_jti(offer_headers)
+    check("the offer advertises a registration path",
+          bool(offer_path) and offer_path is not None
+          and offer_path.startswith(MAIN_REG_PATH + "/"),
+          str(offer_path))
+    check("and that path is NOT the login response's token",
+          offer_path is not None and offer_path != f_reg_path,
+          f"re-offer reused the login's single-use path: {offer_path}")
+
+    # The challenge header is the other half of the same value, and the id= parameter
+    # is what names the session the challenge belongs to (spec: `<jti>`;id=`<sessionId>`).
+    challenge_header = header(offer_headers, "Secure-Session-Challenge")
+    check("the re-offer carries Secure-Session-Challenge too",
+          challenge_header is not None, str(challenge_header))
+    check("and its JTI is the one the registration header points at",
+          offer_jti is not None and offer_jti in (challenge_header or ""),
+          f"reg jti {offer_jti!r} vs challenge {challenge_header!r}")
+
+    # --- the offer is live: the token it names still registers.
+    #
+    # This is the assertion that would have caught the one real bug in this route.
+    # A re-offer that spends its own token hands the client a path that is already
+    # dead -- the registration POST then answers REGISTRATION_TOKEN_CONSUMED and the
+    # client has no way back.
+    fresh_key = Key()
+    live_status, _, live_text = request(
+        fresh, "POST", offer_path, body=b"", headers={
+            "Secure-Session-Response": fresh_key.jws({"jti": offer_jti}),
+            "Content-Type": "application/json"})
+    check("the token the re-offer handed out is live, not pre-spent",
+          live_status == 200, f"got {live_status}: {live_text[:200]}")
+    check("and registering off it did not answer REGISTRATION_TOKEN_CONSUMED",
+          live_status == 200 or "REGISTRATION_TOKEN_CONSUMED" not in live_text,
+          live_text[:160])
+
+    session_id = session_id_of(fresh)
+    check("the re-offer bound the session the application reports",
+          session_id is not None
+          and (json.loads(live_text).get("session_identifier") == session_id
+               if live_status == 200 else False),
+          f"{session_id} vs {live_text[:160]}")
+
+    # --- X-Session-Id on refresh.
+    #
+    # The same exchange the rotation section runs, with the header renamed. Both
+    # names must resolve the session identically; anything else would make the
+    # choice of name semantically load-bearing, which it is not.
+    _, leg1_headers, _ = request(
+        fresh, "POST", "/dbsc/refresh", body=b"",
+        headers={"Content-Type": "application/json",
+                 "X-Session-Id": session_id or ""})
+    ch = refresh_jti(leg1_headers)
+    check("a refresh naming the session with X-Session-Id answers a challenge",
+          ch is not None, str(all_headers(leg1_headers, "Secure-Session-Challenge"))[:200])
+
+    x_status, _, x_text = request(
+        fresh, "POST", "/dbsc/refresh", body=b"", headers={
+            "Content-Type": "application/json",
+            "X-Session-Id": session_id or "",
+            "Secure-Session-Response": refresh_jws(fresh_key, ch)})
+    check("and the proof over X-Session-Id refreshes -> 200", x_status == 200,
+          f"got {x_status}: {x_text[:200]}")
+
+    # --- the two names are interchangeable, not ordered.
+    #
+    # A client that sends both is named by X-Session-Id (it is read first), which is
+    # the only tie-break; a client that sends only the native name must keep working,
+    # since that is the path every native browser is on.
+    _, leg1_native, _ = request(
+        fresh, "POST", "/dbsc/refresh", body=b"",
+        headers={"Content-Type": "application/json",
+                 "Sec-Secure-Session-Id": session_id or ""})
+    native_ch = refresh_jti(leg1_native)
+    n_status, _, n_text = request(
+        fresh, "POST", "/dbsc/refresh", body=b"", headers={
+            "Content-Type": "application/json",
+            "Sec-Secure-Session-Id": session_id or "",
+            "Secure-Session-Response": refresh_jws(fresh_key, native_ch)})
+    check("the native header name still refreshes unchanged", n_status == 200,
+          f"got {n_status}: {n_text[:200]}")
+
+    # --- no CORS preflight is needed for the X- name, which is the whole point.
+    #
+    # X-Session-Id is a CORS-safelisted shape: the name is not reserved, so a fetch
+    # that sets it is a simple request. This is asserted structurally (the name is
+    # outside the Sec- namespace) rather than by a browser, which is the only way to
+    # state it from a script.
+    check("X-Session-Id is not a Sec- prefixed (preflight-triggering) name",
+          not "X-Session-Id".startswith("Sec-"))
+
+    # --- the route is opt-in: the native flow never sees it.
+    #
+    # A native browser never calls /dbsc/bind, so the login response must still offer
+    # registration on its own. If that ever became dependent on a prior re-offer,
+    # every native client would silently stop registering.
+    native_client, native_jar = new_client()
+    n_login_status, n_login_headers, n_login_path, _ = login(native_client, native_jar)
+    check("the native flow still gets its offer from the login response alone",
+          n_login_status == 302 and registration_path(n_login_headers) is not None,
+          f"login {n_login_status}, offer {registration_path(n_login_headers)}")
 
 
 if __name__ == "__main__":

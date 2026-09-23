@@ -41,13 +41,28 @@
 <meta name="csrf" th:content="${_csrf != null ? _csrf.token : ''}"/>
 <meta name="csrf-header" th:content="${_csrf != null ? _csrf.headerName : 'X-CSRF-TOKEN'}"/>
 
-<h2>3. Native DBSC state</h2>
+<h2>3. DBSC state</h2>
 <p class="hint">
-    DBSC is driven by the browser, not by this page: there is no client script
-    involved. On <strong>Chromium 145+</strong> the browser POSTs
-    <code>/dbsc/regist/&lt;token&gt;</code> on its own after login, using a
-    hardware-backed non-extractable key (TPM / Secure Enclave), then keeps it
-    alive with <code>/dbsc/refresh</code>.
+    DBSC is driven by the browser on <strong>Chromium 145+</strong>: the browser POSTs
+    <code>/dbsc/regist/&lt;token&gt;</code> on its own after login, using a hardware-backed
+    non-extractable key (TPM / Secure Enclave), then keeps it alive with
+    <code>/dbsc/refresh</code>. Nothing on this page issues those requests.
+</p>
+<div th:if="${softEnabled}">
+    <p class="hint">
+        This deployment has <strong>Soft DBSC</strong> enabled. A browser
+        <em>without</em> native support loads <code>dbsc-soft-client.js</code>, which does
+        the same work with a WebCrypto key in IndexedDB. That key is reachable by page
+        script, so it is strictly weaker than the native tier — it still stops a cookie
+        stolen from another machine, because the thief has no key to sign with, but not an
+        XSS on this origin.
+    </p>
+    <pre id="soft-client">checking…</pre>
+</div>
+<p class="hint" th:unless="${softEnabled}">
+    Soft DBSC is <strong>off</strong> (<code>dbsc.soft.enabled</code>). No fallback client
+    is loaded, so a browser without native support stays at tier <code>none</code> and
+    guarded routes refuse it. See the README for what turning it on costs.
 </p>
 <p class="hint">
     The <code>tier</code> in the report above is what the server enforces right
@@ -98,5 +113,78 @@
         }
     }
 </script>
+
+<!--
+    Soft DBSC, loaded only when dbsc.soft.enabled. The client is a Service Worker:
+    it is the only place a script can see a request before it goes to the network,
+    which is what the specification's refresh trigger is ("contacted every time a
+    request is made with an expired bound cookie"). A page-local timer can only
+    approximate that, and dies with the page.
+
+    Registered WITHOUT { type: "module" }. The worker's script is a classic script
+    that loads its logic with importScripts(), because a module worker -- which would
+    let it use import -- is not implemented in Safari, which is one of the two
+    browsers this fallback exists for. Adding type: "module" here breaks it.
+
+    NOT REGISTERED AT ALL ON A BROWSER THAT SHOULD BIND NATIVELY. Chromium on
+    Windows/Android has the hardware-backed tier, so a worker here would be pure
+    overhead: a `fetch` hook running on every request of every page, for a binding
+    that will never happen because bindSession() declines. The check below is the
+    primary one; the worker does not repeat it, and does not need to -- the decision
+    is made here, once, before anything is installed.
+
+    That is why dbsc-soft-client.js is loaded as a plain script on this page: it is
+    where expectsNativeDbsc() lives, and the page has to be able to ask the question
+    without starting a worker. The two loads are independent scopes -- this one has a
+    `document`, the worker's does not -- so each gets its own self.DbscSoft and
+    neither sees the other.
+-->
+<div th:if="${softEnabled}">
+    <script src="/dbsc-soft-client.js"></script>
+    <script>
+        (async () => {
+            const out = document.getElementById('soft-client');
+
+            try {
+                if (self.DbscSoft.expectsNativeDbsc()) {
+                    out.textContent = 'Native DBSC: this browser binds on its own, no fallback needed.';
+                    return;
+                }
+                if (!('serviceWorker' in navigator)) {
+                    out.textContent = 'Soft DBSC needs a Service Worker; this browser has none.';
+                    return;
+                }
+
+                const registration = await navigator.serviceWorker.register('/dbsc-soft-sw.js');
+                // The worker may be installed but not yet controlling this page.
+                // `claim()` in its activate handler takes over the tab, but that
+                // resolves a moment after registration, so wait for it rather than
+                // reporting a binding that has not been asked for yet.
+                await navigator.serviceWorker.ready;
+
+                // The CSRF token the bind route needs lives here, in the document,
+                // and cannot be read from inside the worker.
+                const csrf = document.querySelector('meta[name="csrf"]');
+                const csrfHeader = document.querySelector('meta[name="csrf-header"]');
+
+                const worker = registration.active;
+                const bind = new Promise((resolve, reject) => {
+                    const channel = new MessageChannel();
+                    channel.port1.onmessage = e => resolve(e.data);
+                    worker.postMessage({
+                        type: 'bind',
+                        csrfToken: csrf ? csrf.content : null,
+                        csrfHeader: csrfHeader ? csrfHeader.content : null
+                    }, [channel.port2]);
+                    setTimeout(() => reject(new Error('the worker did not answer')), 15000);
+                });
+
+                out.textContent = JSON.stringify(await bind, null, 2);
+            } catch (e) {
+                out.textContent = 'Soft DBSC did not load: ' + e;
+            }
+        })();
+    </script>
+</div>
 </body>
 </html>

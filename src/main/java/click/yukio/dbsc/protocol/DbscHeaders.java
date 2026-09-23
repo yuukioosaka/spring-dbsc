@@ -18,6 +18,25 @@ public final class DbscHeaders {
     public static final String SESSION_ID = "Sec-Secure-Session-Id";
     public static final String SKIPPED = "Secure-Session-Skipped";
 
+    /**
+     * The session identifier as a JavaScript client sends it.
+     *
+     * <p>Functionally this duplicates {@link #SESSION_ID}: both name a session on the
+     * refresh route and both are read there. It exists because a script cannot rely on
+     * the {@code Sec-} prefixed name. That prefix is reserved by RFC 6648 for
+     * protocol-defined headers rather than for application ones, and it is outside the
+     * CORS safelist, so a fetch that carries it is preflighted and the name has to be
+     * named in {@code Access-Control-Allow-Headers} by every deployment. A plain
+     * {@code X-} name carries the same value with none of that, which is what a client
+     * this library does not control needs.
+     *
+     * <p>Read <strong>before</strong> {@link #SESSION_ID} so a client sending both is
+     * resolved by the name it chose, but neither is preferred over the other in any
+     * way that affects the outcome: an unknown or malformed value fails the same lookup
+     * from either name.
+     */
+    public static final String JS_SESSION_ID = "X-Session-Id";
+
     // Legacy outbound aliases, emitted alongside the current names
     public static final String LEGACY_REGISTRATION = "Sec-Session-Registration";
     public static final String LEGACY_CHALLENGE = "Sec-Session-Challenge";

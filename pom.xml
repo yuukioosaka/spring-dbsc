@@ -260,6 +260,27 @@
                     <resource>
                       <directory>src/demo/resources</directory>
                     </resource>
+                    <!--
+                      The Soft DBSC client lives at the repository root, not under
+                      src/demo/resources/static. It is the artifact a deployer copies
+                      into their own app, so it has to be findable without knowing
+                      this build's layout, and it is not demo-specific: the wire
+                      exchange it speaks is the library's, not the demo's. Including
+                      the root here is what lets the demo serve its own copy.
+
+                      Both files ship: the worker imports the client by absolute
+                      path (/dbsc-soft-client.js), which is what a Service Worker
+                      needs, because it has no document to resolve a relative import
+                      against.
+                    -->
+                    <resource>
+                      <directory>.</directory>
+                      <includes>
+                        <include>dbsc-soft-client.js</include>
+                        <include>dbsc-soft-sw.js</include>
+                      </includes>
+                      <targetPath>static</targetPath>
+                    </resource>
                   </resources>
                 </configuration>
               </execution>

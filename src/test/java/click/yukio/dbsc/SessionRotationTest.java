@@ -11,6 +11,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
@@ -57,6 +58,12 @@ class SessionRotationTest {
 
     @Autowired
     private CookieScope cookieScope;
+
+    @Autowired
+    private CsrfTokenRepository csrfTokenRepository;
+
+    /** The header a browser sends the token in, matching {@code dbsc-soft-client.js}. */
+    private static final String CSRF_HEADER = "X-CSRF-TOKEN";
 
     @Test
     @DisplayName("rotation: a successful refresh issues a different credential ticket")
@@ -155,6 +162,7 @@ class SessionRotationTest {
         // The stale tab: the credential cookie it still holds names the retired ticket.
         MvcResult result = mvc.perform(post("/host/payment")
                         .session(login.appSession())
+                        .header(CSRF_HEADER, HttpFlowTest.csrfToken(csrfTokenRepository, login.appSession()))
                         .cookie(new Cookie(cookieScope.credentialCookieName(), retired)))
                 .andReturn();
 

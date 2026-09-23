@@ -13,7 +13,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockHttpSession;
+import org.springframework.security.web.csrf.CsrfToken;
+import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
@@ -60,6 +64,24 @@ class HttpFlowTest {
 
     @Autowired
     private CookieScope cookieScope;
+
+    @Autowired
+    private CsrfTokenRepository csrfTokenRepository;
+
+    /**
+     * The repository, reachable from the static helpers below. The Spring context is
+     * shared by every test class here, so one bean serves them all and a static holder is
+     * the honest way to say so — the alternative is threading it through every call site.
+     */
+    private static CsrfTokenRepository sharedCsrfTokenRepository;
+
+    @Autowired
+    void rememberCsrfTokenRepository(CsrfTokenRepository repository) {
+        sharedCsrfTokenRepository = repository;
+    }
+
+    /** The header a browser sends the token in, matching {@code dbsc-soft-client.js}. */
+    private static final String CSRF_HEADER = "X-CSRF-TOKEN";
 
     @Autowired
     private Clock dbscClock;
@@ -472,7 +494,11 @@ class HttpFlowTest {
         LoginState login = loginWithState();
         register(login, TestKey.generate());
 
-        MvcResult result = mvc.perform(post("/host/logout").cookie(login.bindingCookie())).andReturn();
+        MvcResult result = mvc.perform(post("/host/logout")
+                        .session(login.appSession())
+                        .header(CSRF_HEADER, csrfToken(login.appSession()))
+                        .cookie(login.bindingCookie()))
+                .andReturn();
 
         assertEquals(200, result.getResponse().getStatus());
         Map<String, Object> config = Json.parseObject(result.getResponse().getContentAsString());
@@ -498,6 +524,8 @@ class HttpFlowTest {
         MvcResult result = mvc.perform(post("/host/payment")
                         .contentType("application/json")
                         .content("{\"amount\":1000}")
+                        .session(login.appSession())
+                        .header(CSRF_HEADER, csrfToken(login.appSession()))
                         .cookie(login.preRegistrationCookie()))
                 .andReturn();
 
@@ -511,9 +539,15 @@ class HttpFlowTest {
         // No session id means no binding can be looked up, so this is the ordinary
         // "not logged in" case. Authenticating the request is the application's
         // job — a DBSC refusal is 403 and would tell a signed-out user nothing.
+        //
+        // A CSRF token is still required: it is a session-less request as far as DBSC
+        // is concerned, not one exempt from the application's other checks.
+        MockHttpSession session = new MockHttpSession();
         MvcResult result = mvc.perform(post("/host/payment")
                         .contentType("application/json")
-                        .content("{\"amount\":1000}"))
+                        .content("{\"amount\":1000}")
+                        .session(session)
+                        .header(CSRF_HEADER, csrfToken(session)))
                 .andReturn();
 
         assertEquals(200, result.getResponse().getStatus());
@@ -532,7 +566,8 @@ class HttpFlowTest {
         MvcResult result = mvc.perform(post("/host/payment")
                         .contentType("application/json")
                         .content("{\"amount\":1000}")
-                        .session(login.appSession()))
+                        .session(login.appSession())
+                        .header(CSRF_HEADER, csrfToken(login.appSession())))
                 .andReturn();
 
         assertEquals(403, result.getResponse().getStatus(),
@@ -550,6 +585,8 @@ class HttpFlowTest {
         MvcResult result = mvc.perform(post("/host/payment")
                         .contentType("application/json")
                         .content("{\"amount\":1000}")
+                        .session(login.appSession())
+                        .header(CSRF_HEADER, csrfToken(login.appSession()))
                         .cookie(login.bindingCookie()))
                 .andReturn();
 
@@ -668,10 +705,44 @@ class HttpFlowTest {
     }
 
     private MvcResult login() throws Exception {
+        MockHttpSession session = new MockHttpSession();
         return mvc.perform(post("/host/login")
+                        .session(session)
+                        .header(CSRF_HEADER, csrfToken(session))
                         .contentType("application/json")
                         .content("{\"userId\":\"user_1\"}"))
                 .andReturn();
+    }
+
+    /**
+     * The CSRF token {@code POST /host/login} has to carry.
+     *
+     * <p>The application chain runs standard Spring Security CSRF — {@code /host/login}
+     * is a state-changing application route and gets no exemption. A browser reads this
+     * value from the page holding the form; a test mints it by round-tripping it through
+     * the same repository the filter reads, on the same session the request will carry.
+     */
+    private String csrfToken(MockHttpSession session) {
+        return csrfToken(csrfTokenRepository, session);
+    }
+
+    /**
+     * The CSRF token a request on {@code session} has to carry.
+     *
+     * <p>Minted by round-tripping through the same repository the filter reads, so the
+     * value is the one {@code CsrfFilter} would accept — not a literal a test could get
+     * wrong.
+     */
+    static String csrfToken(CsrfTokenRepository repository, MockHttpSession session) {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setSession(session);
+
+        CsrfToken token = repository.loadToken(request);
+        if (token == null) {
+            token = repository.generateToken(request);
+            repository.saveToken(token, request, new MockHttpServletResponse());
+        }
+        return token.getToken();
     }
 
     private LoginState loginWithState() throws Exception {
@@ -680,10 +751,23 @@ class HttpFlowTest {
 
     /**
      * Logs in and returns the state a client holds before registration. Shared with
-     * {@link SessionRotationTest}.
+     * {@link SessionRotationTest} and {@link ScriptClientTest}.
+     *
+     * <p>The session is created here rather than left to the request, because the CSRF
+     * token is bound to it: the caller cannot send a token for a session it has not named
+     * yet. That is the same shape a browser is in — it has a session from rendering the
+     * login form, and the token it posts was minted against that session.
      */
     static LoginState loginWithState(MockMvc mvc, CookieScope cookieScope) throws Exception {
+        return loginWithState(mvc, cookieScope, sharedCsrfTokenRepository);
+    }
+
+    static LoginState loginWithState(MockMvc mvc, CookieScope cookieScope,
+                                    CsrfTokenRepository csrfTokenRepository) throws Exception {
+        MockHttpSession session = new MockHttpSession();
         MvcResult result = mvc.perform(post("/host/login")
+                        .session(session)
+                        .header(CSRF_HEADER, csrfToken(csrfTokenRepository, session))
                         .contentType("application/json")
                         .content("{\"userId\":\"user_1\"}"))
                 .andReturn();

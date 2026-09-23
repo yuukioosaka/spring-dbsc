@@ -59,16 +59,96 @@ From then on that binding cookie is the only thing naming the session on the cli
 first belongs to the application's own session, the second was minted by the login
 route and keys the DBSC binding. Neither implies the other.
 
+### Browsers without native DBSC (the JS fallback)
+
+Firefox and Safari implement neither the headers nor the key management, so the
+browser will never POST anything and the session stays at tier `none` no matter
+how long it lives. `/app` registers `dbsc-soft-sw.js` for exactly that case.
+
+The client is a **Service Worker**, served from the demo's static resources. It is
+the only place a script can see a request before it goes to the network, which is
+what the specification's primary refresh trigger is — "the refresh endpoint is
+contacted every time a request is made with an expired bound cookie". A page-local
+timer can only approximate the proactive trigger, and dies with the page.
+
+Both the worker and the client it loads are **classic scripts**, not modules. The
+worker uses `importScripts()`, which only loads classic scripts, and the alternative
+— a module worker with `import` — is not implemented in Safari, one of the two
+browsers this client is for. So the client publishes itself as `self.DbscSoft` rather
+than using `export`, and the worker calls through that namespace rather than
+destructuring (a worker's scope is shared with everything `importScripts()` pulls in).
+
+The worker runs unconditionally, but stands itself down on a browser that should
+register natively: the bind exchange checks `expectsNativeDbsc()` and returns
+`{ phase: "native" }` without touching the network, so one code path covers both and
+the decision lives in one place rather than in a user-agent test on the page.
+
+What it does, in order:
+
+| Step | Request | Why |
+|---|---|---|
+| 1 | `POST /dbsc/bind` | asks for an offer. The native flow gets its offer from the login response, but a script can only act once its own code runs — a different ordering, so it needs a way back |
+| 2 | `POST /dbsc/regist/<token>` | registers, key from `crypto.subtle`, proof in `Secure-Session-Response` |
+| 3 | `POST /dbsc/refresh` (no proof) | `403` + a challenge to sign |
+| 4 | `POST /dbsc/refresh` (proof) | `200` + a new credential ticket |
+| 5 | `POST /app/payment` | the guarded route, now open at tier `dbsc` |
+
+Steps 3 and 4 then repeat from the worker's `fetch` hook: it refreshes ahead of any
+same-origin request once the record is older than `dbsc.binding-cookie-ttl` (3m in
+this demo), less a 5s margin, and lets the request through afterwards.
+
+Three prefixes bypass the hook — `/dbsc/`, `/.well-known/device-bound-sessions` and
+`/login`. The first matters most: intercepting `/dbsc/refresh` would have the refresh
+trigger itself.
+
+**The key is weaker than the native one, and the demo says so on the page.** It
+lives in IndexedDB where page script can reach it, so an XSS on this origin can ask
+it to sign. What it still buys is that a cookie stolen from another machine cannot
+be replayed — the thief has no key. Treat it as an oracle, not a secret.
+
+The offering half is also weaker: `/dbsc/bind` only mints an offer for a session
+that is **already authenticated and not yet registered**. A session with a device
+key is refused (`SESSION_ALREADY_REGISTERED`) rather than being allowed to replace
+the key it proved possession of.
+
+#### Trying it without a browser
+
+`scripts/probe-script-client.mjs` runs the shipped `dbsc-soft-client.js` verbatim
+under Node, shimming only IndexedDB and the cookie jar, against a live demo. It is
+the strongest check available without a browser: every signature it produces is
+verified by the real server, so what remains untested is only DOM and worker
+plumbing.
+
+It drives `bindSession()` and `refreshIfStale()` — the same functions the worker
+calls — rather than `initDbsc()`, because the worker holds no protocol logic of its
+own; it only decides when to call them. That keeps the probe on the shipped path.
+
+Because the client is a classic script the probe **evaluates** it rather than
+importing it, with `self` shimmed to Node's global — the same shape as the worker's
+`importScripts()`, which is also an evaluation into a scope rather than a module link.
+
+```bash
+sh scripts/run-demos.sh
+NODE_TLS_REJECT_UNAUTHORIZED=0 node scripts/probe-script-client.mjs
+```
+
+`scripts/probe-script-client.py` replays the same wire exchange in Python, which is
+useful when no JS runtime is available. It proves the server side only.
+
 ### What to look at in the browser DevTools network tab
 
 DBSC is driven by the browser, not by the page, so the network tab is the only
-place the protocol is visible. You should see two requests, neither of them
-written by any JavaScript in this demo:
+place the protocol is visible. On Chromium 145+ you should see two requests,
+neither of them written by any JavaScript in this demo:
 
 | Request | When | What to check |
 |---|---|---|
 | `POST /dbsc/regist/<token>` | about a second after the login response, once, automatically | it carries `Sec-Session-Response` (a JWS signed by the new hardware key, whose `jti` is the challenge the server issued) but no challenge cookie; the response sets `__Host-dbsc-session` — the binding |
 | `POST /dbsc/refresh` | on the binding cookie's cadence (`binding-cookie-ttl`, 10 min by default) | the same header, plus `Sec-Session-Id` naming the existing session; a successful refresh pushes the cookie's expiry out |
+
+On Firefox or Safari the same two requests appear, plus the `POST /dbsc/bind` that
+precedes them and the refresh timer's traffic — issued by `index.js` rather than by
+the browser. The `X-Session-Id` header replaces `Sec-Session-Id` on the refresh.
 
 `GET /.well-known/device-bound-sessions` is **not** in the network tab: Chromium
 sends that request itself from its own network stack, and it does not appear there.
@@ -325,14 +405,19 @@ binding rather than a recoverable error. Leave one out and it falls through to t
 application chain, which answers `403` before `DbscFilter` ever runs.
 
 ```java
-// Wrong: only the LAST matcher survives. /dbsc/** falls through to the app
+// Wrong: only the LAST matcher survives. /dbsc/regist/** falls through to the app
 // chain, which answers Spring's 403 before DbscFilter ever runs.
-.securityMatcher(new AntPathRequestMatcher("/dbsc/**"))
+.securityMatcher(new AntPathRequestMatcher("/dbsc/regist/**"))
 .securityMatcher(new AntPathRequestMatcher("/.well-known/device-bound-sessions"))
 
-// Right: one matcher covering both routes.
+// Right: one matcher covering every protocol route.
+//
+// Note /dbsc/bind is deliberately absent. It is an application route, not a
+// protocol one, and DbscFilter terminates every request it serves -- listing it
+// here would stop authentication and CSRF from ever running on it.
 .securityMatcher(new OrRequestMatcher(
-        new AntPathRequestMatcher("/dbsc/**"),
+        new AntPathRequestMatcher("/dbsc/regist/**"),
+        new AntPathRequestMatcher("/dbsc/refresh"),
         new AntPathRequestMatcher("/.well-known/device-bound-sessions")))
 ```
 
