@@ -538,6 +538,7 @@ sequenceDiagram
     B->>S: POST /login (JSESSIONID attached)
     Note over S: authenticate() - DBSC does not authenticate
     S->>S: bind(sessionId, JSESSIONID, userId)<br/>tier none, expires_at = now + dbsc.session-ttl
+    Note over S,D: tier = none from here on.<br/>The session exists but protects nothing.
     S->>D: MERGE dbsc_sessions<br/>(tier none, expires_at)
     S->>D: MERGE dbsc_challenges (the jti)<br/>MERGE dbsc_registration_tokens (the path token)
     S-->>B: header Secure-Session-Registration<br/>(ES256, /dbsc/regist/token, challenge)
@@ -546,10 +547,11 @@ sequenceDiagram
     B->>S: POST /dbsc/regist/token<br/>JWK plus a JWS over the challenge jti
     S->>D: consumeRegistrationToken(token)<br/>consumeChallenge(jti)
     S->>S: verify the JWS, reject a second registration
+    Note over S,D: tier moves none to dbsc HERE,<br/>on the verified signature - not at bind(),<br/>and not when the registration response is sent
     S->>D: MERGE dbsc_device_keys (the public JWK)<br/>UPDATE dbsc_sessions tier = dbsc
     S->>D: MERGE dbsc_credential_tickets (the ticket)
     S-->>B: Set-Cookie auth_cookie=ticket<br/>the first time this cookie exists
-    S-->>B: 200 JSON session_config<br/>session_identifier is your sessionId<br/>tier moves none to dbsc
+    S-->>B: 200 JSON session_config<br/>session_identifier is your sessionId<br/>now serving at tier dbsc
 ```
 
 Three things are additions on top of the spec:
@@ -661,14 +663,15 @@ sequenceDiagram
     A->>S: POST /dbsc/refresh with the stolen ticket
     S->>D: SELECT dbsc_credential_tickets, dbsc_sessions,<br/>dbsc_device_keys
     S->>S: the ticket still resolves (inside the grace)<br/>but the proof cannot be signed
-    S->>D: UPDATE dbsc_challenges consumed = true<br/>UPDATE dbsc_sessions tier = none
     S->>S: demoteOnFailure
+    Note over S,D: tier moves dbsc to none on the FIRST bad<br/>signature - no grace, no retry, no second chance
+    S->>D: UPDATE dbsc_challenges consumed = true<br/>UPDATE dbsc_sessions tier = none
     S-->>A: 403 SIGNATURE_INVALID
     Note over D: dbsc_device_keys is KEPT, so the next<br/>failure is reported as session_stolen
 
     B->>S: its own next refresh
     S-->>B: 403 - the session is now tier none
-    Note over B,S: the legitimate session lost, too.<br/>That is the intended trade: a stolen<br/>credential is a compromised session
+    Note over B,S: the demotion is what denies the real browser:<br/>a stolen credential means a compromised session
 ```
 
 **Demotion is the security mechanism, not an error path.** The session drops to `none`
@@ -692,6 +695,7 @@ sequenceDiagram
 
     B->>S: POST /logout  (your own logout route)
     S->>S: terminate(sessionId)
+    Note over S,D: terminate() does not move the tier. It sets the separate<br/>revoked flag, and the guard reports Reason.REVOKED -<br/>distinct from LAPSED, not a demotion
     S->>D: UPDATE dbsc_sessions SET revoked = true<br/>not DELETE - the row stays as a tombstone
     S-->>B: Set-Cookie deletes the credential cookie<br/>JSON session_config with continue false
     Note over B: forgets the binding on the agent's side
