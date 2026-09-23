@@ -27,7 +27,13 @@ SESSION/TICKET ROTATION needs a fourth instance, only because the rotation grace
     mvn -Pdemo,rotation-e2e -Dmaven.repo.local=.m2repo spring-boot:run
     DBSC_ROTATION_BASE=https://localhost:9445 DBSC_ROTATION_GRACE=5 python3 scripts/e2e.py
 
-scripts/run-demos.sh starts all four for you.
+BINDING LIFETIME needs a fifth, for the same reason: a 1d default cannot be waited
+   out, and the deadline is stamped by the server:
+
+    mvn -Pdemo,ttl-e2e -Dmaven.repo.local=.m2repo spring-boot:run
+    DBSC_TTL_BASE=https://localhost:9446 DBSC_SESSION_TTL=25 python3 scripts/e2e.py
+
+scripts/run-demos.sh starts all five for you.
 """
 import base64, json, os, re, ssl, sys, time
 import http.cookiejar
@@ -61,6 +67,14 @@ DENY_BASE = os.environ.get("DBSC_DENY_BASE") or ""
 # checks are skipped.
 ROTATION_BASE = os.environ.get("DBSC_ROTATION_BASE") or ""
 ROTATION_GRACE_S = float(os.environ.get("DBSC_ROTATION_GRACE") or 0) or None
+
+# A fifth instance, started with -Pdemo,ttl-e2e: the only difference from the main demo
+# is dbsc.session-ttl, shortened so the suite can outwait a binding's deadline. The
+# deadline is stamped by bind(), and bind() reads it from the server's configuration, so
+# only a differently-configured process can be asked the question section Q asks. Absent
+# means those checks are skipped.
+TTL_BASE = os.environ.get("DBSC_TTL_BASE") or ""
+SESSION_TTL_S = float(os.environ.get("DBSC_SESSION_TTL") or 0) or None
 
 # The guarded route both instances agree on. Declared in DemoFormLoginTestConfig's
 # DbscGuardRoutes; keep this in step with src/demo/java/.../DemoFormLoginTestConfig.java.
@@ -342,12 +356,17 @@ def refresh_jws(key, jti):
     return key.jws({"jti": jti}, include_jwk=False)
 
 
-def native_register(opener, reg_path, key, login_headers):
+def native_register(opener, reg_path, key, login_headers, base=None):
     """Runs native registration off the path the login response advertised.
 
     The JTI comes from the login response's registration header, which is the value
     bind() asked the browser to sign; the server looks it back up by the session the
     token names, so no cookie carries it. Pass the headers login() returned.
+
+    ``base`` selects the instance. It has to be threaded through explicitly: the path
+    and the JTI are both instance-specific, so a call aimed at a secondary instance
+    but sent to the main demo answers SESSION_NOT_FOUND -- the token is unknown there,
+    not expired, which is the misleading part.
 
     Returns (jti, status, text).
     """
@@ -355,7 +374,7 @@ def native_register(opener, reg_path, key, login_headers):
     if jti is None:
         return None, None, "no challenge in the login response's registration header"
     status, _, text = request(
-        opener, "POST", reg_path, body=b"", headers={
+        opener, "POST", reg_path, body=b"", base=base, headers={
             "Secure-Session-Response": key.jws({"jti": jti}),
             "Content-Type": "application/json"})
     return jti, status, text
@@ -408,9 +427,16 @@ MAIN_REG_PATH = "/dbsc/regist"
 
 
 
-def tier_of(opener):
-    """The tier /app/whoami reports, or None when it is not JSON."""
-    status, _, text = request(opener, "GET", "/app/whoami")
+def tier_of(opener, base=None):
+    """The tier /app/whoami reports, or None when it is not JSON.
+
+    ``base`` selects the instance, and is not optional in practice for a secondary one:
+    the credential cookie is __Host- scoped, so a request sent to the main demo does not
+    carry the cookie this client holds for another port. The route then answers a refusal
+    rather than a tier, which reads as None -- the same value an expired binding gives,
+    so a missing base here would look like the very bug this suite is looking for.
+    """
+    status, _, text = request(opener, "GET", "/app/whoami", base=base)
     if status != 200:
         return None
     try:
@@ -1154,6 +1180,15 @@ def main():
     else:
         rotation_checks()
 
+    # ------------------------------------ Q. the binding's absolute lifetime
+    print("\n-- Q. a binding's deadline is absolute and enforced --")
+    if not TTL_BASE or not SESSION_TTL_S:
+        skip("a binding dies at dbsc.session-ttl and is not renewed by refreshing",
+             "start a demo with -Pdemo,ttl-e2e and set DBSC_TTL_BASE and "
+             "DBSC_SESSION_TTL")
+    else:
+        ttl_checks()
+
     # ------------------------------------ P. a client that manages its own key
     print("\n-- P. the script-client affordances: /dbsc/bind and X-Session-Id --")
     script_checks()
@@ -1333,6 +1368,170 @@ def rotation_checks():
         replace_cookies={"__Host-auth_cookie": ticket_before})
     check("the header alone names the session, retired ticket and all",
           header_status == 200, f"got {header_status}: {header_text[:160]}")
+
+
+def refresh_once(opener, session_id, key, base):
+    """One full refresh: leg 1 for the challenge, leg 2 for the proof.
+
+    Returns (status, text). The two legs are one operation on the wire, and every
+    caller in this suite needs the same pair, so it is not worth inlining twice.
+    """
+    _, leg1, _ = request(opener, "POST", "/dbsc/refresh", body=b"", base=base,
+                         headers={"Content-Type": "application/json",
+                                  "Sec-Secure-Session-Id": session_id})
+    challenge = refresh_jti(leg1)
+    status, _, text = request(
+        opener, "POST", "/dbsc/refresh", body=b"", base=base, headers={
+            "Content-Type": "application/json",
+            "Sec-Secure-Session-Id": session_id,
+            "Secure-Session-Response": refresh_jws(key, challenge)})
+    return status, text
+
+
+def ttl_checks():
+    """Section Q: a binding's absolute lifetime, end to end.
+
+    DBSC -- the W3C draft and Chromium's implementation of it -- puts no upper bound
+    on how long a session may live. A session is refreshed for as long as its browser
+    can prove possession, and nothing in the protocol says the proving must ever stop.
+
+    That is a real property of the protocol and this library does not contradict it:
+    a refresh *is* the proof, so a device that keeps proving possession is the
+    legitimate holder of the binding, and the user who holds the hardware key is the
+    one asking to extend.
+
+    What is not acceptable is the degenerate case the protocol alone permits -- one
+    session, refreshed forever, that never has to re-bind. The user's own session
+    (JSESSIONID or equivalent) has a lifetime; a binding that outlives it is a binding
+    protecting nothing, and it means a single captured device stays useful indefinitely.
+    So the server stamps an absolute deadline at bind() and refuses a refresh past it.
+
+    What this section pins, and why each part is not obvious from the library's tests:
+
+      1. The deadline is *absolute*, not sliding. This is the whole mechanism, and it
+         is only observable by refreshing repeatedly and watching the deadline not
+         move -- a sliding TTL would pass every single-refresh test.
+      2. A refresh past the deadline is refused, and the refusal is
+         SESSION_NOT_FOUND on a 403. 401 is fatal to Chromium, and a distinct code
+         would make the unauthenticated refresh route answer 'this id once existed'.
+      3. It is refused *before* the challenge is spent, so an expired session does not
+         burn the JTI it arrived with.
+      4. The bound session stops reading as protected, and the guard treats it as
+         absent rather than as merely unproven.
+      5. Re-binding restarts the clock. That is the supported way to keep a binding
+         alive past its deadline, and it is the application's decision, not the
+         browser's.
+
+    Against a live server because none of this is reachable by reading the code: the
+    deadline is stamped from configuration at bind() time and enforced on a second
+    request, so the property under test spans two requests and a real store.
+    """
+    opener, jar = new_client()
+    status, login_h, reg_path, _ = login(opener, jar, base=TTL_BASE)
+    if status != 302:
+        check("the ttl instance accepts the same login", False,
+              f"login returned {status}; is an instance on {TTL_BASE}?")
+        return
+
+    key = Key()
+    _, reg_status, reg_text = native_register(
+        opener, reg_path, key, login_h, base=TTL_BASE)
+    if reg_status != 200:
+        check("registration succeeds on the ttl instance", False,
+              f"got {reg_status}: {reg_text[:200]}")
+        return
+
+    session_id = session_id_of(opener, base=TTL_BASE)
+    check("the ttl instance reports a session id", session_id is not None)
+    if session_id is None:
+        return
+
+    # The instance is configured with a short session-ttl; the suite was told the same
+    # number. This is the assumption every assertion below rests on, so it is checked
+    # first: a mismatch here would make the section pass or fail for the wrong reason.
+    check(f"the configured session-ttl is shorter than the deadline under test "
+          f"({SESSION_TTL_S:g}s)", SESSION_TTL_S < 60, f"DBSC_SESSION_TTL={SESSION_TTL_S}")
+
+    # A refresh well inside the deadline, as the control. Without this the refusals
+    # below would also pass against a server that refused every refresh.
+    status, text = refresh_once(opener, session_id, key, TTL_BASE)
+    check("a refresh inside the deadline -> 200", status == 200,
+          f"got {status}: {text[:200]}")
+
+    # 1. The deadline is absolute. Refreshing repeatedly must NOT push it out; a
+    #    sliding TTL would keep succeeding forever and never reach the refusal below.
+    #    The old session id and credential are both replaced by a re-bind, so this
+    #    loop has to be the one that runs out the clock.
+    half = max(0.0, SESSION_TTL_S * 0.5)
+    time.sleep(half)
+    status, text = refresh_once(opener, session_id, key, TTL_BASE)
+    check(f"a refresh halfway through the deadline still -> 200 ({half:g}s in)",
+          status == 200, f"got {status}: {text[:200]}")
+    check("and the session id has not moved",
+          session_id_of(opener, base=TTL_BASE) == session_id,
+          "a refresh replaced the session id")
+
+    # 2. And now let it pass. The proof is valid and the key is still registered, so
+    #    the *only* reason for the refusal is the deadline -- which is the claim.
+    time.sleep(SESSION_TTL_S - half + 2)
+    _, probe_leg1, _ = request(opener, "POST", "/dbsc/refresh", body=b"", base=TTL_BASE,
+                               headers={"Content-Type": "application/json",
+                                        "Sec-Secure-Session-Id": session_id})
+    probe_challenge = refresh_jti(probe_leg1)
+    status, _, text = request(
+        opener, "POST", "/dbsc/refresh", body=b"", base=TTL_BASE, headers={
+            "Content-Type": "application/json",
+            "Sec-Secure-Session-Id": session_id,
+            "Secure-Session-Response": refresh_jws(key, probe_challenge)})
+    check("a refresh past the deadline is refused after proving possession",
+          status == 403, f"got {status}: {text[:200]}")
+    check("and it is a 403, never the 401 Chromium treats as fatal",
+          status != 401, f"got {status}")
+    check("and the code is SESSION_NOT_FOUND, the same as an id that never existed",
+          "SESSION_NOT_FOUND" in text, text[:200])
+    check("and not KEY_NOT_FOUND, which would confirm the binding once existed",
+          "KEY_NOT_FOUND" not in text, text[:200])
+
+    # 3. The challenge the expired session arrived with must not have been spent. The
+    #    suite cannot re-use a challenge against a *different* session, and it cannot
+    #    observe consumption directly, so the observable form is: the refusal happens
+    #    on the leg-2 attempt and is about the lifetime, not about the JTI. A server
+    #    that consumed first would have answered CHALLENGE_CONSUMED on a repeat.
+    status2, _, text2 = request(
+        opener, "POST", "/dbsc/refresh", body=b"", base=TTL_BASE, headers={
+            "Content-Type": "application/json",
+            "Sec-Secure-Session-Id": session_id,
+            "Secure-Session-Response": refresh_jws(key, probe_challenge)})
+    check("the refusal is about the deadline, not about a spent challenge",
+          "SESSION_NOT_FOUND" in text2 and "CHALLENGE_CONSUMED" not in text2,
+          f"got {status2}: {text2[:200]}")
+
+    # 4. The expired binding is not protected any more, as the application sees it.
+    check("an expired binding no longer reports tier=dbsc",
+          tier_of(opener, base=TTL_BASE) in (None, "none"),
+          f"tier={tier_of(opener, base=TTL_BASE)}")
+
+    # 5. Re-binding restarts the clock. This is the answer for an application whose
+    #    own session outlives dbsc.session-ttl: it renews the binding when the user
+    #    authenticates again, rather than having the browser renew it silently.
+    fresh_opener, fresh_jar = new_client()
+    f_status, f_login_h, f_reg_path, _ = login(fresh_opener, fresh_jar, base=TTL_BASE)
+    f_key = Key()
+    _, f_reg_status, f_reg_text = native_register(
+        fresh_opener, f_reg_path, f_key, f_login_h, base=TTL_BASE)
+    check("a fresh login on the same instance binds and registers",
+          f_status == 302 and f_reg_status == 200,
+          f"login {f_status}, register {f_reg_status}: {f_reg_text[:160]}")
+    f_session = session_id_of(fresh_opener, base=TTL_BASE)
+    check("and the new binding is a different session from the expired one",
+          f_session is not None and f_session != session_id,
+          f"{session_id} -> {f_session}")
+    f_refresh, f_text = refresh_once(fresh_opener, f_session, f_key, TTL_BASE)
+    check("and it refreshes immediately, so bind() stamped a fresh deadline",
+          f_refresh == 200, f"got {f_refresh}: {f_text[:200]}")
+    check("and the renewed binding reports tier=dbsc",
+          tier_of(fresh_opener, base=TTL_BASE) == "dbsc",
+          f"tier={tier_of(fresh_opener, base=TTL_BASE)}")
 
 
 def script_checks():

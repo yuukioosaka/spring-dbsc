@@ -49,6 +49,14 @@ class GuardDecisionTest {
     /** The credential value a browser would hold: a ticket, never the session id. */
     private static final String TICKET = "Aq3hZ9ticket0000000000000000000000000000";
 
+    /**
+     * The deadline every seeded session gets, comfortably after the fixed clock. The
+     * lifetime check is a security control, so it is pinned in
+     * {@code RefreshExpiryTest} rather than here; these tests are about the decision
+     * the guard makes about a session that is well inside its life.
+     */
+    private static final long SESSION_TTL_MS = 24 * 60 * 60 * 1000L;
+
     private DbscProperties properties;
     private StorageAdapter storage;
     private CookieScope cookieScope;
@@ -58,9 +66,11 @@ class GuardDecisionTest {
     void setUp() {
         properties = new DbscProperties();
 
-        // Long enough that nothing in here expires: these tests are about the
-        // decision, not about the clock.
-        properties.setSessionTtl(Duration.ofHours(1));
+        // Matches SESSION_TTL_MS below, which is what the hand-built records carry. The
+        // deadline has to be ahead of NOW_MS rather than merely long in the abstract,
+        // because the fixed clock never advances, so a record built from this value
+        // would already be expired at NOW_MS.
+        properties.setSessionTtl(Duration.ofMillis(SESSION_TTL_MS));
 
         storage = new InMemoryStorageAdapter();
         Clock clock = Clock.fixed(Instant.ofEpochMilli(NOW_MS), ZoneOffset.UTC);
@@ -314,7 +324,7 @@ class GuardDecisionTest {
     /** A record in the pre-registration state: tier none, never refreshed. */
     private static Session session() {
         return new Session(SESSION_ID, APP_SESSION_ID, USER_ID, ProtectionTier.NONE,
-                false, NOW_MS, NOW_MS + 3_600_000L, 0L);
+                false, NOW_MS, NOW_MS + SESSION_TTL_MS, 0L);
     }
 
     private GuardDecision decide(jakarta.servlet.http.Cookie credentialCookie) {

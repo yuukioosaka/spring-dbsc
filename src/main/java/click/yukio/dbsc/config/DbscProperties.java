@@ -201,8 +201,28 @@ public class DbscProperties {
      */
     private Duration refreshGrace = Duration.ofSeconds(30);
 
-    /** Default lifetime assigned by {@code bind()} when the caller does not set one. */
-    private Duration sessionTtl = Duration.ofDays(7);
+    /**
+     * The absolute lifetime of a binding, from {@code bind()} to its deadline.
+     *
+     * <p>This is the one place a binding's lifetime is decided, and it is a deployment
+     * setting rather than an argument to {@code bind()}, because a deployment has one
+     * answer to the question and the callers that would pass a different value are the
+     * ones most likely to get it wrong.
+     *
+     * <p>It is an <strong>absolute</strong> deadline, not an idle timeout: a refresh
+     * does not move it, so a device that keeps proving possession still has to re-bind
+     * once it passes. The browser keeps working across that boundary only if the
+     * application renews its own session and calls {@code bind()} again — which is the
+     * same moment the user authenticates again, and the honest place for the lifetime
+     * to restart.
+     *
+     * <p>Note what this does <strong>not</strong> govern: the application's own session
+     * (JSESSIONID or equivalent). DBSC bounds its own binding and nothing else; how long
+     * the user stays logged in remains the application's policy, and DBSC is
+     * deliberately the shorter of the two so that a binding never outlives the login it
+     * was created for.
+     */
+    private Duration sessionTtl = Duration.ofDays(1);
 
     /** How the guard treats a request from a client with no DBSC binding at all. */
     private Unregistered unregistered = Unregistered.ALLOW;

@@ -6,6 +6,12 @@
 dbsc:
   secure: false
   storage: jdbc
+  # The web tests run on the real clock and a frozen-clock test cannot cover the
+  # boundary for them, so the deadline is pushed well out of the way. Anything
+  # shorter would make every session these tests create already expired, and the
+  # refresh route would refuse it before the protocol was reached. The boundary
+  # itself is pinned in RefreshExpiryTest, which freezes the clock.
+  session-ttl: 3650d
   # Deliberately different from the session cookie name, so the tests prove the
   # two names in the JSON config are independent.
   credential-cookie-name: __Host-auth_cookie

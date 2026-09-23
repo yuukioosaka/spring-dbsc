@@ -47,9 +47,6 @@ import java.util.UUID;
 @EnableWebSecurity
 public class DemoFormLoginTestConfig {
 
-    /** Stands in for the application's own session/TTL policy. */
-    private static final long SESSION_TTL_MS = 7L * 24 * 60 * 60 * 1000;
-
     /**
      * The DBSC protocol routes, unauthenticated by construction.
      *
@@ -158,9 +155,11 @@ public class DemoFormLoginTestConfig {
                                 // even if nothing touched it earlier.
                                 String appSessionId = request.getSession().getId();
 
-                                // The TTL is the application's policy, not DBSC's.
+                                // The lifetime is dbsc.session-ttl: a binding's deadline
+                                // is deployment configuration, not something a login
+                                // route decides per call.
                                 dbsc.bind(dbscSessionId, appSessionId, authentication.getName(),
-                                        SESSION_TTL_MS, request, response);
+                                        request, response);
 
                                 response.sendRedirect("/app");
                             })

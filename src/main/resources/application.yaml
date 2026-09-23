@@ -57,7 +57,11 @@ dbsc:
   # it. The window is itself exposure, so set it to the longest gap between
   # refreshes that must survive, not to a round number.
   rotation-grace: 60s
-  session-ttl: 7d
+  # The absolute lifetime of a binding. A refresh never moves it, so a device that
+  # keeps proving possession still has to re-bind once a day. Set this to your own
+  # session lifetime or shorter, never longer: a binding that outlives the login it
+  # was created for is a binding with nothing left to protect.
+  session-ttl: 1d
   # What the route guard does with a client that has no DBSC binding at all.
   # "allow" keeps DBSC an additional layer: a browser without support for the
   # protocol, and a client that has logged in but not yet registered, both reach

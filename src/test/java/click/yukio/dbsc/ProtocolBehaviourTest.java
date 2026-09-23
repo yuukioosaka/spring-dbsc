@@ -64,6 +64,14 @@ class ProtocolBehaviourTest {
     private static final String SESSION_ID = "sess_3f9a1c7e8b2d4f60a1b2c3d4e5f60718";
     private static final String CHALLENGE = "KN3qw_pQxR8tY5uI8oP1aS2dF3gH4jK5lM6nO7pQ8rS";
 
+    /**
+     * The deadline every seeded session gets. A day is inside the seven-day default,
+     * so the lifetime check in {@code handleRefresh} is satisfied and these tests stay
+     * about the protocol rather than about the clock; the boundary itself is pinned in
+     * {@code RefreshExpiryTest}.
+     */
+    private static final long SESSION_TTL_MS = 24 * 60 * 60 * 1000L;
+
     private DbscProperties properties;
     private StorageAdapter storage;
     private ChallengeService challenges;
@@ -397,7 +405,7 @@ class ProtocolBehaviourTest {
 
     private void seedSession(String sessionId) {
         storage.setSession(new Session(sessionId, "app_" + sessionId, "user_1", ProtectionTier.NONE,
-                false, VECTOR_NOW_MS, VECTOR_NOW_MS + 3_600_000, 0));
+                false, VECTOR_NOW_MS, VECTOR_NOW_MS + SESSION_TTL_MS, 0));
     }
 
     private void seedChallenge(String jti) {

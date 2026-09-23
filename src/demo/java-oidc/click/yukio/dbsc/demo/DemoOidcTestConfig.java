@@ -143,7 +143,7 @@ public class DemoOidcTestConfig {
                             // needs to retain it: logout reads it back from the
                             // binding cookie.
                             dbsc.bind(UUID.randomUUID().toString(), appSessionId,
-                                    authentication.getName(), 86_400_000L, request, response);
+                                    authentication.getName(), request, response);
                             response.sendRedirect("/app");
                         }))
                 // The bind route is on this chain, so it needs ordinary CSRF, not a

@@ -56,14 +56,6 @@ import java.util.UUID;
 @Import(DbscAutoConfiguration.class)
 public class DbscTestHostApplication {
 
-    /** Stands in for an application's own session/TTL policy. */
-    private static final long HOST_SESSION_TTL_MS = 7L * 24 * 60 * 60 * 1000;
-
-    /** The host's session lifetime, exposed so tests can assert against it. */
-    public static long hostSessionTtlMs() {
-        return HOST_SESSION_TTL_MS;
-    }
-
     /**
      * The host's own rules: permit everything, so the fixture exercises the DBSC
      * filters and nothing else.
@@ -189,9 +181,9 @@ public class DbscTestHostApplication {
 
             // The one DBSC call a login route needs to make. The second argument
             // is the application's own session id, which the guard uses to spot a
-            // request that presents no DBSC cookie while a binding exists.
-            dbsc.bind(sessionId, request.getSession().getId(), userId,
-                    HOST_SESSION_TTL_MS, request, response);
+            // request that presents no DBSC cookie while a binding exists. The
+            // binding's own lifetime is dbsc.session-ttl, so nothing is passed here.
+            dbsc.bind(sessionId, request.getSession().getId(), userId, request, response);
 
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("userId", userId);

@@ -24,9 +24,6 @@ import java.util.Optional;
 @RequestMapping("/app")
 class DemoController {
 
-    /** Stands in for the application's own session/TTL policy. */
-    private static final long SESSION_TTL_MS = 7L * 24 * 60 * 60 * 1000;
-
     private final DbscService dbsc;
 
     DemoController(DbscService dbsc) {
@@ -91,7 +88,7 @@ class DemoController {
         // authenticated browser — but the caller here only needs to hold the DBSC
         // cookies, so nothing may be assumed about the HttpSession.
         String appSessionId = request.getSession().getId();
-        dbsc.bind(session.id(), appSessionId, session.userId(), SESSION_TTL_MS, request, response);
+        dbsc.bind(session.id(), appSessionId, session.userId(), request, response);
 
         // The token bind() just minted is not returned by value, and calling
         // issueRegistrationToken() here would mint a second one that the response

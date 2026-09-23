@@ -146,7 +146,7 @@ class AutoConfigurationIntegrationTest {
         @PostMapping(path = "/login", produces = MediaType.APPLICATION_JSON_VALUE)
         String login(HttpServletRequest request, HttpServletResponse response) {
             String sessionId = "sess_" + UUID.randomUUID().toString().replace("-", "");
-            dbsc.bind(sessionId, request.getSession().getId(), "user_1", 86_400_000L, request, response);
+            dbsc.bind(sessionId, request.getSession().getId(), "user_1", request, response);
             return "{\"sessionId\":\"" + sessionId + "\"}";
         }
     }

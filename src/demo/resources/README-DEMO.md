@@ -319,8 +319,16 @@ The one-command form, which starts the instances the suite needs and then runs i
 
 ```sh
 sh scripts/run-demos.sh                # in another shell
-DBSC_CHALLENGE_TTL=2 DBSC_DENY_BASE=https://localhost:9444 python3 scripts/e2e.py
+DBSC_CHALLENGE_TTL=2 DBSC_DENY_BASE=https://localhost:9444 \
+    DBSC_ROTATION_BASE=https://localhost:9445 DBSC_ROTATION_GRACE=5 \
+    DBSC_TTL_BASE=https://localhost:9446 DBSC_SESSION_TTL=25 \
+    python3 scripts/e2e.py
 ```
+
+`scripts/run-demos.sh` starts four instances, one per server-side property the suite
+has to observe from the outside (the `unregistered` policy, the rotation grace, and
+`session-ttl`). Any variable you leave unset turns its section into **skips** rather
+than failures, so the suite is usable against the main demo alone.
 
 It needs the `cryptography` package (for ES256 signing) and prints a per-check
 PASS/FAIL list plus a final tally. It does not test this file's manual steps; it
@@ -365,6 +373,34 @@ default one answers 200. The allow check is the control — without it, a guard 
 refused *everything* would pass the deny check. It listens on 9444 with its own
 database file, and needs no JVM property: the policy comes from
 `application-deny-e2e.yaml`, which is where an adopter would set it too.
+
+### Testing the binding's lifetime
+
+`dbsc.session-ttl` is a property of the **server** too, and its default is a day, which
+is far too long to wait out. A **third** instance runs it short:
+
+```sh
+mvn -Pdemo,ttl-e2e -Dmaven.repo.local=.m2repo \
+    -Dspring-boot.run.jvmArguments="-Ddbsc.challenge-ttl=2s" spring-boot:run
+DBSC_TTL_BASE=https://localhost:9446 DBSC_SESSION_TTL=25 python3 scripts/e2e.py
+```
+
+Section Q is the reason this instance exists. DBSC itself puts no bound on how long a
+session may live — a session is refreshed for as long as its browser can prove
+possession, and a device that keeps proving possession *is* the legitimate holder. What
+is not acceptable is the degenerate case that permits: one session, refreshed forever,
+never re-bound, outliving the login it was created for.
+
+So the deadline is **absolute** — stamped by `bind()`, never moved by a refresh — and
+the section pins exactly that, because "does not move" is invisible to any test that
+refreshes once. It refreshes inside the deadline, waits for it to pass, and asserts the
+next refresh is refused with `SESSION_NOT_FOUND` on a 403 even though the signature is
+valid and the key is still registered; that the code is not `KEY_NOT_FOUND`, which would
+confirm the binding once existed; and that a fresh `bind()` restarts the clock. It
+listens on 9446 with its own database file.
+
+`DBSC_SESSION_TTL` must match that instance's `session-ttl`; it is not inferred, because
+the suite talks to a running server and cannot read its properties.
 
 ## Notes on the wiring
 

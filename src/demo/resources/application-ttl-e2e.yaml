@@ -1,0 +1,37 @@
+# A fifth demo instance with a short dbsc.session-ttl, for the binding-lifetime
+# checks in scripts/e2e.py.
+#
+# session-ttl is a property of the *server*, not of the client, so it cannot be
+# observed against an instance that runs the default: the deadline is stamped by
+# bind(), and only a different process stamps a different one. The main demo keeps
+# the 1d default; this one is shortened so the checks can outwait it.
+#
+# The value is the whole point of the section. A binding's deadline is *absolute* --
+# a refresh does not move it, so a device that keeps proving possession still loses
+# the binding when it passes -- and "does not move" is only observable by refreshing
+# repeatedly across a deadline the suite can actually reach.
+#
+# Run alongside the main demo:
+#
+#   mvn -Pdemo,ttl-e2e -Dmaven.repo.local=.m2repo spring-boot:run
+#   DBSC_TTL_BASE=https://localhost:9446 DBSC_SESSION_TTL=25 python3 scripts/e2e.py
+#
+# scripts/run-demos.sh starts it for you.
+
+server:
+  port: 9446
+
+spring:
+  datasource:
+    # Its own file, like the other secondary instances: H2 takes an exclusive lock.
+    url: jdbc:h2:file:./data/e2e-ttl;DB_CLOSE_DELAY=-1
+
+dbsc:
+  # Seconds, not the 1d default: the suite waits this out to prove a binding dies at
+  # its deadline and does not have its life extended by refreshing. The value is also
+  # read through DBSC_SESSION_TTL by the suite.
+  session-ttl: 25s
+
+logging:
+  level:
+    click.yukio.dbsc: DEBUG

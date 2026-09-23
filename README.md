@@ -303,7 +303,7 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
                         // by value; otherwise read it back with sessionFor(request).
                         dbsc.bind(UUID.randomUUID().toString(),
                                   request.getSession().getId(), auth.getName(),
-                                  86_400_000L, request, response);
+                                  request, response);
                         response.sendRedirect("/");
                     }))
             .logout(logout -> logout.logoutSuccessHandler((request, response, auth) ->
@@ -352,7 +352,7 @@ public class OidcSecurityConfig {
                     // registered apart from one that dropped its DBSC cookies.
                     String appSessionId = request.getSession().getId();
                     dbsc.bind(UUID.randomUUID().toString(), appSessionId,
-                              auth.getName(), 86_400_000L, request, response);
+                              auth.getName(), request, response);
                     response.sendRedirect("/");
                 }))
                 .csrf(csrf -> csrf
@@ -447,7 +447,7 @@ own session id goes alongside it so the guard can find the binding later:
 public Session login(HttpServletRequest request, HttpServletResponse response) {
     Session session = authenticate(request);       // your own auth
     dbsc.bind(UUID.randomUUID().toString(), request.getSession().getId(),
-              session.userId(), 86_400_000L, request, response);
+              session.userId(), request, response);
     return session;
 }
 ```
@@ -569,7 +569,7 @@ this is what they do.
 
 | Call | When |
 |---|---|
-| `dbsc.bind(sessionId, appSessionId, userId, ttlMillis, request, response)` | From an authenticated request, usually at the end of your login flow. `sessionId` is the **DBSC** session id, which you mint; `appSessionId` is your application's own session id |
+| `dbsc.bind(sessionId, appSessionId, userId, request, response)` | From an authenticated request, usually at the end of your login flow. `sessionId` is the **DBSC** session id, which you mint; `appSessionId` is your application's own session id |
 | `dbsc.terminate(sessionId, request, response)` | On logout, so the browser forgets the binding instead of retrying against a dead session |
 | `dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)` | Whenever your own code wants to know whether this browser is bound |
 | `dbsc.guardDecision(request, appSessionId)` | When you want the guard's decision without the filter, e.g. to branch on *why* a request was refused |
@@ -603,10 +603,29 @@ route on its own within about a second, with no client code to write. `DbscFilte
 adds that header to your application's own responses, so a login flow that never calls
 `bind()` produces no binding at all.
 
+**The lifetime is configuration, not an argument.** `bind()` stamps
+`expiresAt = now + dbsc.session-ttl`, and that deadline is **absolute**: a successful
+refresh does not move it, so a device that keeps proving possession still loses the
+binding once it passes. There is no `ttlMillis` parameter, because a deployment has one
+answer to "how long may a binding live" and a caller that could pass a different value is
+the one most likely to get it wrong.
+
+Past the deadline the binding is treated as **absent**, not as unproven: a refresh is
+refused with the same `SESSION_NOT_FOUND` an unknown session id gets — same code, same
+message — the guard refuses the session, and `tierFor` reads `none`. Reusing one code for
+both keeps the unauthenticated refresh route from answering "this id once existed".
+
+**What the deadline does not govern.** It bounds the binding, not your session: a browser
+holding a valid `JSESSIONID` keeps sending it, and this library does not invalidate it.
+Expiring the binding therefore removes the *proof*, not the login — if a binding that
+outlives its deadline should also end the session, that is your logout to call, from
+`sessionFor(request)` in a routine the application already has.
+
 The call is cheap but not free — one challenge and one cookie write — so a route that
 binds on every request is fine, and keeping it off hot paths is better. It is **not**
 idempotent: each call writes a record, and a second call under the same `sessionId`
-replaces the first. That is deliberate, so a re-login can re-key an existing session.
+replaces the first. That is deliberate, so a re-login can re-key an existing session — and
+it also restarts the clock, since the new record carries a new deadline.
 
 ### Act on the tier
 
@@ -653,6 +672,7 @@ situations that must be answered differently:
 | Registered, currently proving possession | allow |
 | Registered once, then demoted (or revoked) | **refuse** |
 | Bound, but the record is gone | **refuse** — it was bound and is not any more |
+| Bound, but the deadline has passed | **refuse** — the binding is read as absent, so this is the row above |
 | `bind()` ran, registration has not completed yet | allow (or refuse under `dbsc.unregistered: deny`) |
 | No DBSC cookie, and no binding for this application session | allow (or refuse under `dbsc.unregistered: deny`) |
 | No DBSC cookie, but a binding exists for this application session | **refuse** |
@@ -690,10 +710,10 @@ Both forms make the same decision, so these hold for either:
   `401` — a `401` reads as signed out, and Chromium treats one on the refresh route
   as fatal.
 - **The tier is the live answer, not the value on the record.** It accounts for the
-  refresh cadence and the grace window, so a session whose browser has stopped
-  refreshing reads `none` — which is the demotion you are actually trying to surface.
-  A session with a perfectly good registered key reads `none` too, once it has
-  lapsed.
+  refresh cadence, the grace window and the binding's absolute lifetime, so a session
+  whose browser has stopped refreshing reads `none` — which is the demotion you are
+  actually trying to surface. A session with a perfectly good registered key reads `none`
+  too, once it has lapsed or once `dbsc.session-ttl` has passed.
 - **An unregistered client is allowed through, by design.** A browser without DBSC
   support (or a user who has just logged in, before registration completes) is
   legitimately unbound. This is what lets one application serve both populations:
@@ -761,7 +781,7 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `challenge-ttl` | `5m` | lifetime of a challenge JTI |
 | `refresh-grace` | `30s` | softens the freshness poll across a refresh |
 | `rotation-grace` | `60s` | how long a retired credential cookie value keeps resolving. Rotation itself is not optional — see [Credential rotation](#credential-rotation) |
-| `session-ttl` | `7d` | default lifetime applied by `bind()` when the caller does not set one |
+| `session-ttl` | `1d` | the binding's **absolute** lifetime. `bind()` stamps the deadline as now + this value and a refresh never moves it, so a device that keeps proving possession still loses the binding when the deadline passes. Configured here rather than passed to `bind()` because a deployment has one answer to "how long may a binding live". It bounds the DBSC binding only — it does not govern your `JSESSIONID`, which the browser re-sends as long as it lives. Set it to your own session lifetime or shorter, never longer |
 | `scope-origin` | *derived from the request* | pins `scope.origin`. Set only when the derived value is wrong — a proxy rewriting the host to an internal name. Validated at startup; a wrong value makes Chromium discard the session while the server still answers 200 |
 | `scope-specifications` | `[]` | rules written into `scope.scope_specification`. See [Session scope](#session-scope) |
 | `allowed-refresh-initiators` | `[]` | hosts outside the scope that may still trigger a refresh. Empty means none — see [Session scope](#session-scope) |
@@ -974,12 +994,17 @@ its own server or its own database index. The key layout is:
 
 | Key | Type | TTL |
 |---|---|---|
-| `dbsc:session:<id>` | hash | the session's own retention deadline |
+| `dbsc:session:<id>` | hash | the session's own retention deadline, never past `dbsc.session-ttl` |
 | `dbsc:app-session:<appSessionId>` | string | the session's own retention deadline |
 | `dbsc:device-key:<sessionId>` | hash | the session's deadline, or 24h when orphaned |
 | `dbsc:challenge:<jti>` | hash | the challenge's expiry **+ 1h** |
 | `dbsc:registration-token:<token>` | hash | the token's expiry **+ 1h** |
 | `dbsc:credential-ticket:<ticket>` | string | the rotation grace, no longer |
+
+A refresh never extends a session key, so the Redis TTL and the binding's absolute
+deadline always agree: past `dbsc.session-ttl` the key is gone and the refresh is refused
+by the engine, whichever happens first. The `last_refresh_at` on the hash does not push
+the deadline forward.
 
 The `+ 1h` on challenges and registration tokens is deliberate: the record has to outlive
 its stated expiry, or a client presenting a JTI that lapsed a moment ago would get

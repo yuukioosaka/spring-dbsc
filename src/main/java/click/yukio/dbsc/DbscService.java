@@ -109,15 +109,23 @@ public class DbscService {
      *                     registered apart from one that registered and then
      *                     dropped its DBSC cookies
      * @param userId       the authenticated user
-     * @param ttlMs        lifetime of the session record in ms; a non-positive value
-     *                     falls back to the configured default
+     *
+     * <p>The session's lifetime comes from {@code dbsc.session-ttl} rather than from
+     * the caller. It is an absolute deadline and not a sliding one: a refresh is
+     * refused once it passes, so a binding cannot be renewed indefinitely. The
+     * application's own session (the one {@code appSessionId} names) is still the
+     * outer bound in practice — when it ends, logout should call
+     * {@link #terminate} — but DBSC no longer outlives it by construction.
      */
-    public void bind(String sessionId, String appSessionId, String userId, long ttlMs,
+    public void bind(String sessionId, String appSessionId, String userId,
                      HttpServletRequest request, HttpServletResponse response) {
         long now = clock.millis();
-        long effectiveTtlMs = ttlMs > 0 ? ttlMs : properties.sessionTtlMs();
+        // The lifetime is configuration, not a per-call argument: a deployment has one
+        // answer to "how long may a binding live", and the callers that would pass
+        // different values are the ones most likely to get it wrong.
         Session session = new Session(
-                sessionId, appSessionId, userId, ProtectionTier.NONE, false, now, now + effectiveTtlMs, 0);
+                sessionId, appSessionId, userId, ProtectionTier.NONE, false,
+                now, now + properties.sessionTtlMs(), 0);
         storage.setSession(session);
 
         Challenge challenge = challenges.issue(session.id());
@@ -600,6 +608,13 @@ public class DbscService {
             throw new DbscException(DbscErrorCode.KEY_NOT_FOUND,
                     "no device key for session");
         }
+        // A session past its deadline is refused like one that was never bound, and no
+        // challenge is issued for it: issuing one would invite a proof the refresh
+        // route is going to reject anyway, and would keep a dead record alive.
+        if (storage.getSession(sessionId).orElseThrow().isExpired(clock.millis())) {
+            throw new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
+                    "the binding's lifetime has passed");
+        }
     }
 
     /**
@@ -714,6 +729,14 @@ public class DbscService {
             Session found = session.get();
             if (found.isRevoked()) {
                 return GuardDecision.deny(GuardDecision.Reason.REVOKED);
+            }
+            // A binding past its lifetime is a lapse, not a fresh client: the refresh
+            // route refuses it, so the guard must not keep admitting a session DBSC no
+            // longer protects. effectiveTier already reads expired as none; this is
+            // the same answer made explicit, and it keeps a session that never
+            // registered (lastRefreshAt 0) out of the LAPSED branch.
+            if (found.isExpired(clock.millis())) {
+                return GuardDecision.deny(GuardDecision.Reason.LAPSED);
             }
             if (engine.effectiveTier(found) == ProtectionTier.DBSC) {
                 return GuardDecision.allow(GuardDecision.Reason.PROTECTED);

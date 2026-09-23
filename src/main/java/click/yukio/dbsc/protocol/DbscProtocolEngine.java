@@ -117,6 +117,19 @@ public class DbscProtocolEngine {
                     "Secure-Session-Response header is required for refresh");
         }
 
+        // The absolute lifetime is checked before anything else is looked up. A session
+        // is created with a deadline and a refresh does not move it, so a device that
+        // keeps proving possession would otherwise renew its binding forever -- the
+        // deadline would be decoration. Refusing here rather than after verification
+        // also means an expired session does not consume the challenge it arrived with.
+        //
+        // The order is deliberate: this runs before the device key lookup so that an
+        // expired session and one that never existed are refused with the same
+        // SESSION_NOT_FOUND, not one of them with KEY_NOT_FOUND. On an unauthenticated
+        // route that difference is an existence oracle, and the whole point of the
+        // lifetime rule is that past the deadline the binding is as good as absent.
+        requireUnexpired(sessionId);
+
         DeviceKey key = storage.getDeviceKey(sessionId)
                 .orElseThrow(() -> new DbscException(DbscErrorCode.KEY_NOT_FOUND,
                         "no device key for session"));
@@ -199,6 +212,43 @@ public class DbscProtocolEngine {
     }
 
     /**
+     * Refuses a refresh when the session's absolute deadline has passed.
+     *
+     * <p>Reported as {@link DbscErrorCode#SESSION_NOT_FOUND}, the same code <em>and the
+     * same message</em> an unknown session gets, so a caller cannot use the response to
+     * tell "this binding was once real" from "this binding never existed" — on an
+     * unauthenticated route reachable without a cookie, that difference is worth
+     * enumerating for. The shared wording is the reason the two branches below are not
+     * written as one: only an expired session emits telemetry, and only it needs to say
+     * why in the server's own logs rather than in the caller's response. For the same
+     * reason the caller must run this before the device key lookup; otherwise a session
+     * past its deadline is refused with a different code from one that is simply absent.
+     *
+     * <p>The record is deliberately <strong>not</strong> rewritten. Changing it would
+     * extend a Redis key past the deadline the storage adapter derived from
+     * {@code expiresAt}, and the deadline itself is what the check reads, so the row
+     * can be left to expire on its own schedule.
+     *
+     * @throws DbscException {@code SESSION_NOT_FOUND} when the session is missing or
+     *         past {@code expiresAt}
+     */
+    private void requireUnexpired(String sessionId) {
+        Session session = storage.getSession(sessionId).orElse(null);
+        boolean expired = session != null && session.isExpired(clock.millis());
+        if (expired) {
+            telemetry.publish(new DbscTelemetryEvent.VerificationFailure(
+                    sessionId, ProtectionTier.NONE, clock.millis(),
+                    "SESSION_EXPIRED", null));
+        }
+        if (session == null || expired) {
+            // The same sentence for both, because the difference is exactly what an
+            // enumeration would want to know.
+            throw new DbscException(DbscErrorCode.SESSION_NOT_FOUND,
+                    "no session record for this id");
+        }
+    }
+
+    /**
      * The shared failure path for a refresh whose signature did not verify: burn the
      * challenge so a captured response cannot be retried, demote the session, and
      * emit the security signal when the key was still present.
@@ -238,6 +288,12 @@ public class DbscProtocolEngine {
      */
     public ProtectionTier effectiveTier(Session session) {
         if (session == null) {
+            return ProtectionTier.NONE;
+        }
+        // An expired binding reports none even though its key is still stored: the
+        // refresh route refuses it, so reporting dbsc here would have the guard admit
+        // requests that DBSC itself no longer honours.
+        if (session.isExpired(clock.millis())) {
             return ProtectionTier.NONE;
         }
         if (session.tier() == ProtectionTier.NONE) {
