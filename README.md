@@ -482,7 +482,7 @@ reachable:
 flowchart TD
     A[Request] --> B{DBSC protocol path?}
     B -- yes --> C[DbscFilter<br/>before CsrfFilter]
-    C --> C2[terminates:<br/>writes status + headers + body]
+    C --> C2[terminates -<br/>writes status + headers + body]
     B -- no --> E{auth + CSRF}
     E -- refused --> X[Security's refusal]
     E -- passed --> G{/dbsc/bind or a guarded route?}
@@ -1106,8 +1106,160 @@ are independent scopes — the page's copy has a `document`, the worker's does n
 each gets its own `DbscSoft` and neither interferes with the other.
 
 That is the whole integration: skip on native browsers, register the worker, wait for it
-to be controlling the page, hand it the CSRF token, and ask it to bind. From then on the
+controlling the page, hand it the CSRF token, and ask it to bind. From then on the
 worker looks after the session on its own.
+
+#### The Soft DBSC workflow
+
+This is the part that has no native equivalent. A native browser runs the protocol
+itself — the server hands it an offer and it registers, and it refreshes on its own
+cadence — so the application never sees any of it. A script client has to be told, and
+the exchange is split across two contexts that cannot talk to each other directly: the
+**page** (which has a `document`, a CSRF token, and a user who just logged in) and the
+**Service Worker** (which sees every request but has no document and no cookie access).
+
+The four diagrams below are the whole of it: the one-time bind, then the two things
+the worker does unattended — refresh ahead of the credential cookie expiring, and
+refresh on the request that arrives with an already-expired one.
+
+##### 1. Bind: the one exchange the page drives
+
+The page does this **once**, right after login. Everything after this diagram is the
+worker's, not the page's.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Page
+    participant W as Service Worker
+    participant S as Server
+
+    Note over P: logged in, session bound via bind()
+    P->>P: expectsNativeDbsc()?
+    Note over P: true -> stop here (Chromium on<br/>Windows/Android binds natively)
+    P->>W: register('/dbsc-soft-sw.js') + ready
+    P->>W: postMessage {type:'bind', csrfToken, csrfHeader}
+    W->>W: setCsrfToken(token, header)
+    W->>S: POST /dbsc/bind  (session from login cookie)
+    S-->>W: 200 + Secure-Session-Registration,
+    S-->>W: Secure-Session-Challenge
+    Note over W: parse path + jti from the headers
+    W->>W: generateKey(ECDSA P-256, extractable=false)
+    W->>S: POST to the registration path
+    W->>S: Secure-Session-Response: JWS over jti
+    S->>S: spend token, verify proof, store public JWK
+    S-->>W: 200 session_config + Set-Cookie auth_cookie
+    W->>W: IndexedDB putRecord {sessionId, privateKey, refreshedAt}
+    W-->>P: {phase: 'registered'}
+```
+
+Three things about that exchange are worth naming, because each is a place a
+hand-written client usually goes wrong:
+
+- **The route is not the native one.** The offer comes from `POST /dbsc/bind`, not from
+the login response. `bind()` writes its offer onto whichever response called it, and a
+script can only act once its own code is running — which is arbitrarily later than the
+navigation that carried the offer. The re-offer route is the way back to it.
+- **The key is generated here and never leaves.** `extractable=false` means the private
+key stays a `CryptoKey` handle: this script can sign with it and cannot export it. Only
+the public half goes to the server.
+- **The response is the server's, not the client's.** `session_identifier` is read out of
+`session_config`; the client does not assume the id it will use next.
+
+##### 2. Steady state: the worker refreshes ahead of expiry
+
+This is the specification's *proactive* trigger (§6: "if a session credential will
+expire soon, and an in-scope document is active, the user agent can refresh
+proactively"). The worker cannot see the credential cookie — it is `HttpOnly`, and a
+worker has no cookie jar — so it keeps its own clock from `refreshedAt`, stamped by the
+last exchange the server answered.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant W as Service Worker
+    participant S as Server
+
+    B->>W: fetch (any same-origin GET/POST)
+    Note over W: isSessionRequest()?<br/>skip /dbsc/, /.well-known/, /login
+    W->>W: refreshIfStale(intervalMs, marginMs)
+    Note over W: now - refreshedAt < interval - margin?<br/>yes -> just fetch(request), no network
+    W->>S: POST /dbsc/refresh  (X-Session-Id, no proof)
+    S-->>W: 403 + Secure-Session-Challenge
+    W->>W: sign jti with the stored private key
+    W->>S: POST /dbsc/refresh + Secure-Session-Response
+    S->>S: verify proof, rotate the credential ticket
+    S-->>W: 200 session_config + Set-Cookie (new ticket)
+    W->>W: putRecord {refreshedAt: now}
+    W->>S: fetch(request)  (original, now with fresh cookie)
+```
+
+The first leg being a **403** is not a failure — it is how a challenge is issued, and
+it is the same shape the native flow uses. A `401` is fatal for a native browser and
+this client treats it the same way.
+
+##### 3. The trigger that only a worker can serve
+
+This is the specification's *primary* trigger (§5: "the refresh endpoint is contacted
+every time a request is made with an expired bound cookie, and its response blocks the
+original request" — emphasis on *blocks*). Nothing but a `fetch` hook can do it, because
+nothing else sees a request before it goes to the network.
+
+The difference from diagram 2 is only *why* the refresh fires: there, the client's own
+clock said it was time; here, a request is already on its way and the session must be
+usable before it lands.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant W as Service Worker
+    participant S as Server
+
+    B->>W: fetch /app  (credential cookie already expired)
+    Note over W: respondWith() -> the request is held
+    W->>S: POST /dbsc/refresh  (X-Session-Id, no proof)
+    S-->>W: 403 + Secure-Session-Challenge
+    W->>S: POST /dbsc/refresh + Secure-Session-Response
+    S->>S: verify proof, issue a fresh credential
+    S-->>W: 200 session_config + Set-Cookie
+    Note over W: only now is the original request released
+    W->>S: fetch(request)
+    S-->>B: 200  (arrived with a valid credential)
+```
+
+A failed refresh here **does not fail the request**. The server is about to answer that
+very request and is the authority on whether the session is still good; injecting a
+synthetic error would replace a real answer with a worse one, and would break the
+routes that do not care about DBSC at all.
+
+##### 4. Signing out
+
+There is nothing script-specific here, and that is the point: logout is a plain form
+POST, and the server ends the binding on the way out. `terminate()` writes
+`Secure-Session-Terminate`, which makes the browser forget the credential, and revokes
+the record so a captured cookie stops resolving. The worker keeps running — the next
+login will need it again — and its local key is simply never used again; a client that
+wants it gone sooner calls `forgetDbsc()` from the page.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Page
+    participant S as Server
+
+    P->>S: POST /logout  (ordinary form submit)
+    S->>S: terminate(dbsc session id) -> revoke the record
+    S-->>P: Set-Cookie: auth_cookie deleted,
+    S-->>P: Secure-Session-Terminate
+    Note over P: browser forgets the binding,<br/>the login session ends
+```
+
+Skipping `terminate()` is the classic way to get this wrong: the device key then
+outlives the login, the browser keeps refreshing a session the application has already
+ended, and the *next* login re-couples to a stale key instead of registering a fresh
+one. The README-DEMO pitfalls list records it for the same reason.
 
 #### Why a Service Worker, and not a timer
 
