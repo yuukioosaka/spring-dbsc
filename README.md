@@ -1715,7 +1715,7 @@ every page load would cost a refresh round trip.
 Only the routes your guard protects are touched, as a prefix test:
 
 ```js
-const PROTECTED_PREFIXES = ["/app/payment"];   // the demo's DbscGuardRoutes
+const PROTECTED_PREFIXES = ["/app/"];   // the demo's app surface
 const SESSION_DESTINATIONS = new Set(["", "document"]);
 ```
 
