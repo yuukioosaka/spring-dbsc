@@ -61,32 +61,46 @@ const BINDING_COOKIE_TTL_MS = 180_000;
 const REFRESH_MARGIN_MS = 5_000;
 
 /**
- * Paths the worker must not touch, as a prefix test.
+ * Paths worth refreshing ahead of, as a prefix test.
  *
- * The protocol routes are excluded because `/dbsc/refresh` is what this worker
- * *calls*: intercepting it would have the refresh trigger itself, and the second
- * pass would find the record still stale and recurse. One level of that is enough to
- * deadlock a session.
+ * AN ALLOWLIST, NOT A DENYLIST, and that is the security-relevant choice. The
+ * question this answers is "could this request's outcome depend on the credential
+ * cookie?", and only the application knows -- so the honest default for a route the
+ * deployer has not thought about is "no", not "yes". A denylist gets that backwards:
+ * anything not named is swept in, and the sweep is invisible.
  *
- * EDIT THIS BY HAND to match your deployment: the protocol prefixes have to follow
- * `dbsc.registration-path` / `refresh-path` / `bind-path` if they are not the
- * defaults, and `/login` is here only because this client ships with a form-login
- * demo -- your own login path belongs in its place. See the README's "What the
- * worker will not touch".
+ * KEEP THIS IN STEP WITH YOUR GUARDED ROUTES (DbscGuardRoutes). The cost of a route
+ * listed here that is not guarded is a wasted refresh round trip on it; the cost of a
+ * guarded route missing here is that its credential is never refreshed proactively and
+ * the route starts refusing at the TTL. List what the guard protects.
  */
-const BYPASS_PREFIXES = ["/dbsc/", "/.well-known/device-bound-sessions", "/login"];
+const PROTECTED_PREFIXES = ["/app/payment"];
+
+/**
+ * Request destinations that carry a session.
+ *
+ * `document` is a page load and `""` is a fetch/XHR (the spec leaves destination
+ * empty for those). Everything else -- images, fonts, stylesheets, scripts -- is a
+ * subresource whose response does not depend on the credential, and a page load pulls
+ * in dozens of them at once. This is the check that keeps one navigation from
+ * launching a refresh per asset.
+ */
+const SESSION_DESTINATIONS = new Set(["", "document"]);
 
 /**
  * Requests worth refreshing ahead of.
  *
- * A refresh exists to keep a *session* usable, so only requests that carry it matter.
- * `same-origin` excludes anything that is not ours; `navigate` and `same-origin` as
- * destination/mode cover page loads and the application's own fetches, and skipping
- * images, fonts and other subresources keeps a page load from triggering a refresh
- * per asset.
+ * A refresh exists to keep a *session* usable, so only requests that carry it matter:
+ * same-origin, a session-bearing destination, and a path the application has declared
+ * protected. Anything else is passed straight through, untouched.
  */
 function isSessionRequest(request) {
     if (request.method !== "GET" && request.method !== "POST") return false;
+
+    // An absent destination is treated as session-bearing rather than skipped: the
+    // property is missing on some synthetic requests, and a missing value is not
+    // evidence of a subresource.
+    if (request.destination && !SESSION_DESTINATIONS.has(request.destination)) return false;
 
     let url;
     try {
@@ -95,9 +109,8 @@ function isSessionRequest(request) {
         return false;
     }
     if (url.origin !== self.location.origin) return false;
-    if (BYPASS_PREFIXES.some(prefix => url.pathname.startsWith(prefix))) return false;
 
-    return true;
+    return PROTECTED_PREFIXES.some(prefix => url.pathname.startsWith(prefix));
 }
 
 self.addEventListener("install", () => {

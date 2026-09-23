@@ -1458,7 +1458,7 @@ mechanism rather than a workaround. Three constants need your attention:
 | Where | What to change |
 |---|---|
 | `dbsc-soft-sw.js` | `BINDING_COOKIE_TTL_MS` must equal `dbsc.binding-cookie-ttl` — see [Telling it how long the cookie lives](#telling-it-how-long-the-cookie-lives) |
-| `dbsc-soft-sw.js` | `BYPASS_PREFIXES` must follow your `registration-path` / `refresh-path` / `bind-path`, and `/login` is the demo's path — see [What the worker will not touch](#what-the-worker-will-not-touch) |
+| `dbsc-soft-sw.js` | `PROTECTED_PREFIXES` should mirror your `DbscGuardRoutes` — see [What the worker refreshes for](#what-the-worker-refreshes-for) |
 | `dbsc-soft-client.js` | `CONFIG.bindPath` / `refreshPath`, the same paths again |
 
 Each of those is marked with an `EDIT THIS BY HAND` comment at the point of edit, so
@@ -1542,7 +1542,7 @@ sequenceDiagram
     participant D as DataSource
 
     B->>W: fetch (any same-origin GET/POST)
-    Note over W: isSessionRequest()?<br/>skip /dbsc/, /.well-known/, /login
+    Note over W: isSessionRequest()? - same-origin,<br/>destination is a document or a fetch,<br/>and the path is in PROTECTED_PREFIXES
     W->>W: refreshIfStale(intervalMs, marginMs)
     Note over W: now - refreshedAt < interval - margin?<br/>yes -> just fetch(request), no network
     W->>S: POST /dbsc/refresh  (X-Session-Id, no proof)
@@ -1701,8 +1701,8 @@ starts refusing a client that looks otherwise healthy.
 **Edit the file to do this.** `dbsc-soft-sw.js` and `dbsc-soft-client.js` are served
 verbatim: there is no build step, no template and no config route behind them, so the
 constant is the configuration. The same applies to the route paths in the client's
-`CONFIG` and to `BYPASS_PREFIXES` below — see
-[What the worker will not touch](#what-the-worker-will-not-touch). Both files carry the
+`CONFIG` and to `PROTECTED_PREFIXES` below — see
+[What the worker refreshes for](#what-the-worker-refreshes-for). Both files carry the
 same instruction at the point of edit, so a deployer editing one finds it.
 
 The worker tracks the last exchange the server answered and compares against that
@@ -1710,34 +1710,39 @@ figure, so a request arriving a second after a refresh does not trigger another.
 matters: the `fetch` hook runs on *every* same-origin request, and without the check
 every page load would cost a refresh round trip.
 
-#### What the worker will not touch
+#### What the worker refreshes for
 
-These three prefixes are passed straight through, as a prefix test on the path:
+Only the routes your guard protects are touched, as a prefix test:
 
 ```js
-const BYPASS_PREFIXES = ["/dbsc/", "/.well-known/device-bound-sessions", "/login"];
+const PROTECTED_PREFIXES = ["/app/payment"];   // the demo's DbscGuardRoutes
+const SESSION_DESTINATIONS = new Set(["", "document"]);
 ```
 
-- **`/dbsc/`** — the refresh route is what the worker *calls*. Intercepting it would
-have the refresh trigger itself, and the second pass would find the record still stale
-and recurse. One level of that is enough to deadlock a session.
-- **`/.well-known/device-bound-sessions`** — the well-known document, which the worker
-has no reason to gate.
-- **`/login`** — the demo's form-login path. Intercepting a login navigation serves no
-purpose, but **this one is app-specific**: if your login lives elsewhere, change it.
+This is an **allowlist, not a denylist**, and the direction matters. The question it
+answers is "could this request's outcome depend on the credential cookie?", and only the
+application knows — so a route the deployer has not thought about should be *skipped*,
+not swept in. A denylist gets that backwards: `isSessionRequest` would return true for
+everything not named, and the sweep is invisible from the config.
 
-**Edit this array by hand to match your deployment.** It is a static file, so nothing
-rewrites it, and two of the three entries can drift from your own configuration:
+Two filters do the work:
 
-- The protocol prefix must follow `dbsc.registration-path` / `refresh-path` /
-`bind-path`. If you move those off `/dbsc`, this array has to move with them — and so
-does the client's `CONFIG`, which mirrors the same three paths.
-- `/login` is only the demo's choice. Replace it with your own login path, or drop it
-if refresh-on-login is harmless for you.
+- **The path prefix** is the coarse one, and it should mirror your
+`DbscGuardRoutes`. The costs of drift are asymmetric, so it is worth knowing which way
+is dangerous: a route listed here that the guard does not protect costs a wasted refresh
+round trip; a guarded route *missing* here is never refreshed proactively, so it starts
+refusing at the TTL. **List what the guard protects.**
+- **`request.destination`** drops subresources in one step. A page load pulls in dozens
+of images, fonts and stylesheets that carry no credential, and each one used to trigger
+its own refresh check — that is what made a single navigation cost a burst of network
+I/O and IndexedDB opens.
 
-Getting this wrong fails quietly in the direction that matters: a **missing** prefix
-means the worker intercepts a route it drives itself, and the recursion above is the
-result. An extra prefix only costs a missed proactive refresh.
+The worker will not touch the protocol routes either, though not by naming them:
+`/dbsc/refresh` is only reached by a `fetch` with an empty destination and a path that
+`PROTECTED_PREFIXES` does not match, so it is skipped before any of this matters. That
+is what keeps the refresh from triggering itself and recursing — the reason the old
+denylist named `/dbsc/` explicitly. **If you ever add a `/dbsc` prefix to
+`PROTECTED_PREFIXES`, you reintroduce that deadlock.**
 
 A failed refresh never fails the request either: the server is about to answer that
 request anyway, and it is the authority on whether the session is still good.

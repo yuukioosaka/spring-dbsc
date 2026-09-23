@@ -103,9 +103,32 @@ function csrfHeaderName() {
 }
 
 // ---------------------------------------------------------------- IndexedDB
+//
+// Two caches stand between the callers and the database, and both matter because
+// refreshIfStale() runs on every intercepted request:
+//
+//   * the CONNECTION is opened once and reused. Opening it per transaction meant an
+//     open/close cycle for every freshness check, which is the cost this file used to
+//     pay on every same-origin request.
+//   * the RECORD is held in memory, so the common case -- "is this stale?" answered
+//     "no" -- never touches IndexedDB at all. The record is small and single-keyed, so
+//     there is nothing to page in, and this client is the only writer on the origin.
+//
+// Neither cache can go stale in a way that matters. A Service Worker is torn down when
+// idle, which discards both; and on restart the first getRecord() reads through. The
+// one live hazard is another context -- a second tab, or another worker generation --
+// writing the record while this one holds a cached copy, so every write that does not
+// go through putRecord()/clearRecord() here has to be treated as invisible. In practice
+// nothing else writes it: refresh() is serialized behind the Web Lock below.
+
+let dbPromise = null;
+let recordCache;
+let recordCached = false;
 
 function openDb() {
-    return new Promise((resolve, reject) => {
+    if (dbPromise) return dbPromise;
+
+    dbPromise = new Promise((resolve, reject) => {
         const req = indexedDB.open(DB_NAME, 1);
         req.onupgradeneeded = () => {
             const db = req.result;
@@ -113,51 +136,98 @@ function openDb() {
                 db.createObjectStore(STORE);
             }
         };
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+            const db = req.result;
+            // Another context is upgrading the database: close so it can proceed, and
+            // drop the promise so the next call reopens at the new version. Without
+            // this the worker would hold a connection that blocks the upgrade forever.
+            db.onversionchange = () => {
+                db.close();
+                dbPromise = null;
+                recordCached = false;
+            };
+            resolve(db);
+        };
+        req.onerror = () => {
+            // Do not cache a failed open: the next caller should retry rather than
+            // inherit this rejection for the worker's lifetime.
+            dbPromise = null;
+            reject(req.error);
+        };
+    });
+
+    return dbPromise;
+}
+
+/**
+ * Runs `work` in one transaction and resolves with the request's result, or null.
+ *
+ * The resolution point differs by mode, and it has to. A read is finished when its
+ * request succeeds. A write is not: `put`/`delete` can report success and still be
+ * rolled back if the transaction aborts afterwards, so writes resolve on `oncomplete`
+ * and the request's own success is only used to carry a value out. Resolving a write
+ * on the request would let refresh() cache a `refreshedAt` the database never kept.
+ */
+async function withStore(mode, work) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, mode);
+        const req = work(tx.objectStore(STORE));
+        const readOnly = mode === "readonly";
+
+        if (readOnly && req) {
+            req.onsuccess = () => resolve(req.result ?? null);
+            req.onerror = () => reject(req.error);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+            return;
+        }
+
+        tx.oncomplete = () => resolve(req ? (req.result ?? null) : null);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
     });
 }
 
 async function putRecord(record) {
-    const db = await openDb();
-    try {
-        await new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE, "readwrite");
-            tx.objectStore(STORE).put(record, KEY_ID);
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => reject(tx.error);
-        });
-    } finally {
-        db.close();
-    }
+    await withStore("readwrite", store => {
+        store.put(record, KEY_ID);
+        return null;
+    });
+    // Cached only after the transaction committed, so a failed write cannot leave the
+    // cache claiming something the database does not have.
+    recordCache = record;
+    recordCached = true;
 }
 
 async function getRecord() {
-    const db = await openDb();
-    try {
-        return await new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE, "readonly");
-            const req = tx.objectStore(STORE).get(KEY_ID);
-            req.onsuccess = () => resolve(req.result ?? null);
-            req.onerror = () => reject(req.error);
-        });
-    } finally {
-        db.close();
-    }
+    if (recordCached) return recordCache;
+
+    const record = await withStore("readonly", store => store.get(KEY_ID));
+    recordCache = record;
+    recordCached = true;
+    return record;
 }
 
 async function clearRecord() {
-    const db = await openDb();
-    try {
-        await new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE, "readwrite");
-            tx.objectStore(STORE).delete(KEY_ID);
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => reject(tx.error);
-        });
-    } finally {
-        db.close();
-    }
+    await withStore("readwrite", store => {
+        store.delete(KEY_ID);
+        return null;
+    });
+    recordCache = null;
+    recordCached = true;
+}
+
+/**
+ * Drops the in-memory record without touching the database.
+ *
+ * For the one case the cache cannot see on its own: another context is known to have
+ * changed the record, so what is held here is of unknown age. The next getRecord()
+ * reads through.
+ */
+function invalidateRecordCache() {
+    recordCached = false;
+    recordCache = undefined;
 }
 
 // ------------------------------------------------------------------- base64url
@@ -324,7 +394,7 @@ async function register(offer) {
  * session that is not this browser's. The record is the only source, which is also
  * why the argument is not accepted from a caller.
  */
-async function refresh() {
+async function doRefresh() {
     const rec = await getRecord();
     if (!rec) return false;
 
@@ -385,6 +455,52 @@ async function refresh() {
         refreshedAt: Date.now()
     });
     return true;
+}
+
+/** The lock name every context on this origin contends for. */
+const REFRESH_LOCK_NAME = "dbsc-refresh";
+
+/**
+ * Refreshes, with at most one exchange in flight per origin.
+ *
+ * The protocol tolerates a second refresh -- the challenge is consumed atomically
+ * server-side, so a duplicate loses the race and fails rather than corrupting
+ * anything -- but it does not tolerate one for free: every duplicate is two wasted
+ * round trips, and the loser also consumes the challenge the winner was about to
+ * need. Ten subresources arriving together used to mean ten refreshes racing, nine of
+ * which could only fail.
+ *
+ * `ifAvailable: true` is the important part, and it is a deliberate asymmetry against
+ * the obvious implementation. Waiting for the lock would serialize every caller behind
+ * one exchange, and each waiter would then run a refresh of its own for a record that
+ * is already fresh -- the same duplicate work, just in a queue. Instead, a caller that
+ * cannot take the lock immediately concludes that someone else is doing the work and
+ * returns without touching the network.
+ *
+ * A browser without Web Locks (older Safari and Firefox) falls through to the
+ * unguarded exchange, which is what this did before. That is safe rather than merely
+ * tolerable: the server is the arbiter, and the worst case is the duplicate above.
+ */
+async function refresh() {
+    if (typeof navigator === "undefined" || !navigator.locks) {
+        return doRefresh();
+    }
+
+    return navigator.locks.request(REFRESH_LOCK_NAME, { ifAvailable: true }, async lock => {
+        if (!lock) {
+            // Someone else holds it. Their exchange will have stamped a fresh
+            // `refreshedAt`, but that write may land after this call returns, so the
+            // cached record is of unknown age and must be re-read next time.
+            invalidateRecordCache();
+            return false;
+        }
+
+        // Re-read inside the lock. The record may have been refreshed by another tab
+        // between the caller's staleness check and this point, and the cache would
+        // still be showing the pre-refresh value.
+        invalidateRecordCache();
+        return doRefresh();
+    });
 }
 
 function res2ok(res) {
@@ -530,6 +646,11 @@ let timer = null;
  * or one whose binding was made recently enough, returns false without touching the
  * network -- which is the common case, since this runs on every intercepted request.
  *
+ * The staleness test is repeated inside the refresh lock, because between the check
+ * here and the exchange there is a window in which another tab can complete one. The
+ * outer check stays because it is free (a cached record) and because it keeps a
+ * fresh client from queueing on the lock at all.
+ *
  * @param options.intervalMs the deployment's `dbsc.binding-cookie-ttl`, in ms
  * @param options.marginMs how far ahead of the TTL to fire; defaults to 5s
  * @param options.now injectable clock, for tests
@@ -538,14 +659,35 @@ async function refreshIfStale(options = {}) {
     const intervalMs = options.intervalMs ?? 10 * 60 * 1000;
     const marginMs = options.marginMs ?? 5000;
     const now = options.now ?? Date.now();
+    const threshold = Math.max(0, intervalMs - marginMs);
 
     const rec = await getRecord().catch(() => null);
     if (!rec || !rec.sessionId) return false;
 
-    const last = rec.refreshedAt ?? 0;
-    if (now - last < Math.max(0, intervalMs - marginMs)) return false;
+    if (now - (rec.refreshedAt ?? 0) < threshold) return false;
 
-    return refresh().catch(() => false);
+    if (typeof navigator === "undefined" || !navigator.locks) {
+        return doRefresh().catch(() => false);
+    }
+
+    return navigator.locks.request(REFRESH_LOCK_NAME, { ifAvailable: true }, async lock => {
+        if (!lock) {
+            // Another context is mid-exchange. It is about to stamp a fresh
+            // `refreshedAt`, so treat the binding as being handled and let the request
+            // that triggered this one proceed without another round trip.
+            invalidateRecordCache();
+            return false;
+        }
+
+        // Re-check under the lock: a tab that held it until a moment ago has already
+        // refreshed this binding, and doing it again would only burn a challenge.
+        invalidateRecordCache();
+        const fresh = await getRecord().catch(() => null);
+        if (!fresh || !fresh.sessionId) return false;
+        if (Date.now() - (fresh.refreshedAt ?? 0) < threshold) return false;
+
+        return doRefresh().catch(() => false);
+    });
 }
 
 /**
