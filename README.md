@@ -519,7 +519,8 @@ deployment has to make a choice.
 #### Phase 1: registration — where the session id comes from
 
 The one thing the spec leaves out is *what the session identifier is*. This library makes
-it **yours to mint at `bind()`**, and keeps it out of every cookie:
+it **yours to mint at `bind()`**, and keeps **the id itself** out of every cookie — the
+cookie the binding protects carries a rotating ticket instead, never the id:
 
 ```mermaid
 sequenceDiagram
@@ -528,10 +529,13 @@ sequenceDiagram
     participant B as Browser (TPM-backed)
     participant S as Your app + DBSC
 
-    U->>S: POST /login  (your own authentication)
-    Note over S: authenticate() - DBSC does not do this
+    U->>B: presents credentials
+    B->>S: POST /login
+    Note over S: authenticate() - DBSC does not authenticate
     S->>S: bind(sessionId, JSESSIONID, userId)<br/>tier none, expires_at = now + dbsc.session-ttl
-    S-->>B: Set-Cookie JSESSIONID, yours<br/>Set-Cookie the credential cookie, value is a ticket<br/>Secure-Session-Registration with path and challenge
+    S-->>B: response header Secure-Session-Registration<br/>(algorithm, path, challenge)
+    S-->>B: response header Secure-Session-Challenge<br/>(the jti the browser must sign)
+    S-->>B: cookie JSESSIONID, set by the container<br/>cookie credential, value is a ticket
     Note over B: generates the key pair in the TPM
     B->>S: POST the registration path<br/>JWK plus a JWS over the challenge jti
     S->>S: verify the JWS, check the jti,<br/>reject a second registration,<br/>consume the path token, store the key
