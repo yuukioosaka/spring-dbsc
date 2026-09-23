@@ -8,6 +8,14 @@
 //
 //   node scripts/probe-script-client.mjs
 
+// The demo serves a self-signed certificate. Setting NODE_TLS_REJECT_UNAUTHORIZED in a
+// shell only reaches the process if it is exported, and the equivalent flag (--use-system-
+// ca) is not available on every Node that runs this, so the opt-out is set in-process.
+// It must happen before the first fetch, which is why it is not inside main().
+if (process.env.DBSC_TLS_INSECURE === "1") {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+}
+
 const BASE = process.env.DBSC_BASE ?? "https://localhost:8443";
 
 // --- IndexedDB shim: enough for a single key/value store. In-memory is fine --

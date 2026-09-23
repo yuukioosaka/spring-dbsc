@@ -34,6 +34,16 @@ dbsc:
   # rotation-grace, so a second tab that has not seen the new value does not break.
   # The name is used verbatim; a prefix is the deployer's choice.
   credential-cookie-name: __Host-auth_cookie
+  # Path, HttpOnly and SameSite of that cookie. The three must be changed together
+  # with the browser in mind: the same string is advertised in credentials[].attributes
+  # and Chromium compares it byte-for-byte with the real Set-Cookie, so a value the
+  # browser rewrites (a relative path) would match nothing and the session would never
+  # exist, silently. None of them is validated on the wire -- only at startup.
+  # Path must cover the registration route or the registration POST cannot present
+  # the credential.
+  cookie-path: /
+  cookie-http-only: true
+  cookie-same-site: LAX
   # Grace window past the binding cookie's expiry: a freshness poll that lands
   # while the browser's next refresh is in flight still reads the old tier.
   binding-cookie-ttl: 10m

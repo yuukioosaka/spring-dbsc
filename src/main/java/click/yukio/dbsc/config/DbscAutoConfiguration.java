@@ -102,7 +102,10 @@ public class DbscAutoConfiguration {
                 properties.isSecure(),
                 properties.getCookieScope(),
                 properties.getCookieDomain(),
-                properties.getCredentialCookieName());
+                properties.getCredentialCookieName(),
+                properties.getCookieSameSite(),
+                properties.getCookiePath(),
+                properties.isCookieHttpOnly());
     }
 
     @Bean

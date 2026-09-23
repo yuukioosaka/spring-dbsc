@@ -753,6 +753,9 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `soft.enabled` | `true` | registers `POST /dbsc/bind` and the Soft DBSC fallback. Off means the route is a 404. See [Soft DBSC](#soft-dbsc-the-fallback-for-browsers-without-native-support) |
 | `session-identifier-name` | — | **removed.** `session_identifier` carries the session id itself (spec §9.6), so there was no name left to configure. Setting it now has no effect |
 | `credential-cookie-name` | `__Host-auth_cookie` | the protected cookie named in `credentials[].name`, whose value rotates. Used verbatim — a prefix is your choice |
+| `cookie-path` | `/` | `Path` of the credential cookie. Must start with `/`: the same string is advertised in `credentials[].attributes` and Chromium compares it byte-for-byte with the real `Set-Cookie`, and a relative path is one the browser rewrites. It must also cover the registration route, or the registration POST cannot present the credential |
+| `cookie-http-only` | `true` | `HttpOnly` on the credential cookie. Turning it off hands the credential to page script — the one thing the flag exists to prevent. Soft DBSC does not need it off: the worker never reads the cookie either |
+| `cookie-same-site` | `LAX` | `SameSite` (`LAX`/`STRICT`/`NONE`). `NONE` requires `secure: true`, and is what a genuinely cross-site flow needs |
 | `binding-cookie-ttl` | `10m` | lifetime of the credential cookie, and the window after which an unrefreshed session demotes. Also the refresh cadence the browser settles into |
 | `registration-token-ttl` | `5m` | lifetime of the single-use registration token. The token is spent by the registration attempt, success or failure; this only bounds one that is never presented at all |
 | `challenge-ttl` | `5m` | lifetime of a challenge JTI |

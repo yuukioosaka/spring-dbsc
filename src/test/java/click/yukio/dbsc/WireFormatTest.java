@@ -293,6 +293,77 @@ class WireFormatTest {
         }
 
         @Test
+        @DisplayName("SameSite defaults to Lax, and each value is written verbatim")
+        void sameSiteIsConfigurable() {
+            assertEquals(CookieScope.SameSite.LAX,
+                    CookieScope.resolve(true, CookieScope.Scope.HOST, null).sameSite());
+
+            for (CookieScope.SameSite value : CookieScope.SameSite.values()) {
+                CookieScope scope = CookieScope.resolve(
+                        true, CookieScope.Scope.HOST, null, null, value);
+                assertTrue(scope.attributesString().contains("SameSite=" + value.wireValue()),
+                        value + " must reach the attributes: " + scope.attributesString());
+                // The advertised string and the real header must never disagree, in any
+                // combination -- that mismatch is what Chromium discards silently.
+                assertTrue(scope.setCookieValue("c", "v", 1000)
+                                .contains("SameSite=" + value.wireValue()),
+                        "the Set-Cookie value must carry the same SameSite");
+            }
+        }
+
+        @Test
+        @DisplayName("SameSite=None without Secure is rejected rather than silently dropped by the browser")
+        void sameSiteNoneRequiresSecure() {
+            assertThrows(IllegalArgumentException.class,
+                    () -> CookieScope.resolve(false, CookieScope.Scope.HOST, null, null,
+                            CookieScope.SameSite.NONE));
+        }
+
+        @Test
+        @DisplayName("SameSite=Strict is accepted, and still carries Secure")
+        void sameSiteStrict() {
+            CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.HOST, null, null,
+                    CookieScope.SameSite.STRICT);
+
+            assertEquals("Path=/; Secure; HttpOnly; SameSite=Strict", scope.attributesString());
+        }
+
+        @Test
+        @DisplayName("Path is configurable, and a relative one is rejected")
+        void pathIsConfigurable() {
+            CookieScope scope = CookieScope.resolve(true, CookieScope.Scope.HOST, null, null,
+                    null, "/app", null);
+
+            assertEquals("Path=/app; Secure; HttpOnly; SameSite=Lax", scope.attributesString());
+            assertEquals("/app", scope.path());
+
+            // A blank path is the default, not an error.
+            assertEquals(CookieScope.DEFAULT_PATH, CookieScope.resolve(
+                    true, CookieScope.Scope.HOST, null, null, null, "  ", null).path());
+
+            // A relative path is rewritten by the browser, so the advertised string would
+            // stop matching the real cookie and the binding would never complete.
+            assertThrows(IllegalArgumentException.class,
+                    () -> CookieScope.resolve(true, CookieScope.Scope.HOST, null, null,
+                            null, "app", null));
+        }
+
+        @Test
+        @DisplayName("HttpOnly is on by default and can be turned off, dropping it from both outputs")
+        void httpOnlyIsConfigurable() {
+            CookieScope defaulted = CookieScope.resolve(true, CookieScope.Scope.HOST, null);
+            assertTrue(defaulted.httpOnly());
+            assertTrue(defaulted.attributesString().contains("HttpOnly"));
+
+            CookieScope off = CookieScope.resolve(true, CookieScope.Scope.HOST, null, null,
+                    null, null, false);
+            assertFalse(off.httpOnly());
+            assertEquals("Path=/; Secure; SameSite=Lax", off.attributesString());
+            assertEquals("c=v; Path=/; Secure; SameSite=Lax; Max-Age=1",
+                    off.setCookieValue("c", "v", 1000));
+        }
+
+        @Test
         @DisplayName("site scope without a domain, without secure, or with a leading dot is rejected")
         void siteScopeValidation() {
             assertThrows(IllegalArgumentException.class,

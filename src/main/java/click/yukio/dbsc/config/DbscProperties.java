@@ -135,6 +135,46 @@ public class DbscProperties {
     private String credentialCookieName = "__Host-auth_cookie";
 
     /**
+     * The {@code SameSite} attribute on the credential cookie, and on nothing else.
+     *
+     * <p>{@code Lax} unless set. The value is written into both the real {@code Set-Cookie}
+     * header and {@code credentials[].attributes}, which Chromium compares against the
+     * real cookie (§8.6); the two cannot drift because they come from one place.
+     *
+     * <p>{@code Strict} is safe only when nothing ever lands on a DBSC route directly
+     * from another site — a login that returns from an identity provider does, so it is
+     * withheld and the application sees an unauthenticated request. {@code None} requires
+     * {@code secure=true} (validated at startup, because the browser otherwise rejects
+     * the cookie silently) and hands the credential to cross-site callers, which is what
+     * the default avoids.
+     */
+    private CookieScope.SameSite cookieSameSite = CookieScope.SameSite.LAX;
+
+    /**
+     * The {@code Path} attribute on the credential cookie.
+     *
+     * <p>{@code /} unless set. Narrowing it means the credential is not sent to routes
+     * outside that path, which is a mild reduction in what a network attacker could
+     * capture. It must be an absolute path starting with {@code /} — the browser
+     * normalises relative values, and the result would no longer match the string
+     * advertised in {@code credentials[].attributes}, so the binding would never
+     * complete. It must also cover the registration route, or the registration POST
+     * cannot present the credential.
+     */
+    private String cookiePath = CookieScope.DEFAULT_PATH;
+
+    /**
+     * Whether the credential cookie carries {@code HttpOnly}.
+     *
+     * <p>True unless set to false. {@code HttpOnly} stops page script reading the
+     * credential, which is the point of it; a script client does not need it turned off,
+     * because a Service Worker has no access to the cookie jar either. Leave it alone
+     * unless a deployment has a specific reason, and treat turning it off as widening the
+     * XSS surface to include the credential itself.
+     */
+    private boolean cookieHttpOnly = true;
+
+    /**
      * Grace window applied after the binding cookie expires.
      */
     private Duration bindingCookieTtl = Duration.ofMinutes(10);
@@ -375,6 +415,30 @@ public class DbscProperties {
 
     public void setCredentialCookieName(String credentialCookieName) {
         this.credentialCookieName = credentialCookieName;
+    }
+
+    public CookieScope.SameSite getCookieSameSite() {
+        return cookieSameSite;
+    }
+
+    public void setCookieSameSite(CookieScope.SameSite cookieSameSite) {
+        this.cookieSameSite = cookieSameSite;
+    }
+
+    public String getCookiePath() {
+        return cookiePath;
+    }
+
+    public void setCookiePath(String cookiePath) {
+        this.cookiePath = cookiePath;
+    }
+
+    public boolean isCookieHttpOnly() {
+        return cookieHttpOnly;
+    }
+
+    public void setCookieHttpOnly(boolean cookieHttpOnly) {
+        this.cookieHttpOnly = cookieHttpOnly;
     }
 
     public Duration getBindingCookieTtl() {
