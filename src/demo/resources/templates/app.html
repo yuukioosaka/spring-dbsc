@@ -89,8 +89,14 @@
 </form>
 
 <script>
-    const csrfToken = document.querySelector('meta[name="csrf"]').content;
-    const csrfHeader = document.querySelector('meta[name="csrf-header"]').content;
+    // Named to avoid the top-level scope this page shares with /dbsc-soft-client.js,
+    // which is loaded below as a classic script. A `function` declared there and a
+    // `const` declared here with the same name are not a shadow -- both sit in the
+    // same global lexical environment, so a shared name is a redeclaration. That is
+    // a SyntaxError for the whole script block, and it is the client's own
+    // `csrfToken` that the collision would take down.
+    const pageCsrfToken = document.querySelector('meta[name="csrf"]').content;
+    const pageCsrfHeader = document.querySelector('meta[name="csrf-header"]').content;
 
     async function hit(path, method) {
         const out = document.getElementById(path.includes('payment') ? 'payment' : 'whoami');
@@ -98,7 +104,7 @@
         const headers = {};
         if (method !== 'GET') {
             headers['Content-Type'] = 'application/json';
-            headers[csrfHeader] = csrfToken;
+            headers[pageCsrfHeader] = pageCsrfToken;
         }
         try {
             const res = await fetch(path, {
@@ -166,8 +172,13 @@
 
                 // The CSRF token the bind route needs lives here, in the document,
                 // and cannot be read from inside the worker.
+                //
+                // The names are page-local on purpose: this IIFE's `const`s would
+                // shadow the client's globals, which is legal, but the two blocks on
+                // this page sharing one spelling is the sort of thing that stops being
+                // legal the moment one of them moves. They are kept distinct instead.
                 const csrf = document.querySelector('meta[name="csrf"]');
-                const csrfHeader = document.querySelector('meta[name="csrf-header"]');
+                const csrfHeaderMeta = document.querySelector('meta[name="csrf-header"]');
 
                 const worker = registration.active;
                 const bind = new Promise((resolve, reject) => {
@@ -176,7 +187,7 @@
                     worker.postMessage({
                         type: 'bind',
                         csrfToken: csrf ? csrf.content : null,
-                        csrfHeader: csrfHeader ? csrfHeader.content : null
+                        csrfHeader: csrfHeaderMeta ? csrfHeaderMeta.content : null
                     }, [channel.port2]);
                     setTimeout(() => reject(new Error('the worker did not answer')), 15000);
                 });
