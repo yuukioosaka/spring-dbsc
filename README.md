@@ -455,7 +455,8 @@ is for, and why the refresh deadline exists as the backstop.
 
 The tier is not a per-request decision. It is **stored state** that moves at five specific
 moments, and the guard reads the stored value rather than recomputing it — which is what
-makes demotion-on-failure possible at all:
+makes demotion-on-failure possible at all. The lifecycle that drives these moves is in
+[The DBSC lifecycle](#the-dbsc-lifecycle-and-where-this-library-differs):
 
 ```mermaid
 stateDiagram-v2
@@ -500,30 +501,168 @@ browser that does not implement DBSC.
 that is expired or explicitly demoted even though its key is still stored. The key decides
 how high a session *can* reach; the stored tier decides whether it currently has.
 
-### The lifetime that bounds it
+### The DBSC lifecycle, and where this library differs
 
-Because the application's session and the DBSC session are separate records, DBSC could in
-principle outlive the login it came from. It does not, and `dbsc.session-ttl` is what stops
-it (`1d` by default):
+Everything above describes the state DBSC keeps. This section is the lifecycle that drives
+it — the four phases a deployment has to fit into its app — with the **fourth column
+marking what this library adds**, because the spec is deliberately silent exactly where a
+deployment has to make a choice.
+
+| Phase | The spec's shape | What this library adds | Config |
+|---|---|---|---|
+| 1. Registration | bind a key to the session | **the session id is yours to mint**, and the path carries a single-use token | `dbsc.registration-token-ttl` (5m) |
+| 2. Steady state | refresh before expiry | **a rotating credential ticket** with a grace window | `dbsc.rotation-grace` (60s) |
+| 3. Breach | the thief cannot sign | **demotion on the first bad signature**, and the `session_stolen` signal | — |
+| 4. Termination | tell the browser to forget | **the record is kept and marked revoked**, not deleted | — |
+| *bounding all of it* | *(unspecified)* | **an absolute deadline no refresh can extend** | `dbsc.session-ttl` (1d) |
+
+#### Phase 1: registration — where the session id comes from
+
+The one thing the spec leaves out is *what the session identifier is*. This library makes
+it **yours to mint at `bind()`**, and keeps it out of every cookie:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant B as Browser (TPM-backed)
+    participant S as Your app + DBSC
+
+    U->>S: POST /login  (your own authentication)
+    Note over S: authenticate() - DBSC does not do this
+    S->>S: bind(sessionId, JSESSIONID, userId)<br/>tier none, expires_at = now + dbsc.session-ttl
+    S-->>B: Set-Cookie: JSESSIONID (yours)<br/>Set-Cookie: __Host-auth_cookie = ticket<br/>Secure-Session-Registration: (ES256);path=/dbsc/regist/&lt;token&gt;;challenge="jti"
+    Note over B: generates the key pair in the TPM
+    B->>S: POST /dbsc/regist/&lt;token&gt;  (JWK + JWS over the jti)
+    S->>S: verify JWS, check jti, reject a second registration,<br/>consume the token, store the key
+    S-->>B: 200 JSON session_config<br/>session_identifier = your sessionId<br/>tier none -> dbsc
+```
+
+The three additions, all in the mermaid notes:
+
+- **The session id is the caller's to mint.** `UUID.randomUUID()` is a fine choice. It is
+*not* `JSESSIONID` and never appears in a cookie.
+- **The registration path carries a token**, not the session id — `/dbsc/regist/<token>`,
+single-use, with its own TTL. The spec's flow is agnostic about how the browser is told
+where to POST; a fixed path would make the session id itself the only thing naming the
+session, which is the value we are trying to keep off the wire.
+- **`session_identifier` in the JSON config is the session id itself**, not a cookie name
+(spec §9.6 is explicit). Chromium keys its session store on it, so it is the browser's
+handle — while the *credential* cookie is a separate, rotating ticket.
+
+Note that **`bind()` alone protects nothing**: the session is created at tier `none` and
+only reaches `dbsc` when the registration POST verifies. See
+[When the tier moves](#when-the-tier-moves).
+
+#### Phase 2: steady state — a rotating ticket, and a clock on it
+
+The spec tells the browser to refresh before the credential expires. What it does not say
+is what the credentialed cookie *contains* — and this is where the deployment gets to put
+a clock on a captured cookie:
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant B as Browser
-    participant S as Server
+    participant S as Your app + DBSC
 
-    Note over B,S: bind() stamps an absolute deadline: now + dbsc.session-ttl
-    B->>S: POST /dbsc/refresh  (valid proof, session past its deadline)
-    S->>S: requireUnexpired(sessionId) - checked BEFORE the key lookup
-    S-->>B: 403 SESSION_NOT_FOUND
-    Note over S: the record is NOT rewritten:<br/>rewriting it would extend the deadline and renew the binding
-    Note over B,S: /app/whoami now reports tier none<br/>the guard denies with Reason.LAPSED
+    B->>S: normal request, credential cookie attached
+    S->>S: resolveBinderSession(): ticket -> session,<br/>then guardDecision()
+    S-->>B: normal response
+
+    Note over B: credential looks stale, or a request<br/>came back with an expired one
+    B->>S: POST /dbsc/refresh  (proof over the challenge)
+    S->>S: verify signature, then requireUnexpired(sessionId)
+    S->>S: rotateAfterRefresh(): mint a NEW ticket,<br/>retire the old one until the grace window ends
+    S-->>B: 200 JSON session_config + Set-Cookie: new ticket
 ```
 
-The deadline is **absolute, not sliding**, so a binding cannot be renewed forever. It is
-checked before the device key is looked up, and an expired session answers with the *same
-code and the same message* as a session that never existed — otherwise the error would
-itself be an oracle for which session ids are real.
+- **The credential cookie holds a rotating ticket, not the session id.** Every refresh
+mints a new one; the value it replaces keeps resolving for `dbsc.rotation-grace` (60s
+default) because a tab that has not read the new value yet is the normal case. That grace
+is what puts a **hard clock** on a stolen cookie: it stops working minutes later, whatever
+the thief does. This is the mitigation in Phase 3, made concrete.
+- **`dbsc.session-ttl` caps the whole thing** (`1d` default). The deadline is **absolute,
+not sliding** — a valid proof past it is refused, and the record is deliberately **not
+rewritten**, because rewriting it would extend the deadline and renew the binding forever:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant S as Your app + DBSC
+
+    B->>S: POST /dbsc/refresh  (valid proof, session past its deadline)
+    S->>S: requireUnexpired(sessionId) - BEFORE the key lookup
+    S-->>B: 403 SESSION_NOT_FOUND
+    Note over S: the record is NOT rewritten
+    Note over B,S: /app/whoami now reports tier none,<br/>the guard denies with Reason.LAPSED
+```
+
+The expiry check deliberately reuses **the same code and the same message** as a session
+that never existed. A distinct code would be an oracle for which session ids are real.
+
+#### Phase 3: a stolen cookie — what the library adds to the defense
+
+The spec's answer to theft is that the thief cannot sign. That is true but incomplete: it
+tells you *that* a proof failed, not whether the real device is still out there, and it
+leaves the session alive until the attacker gives up. This library's addition is what
+happens on the **first** bad signature:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor A as Attacker (stole the cookie)
+    participant B as Real browser
+    participant S as Your app + DBSC
+
+    Note over A: stole __Host-auth_cookie
+    A->>S: POST /dbsc/refresh with the stolen ticket
+    S->>S: the ticket still resolves (inside the grace)<br/>but the proof cannot be signed
+    S->>S: demoteOnFailure(): tier -> none,<br/>consume the challenge
+    S-->>A: 403 SIGNATURE_INVALID
+    Note over S: the device key is KEPT, so the next<br/>failure is reported as session_stolen
+
+    B->>S: its own next refresh
+    S-->>B: 403 - the session is now tier none
+    Note over B,S: the legitimate session lost, too.<br/>That is the intended trade: a stolen<br/>credential is a compromised session
+```
+
+**Demotion is the security mechanism, not an error path.** The session drops to `none`
+immediately rather than after a grace period, so a replayed cookie loses the session on
+its first attempt. The device key is deliberately **kept** through the demotion — it has to
+survive so a later failed refresh can still be reported as the `session_stolen` signal.
+
+The honest cost, shown in the diagram: **the legitimate session dies with it.** There is no
+"the real device wins" branch, because the server cannot tell which of two callers holding
+the same ticket is the real one. The trade is deliberate — a stolen credential means the
+session is compromised, and the safe answer is for both sides to re-authenticate.
+
+#### Phase 4: termination — revoke, and keep the record
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant S as Your app + DBSC
+
+    B->>S: POST /logout  (your own logout route)
+    S->>S: terminate(sessionId): revokeSession()<br/>-> UPDATE ... SET revoked = true (not DELETE)
+    S-->>B: Set-Cookie: __Host-auth_cookie deleted (Max-Age=0)<br/>JSON session_config with "continue": false
+    Note over B: forgets the binding on the agent's side
+    Note over S: the revoked record stays, so a later request<br/>still carrying JSESSIONID is recognised as<br/>"was bound" rather than a first-time visitor
+```
+
+`"continue": false` in the config is what tells the browser to forget the binding
+immediately rather than waiting the cookie out; discarding the key pair is the user agent's
+side of that and deliberately not something the server can verify. The spec's own Phase 4
+assumes the server drops the key association; this library keeps it as a tombstone instead,
+which is why `terminate` is **required at logout** rather than optional cleanup.
+
+The addition is **revoke, do not delete**. Deleting the row would make the next request
+that still carries the application's session id look like a client that never bound — so a
+logged-out session would silently fall back to cookie-only access. With the record kept,
+`guardDecision` denies with `Reason.REVOKED` instead.
 
 ## Wiring it into your own app
 
