@@ -1478,7 +1478,7 @@ sequenceDiagram
 
     Note over P: logged in, session bound via bind()
     P->>P: expectsNativeDbsc()?
-    Note over P: true -> stop here (Chromium on Windows<br/>binds natively; Android does not yet)
+    Note over P: true -> stop here (Chromium on Windows<br/>binds natively - Android does not yet)
     P->>W: register('/dbsc-soft-sw.js') + ready
     P->>W: postMessage {type:'bind', csrfToken, csrfHeader}
     W->>W: setCsrfToken(token, header)
