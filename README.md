@@ -33,7 +33,7 @@ and the theft is reported as `session_stolen`.
 | Session scope rules | ✅ `scope.scope_specification` — include/exclude by domain and path |
 | Refresh-initiator allow-list | ✅ `allowed_refresh_initiators`, closing the out-of-scope timing side channel |
 | Application-session binding | ✅ the DBSC session id is bound to your own session id (`JSESSIONID`, Spring Session, …), so the guard can tell a client that never bound from one that dropped its DBSC cookies — see [What the guard actually decides](#what-the-guard-actually-decides) |
-| Soft DBSC fallback | ✅ `dbsc-soft-sw.js` + `dbsc-soft-client.js` for browsers with no native support — a WebCrypto key in IndexedDB driving the same routes, refreshed from a Service Worker `fetch` hook. Off by default; see [Soft DBSC](#soft-dbsc-the-fallback-for-browsers-without-native-support) |
+| Soft DBSC fallback | ✅ `dbsc-soft-sw.js` + `dbsc-soft-client.js` for browsers with no native support — a WebCrypto key in IndexedDB driving the same routes, refreshed from a Service Worker `fetch` hook. **On by default** (`dbsc.soft.enabled`); see [Soft DBSC](#soft-dbsc-the-fallback-for-browsers-without-native-support) |
 
 ## The protection model
 
