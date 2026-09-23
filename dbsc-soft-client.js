@@ -37,7 +37,12 @@ const DB_NAME = "dbsc-client";
 const STORE = "keys";
 const KEY_ID = "device-key";
 
-/** The server's routes. Mirrors dbsc.registration-path / refresh-path / bind-path. */
+/**
+ * The server's routes. Mirrors dbsc.registration-path / refresh-path / bind-path.
+ *
+ * EDIT THIS BY HAND if your paths differ from the defaults -- like the worker's
+ * BINDING_COOKIE_TTL_MS, this file is served verbatim and nothing rewrites it.
+ */
 const CONFIG = {
     bindPath: "/dbsc/bind",
     refreshPath: "/dbsc/refresh"

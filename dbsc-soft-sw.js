@@ -49,6 +49,11 @@ importScripts("/dbsc-soft-client.js");
  * to match the server. Too long is the failure to watch for: the cookie lapses
  * between refreshes, the tier drops to `none`, and every guarded route starts
  * refusing a client that looks otherwise healthy.
+ *
+ * EDIT THIS BY HAND when you deploy. This file is served verbatim -- there is no
+ * build step and no template -- so the value below is what the browser runs. The
+ * README's "Telling it how long the cookie lives" says the same thing at more
+ * length.
  */
 const BINDING_COOKIE_TTL_MS = 180_000;
 
@@ -62,6 +67,12 @@ const REFRESH_MARGIN_MS = 5_000;
  * *calls*: intercepting it would have the refresh trigger itself, and the second
  * pass would find the record still stale and recurse. One level of that is enough to
  * deadlock a session.
+ *
+ * EDIT THIS BY HAND to match your deployment: the protocol prefixes have to follow
+ * `dbsc.registration-path` / `refresh-path` / `bind-path` if they are not the
+ * defaults, and `/login` is here only because this client ships with a form-login
+ * demo -- your own login path belongs in its place. See the README's "What the
+ * worker will not touch".
  */
 const BYPASS_PREFIXES = ["/dbsc/", "/.well-known/device-bound-sessions", "/login"];
 

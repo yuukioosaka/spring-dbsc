@@ -1450,6 +1450,20 @@ That is the whole integration: skip on native browsers, register the worker, wai
 controlling the page, hand it the CSRF token, and ask it to bind. From then on the
 worker looks after the session on its own.
 
+**Both files are configuration-by-editing.** They are served verbatim — no build step,
+no template substitution, no config endpoint — so the values a deployment has to get
+right are the constants at the top of each file, and editing them is the intended
+mechanism rather than a workaround. Three constants need your attention:
+
+| Where | What to change |
+|---|---|
+| `dbsc-soft-sw.js` | `BINDING_COOKIE_TTL_MS` must equal `dbsc.binding-cookie-ttl` — see [Telling it how long the cookie lives](#telling-it-how-long-the-cookie-lives) |
+| `dbsc-soft-sw.js` | `BYPASS_PREFIXES` must follow your `registration-path` / `refresh-path` / `bind-path`, and `/login` is the demo's path — see [What the worker will not touch](#what-the-worker-will-not-touch) |
+| `dbsc-soft-client.js` | `CONFIG.bindPath` / `refreshPath`, the same paths again |
+
+Each of those is marked with an `EDIT THIS BY HAND` comment at the point of edit, so
+the instruction travels with the file and not only with this README.
+
 #### The Soft DBSC workflow
 
 This is the part that has no native equivalent. A native browser runs the protocol
@@ -1684,6 +1698,13 @@ Set it to `dbsc.binding-cookie-ttl`. Too long is the failure to watch for — th
 lapses between refreshes, the session demotes to `tier: none`, and every guarded route
 starts refusing a client that looks otherwise healthy.
 
+**Edit the file to do this.** `dbsc-soft-sw.js` and `dbsc-soft-client.js` are served
+verbatim: there is no build step, no template and no config route behind them, so the
+constant is the configuration. The same applies to the route paths in the client's
+`CONFIG` and to `BYPASS_PREFIXES` below — see
+[What the worker will not touch](#what-the-worker-will-not-touch). Both files carry the
+same instruction at the point of edit, so a deployer editing one finds it.
+
 The worker tracks the last exchange the server answered and compares against that
 figure, so a request arriving a second after a refresh does not trigger another. That
 matters: the `fetch` hook runs on *every* same-origin request, and without the check
@@ -1691,11 +1712,35 @@ every page load would cost a refresh round trip.
 
 #### What the worker will not touch
 
-Three prefixes are passed straight through, because intercepting them would be wrong:
-`/dbsc/` (the refresh route is what the worker *calls* — intercepting it would have the
-refresh trigger itself), `/.well-known/device-bound-sessions`, and `/login`. A failed
-refresh never fails the request either: the server is about to answer that request
-anyway, and it is the authority on whether the session is still good.
+These three prefixes are passed straight through, as a prefix test on the path:
+
+```js
+const BYPASS_PREFIXES = ["/dbsc/", "/.well-known/device-bound-sessions", "/login"];
+```
+
+- **`/dbsc/`** — the refresh route is what the worker *calls*. Intercepting it would
+have the refresh trigger itself, and the second pass would find the record still stale
+and recurse. One level of that is enough to deadlock a session.
+- **`/.well-known/device-bound-sessions`** — the well-known document, which the worker
+has no reason to gate.
+- **`/login`** — the demo's form-login path. Intercepting a login navigation serves no
+purpose, but **this one is app-specific**: if your login lives elsewhere, change it.
+
+**Edit this array by hand to match your deployment.** It is a static file, so nothing
+rewrites it, and two of the three entries can drift from your own configuration:
+
+- The protocol prefix must follow `dbsc.registration-path` / `refresh-path` /
+`bind-path`. If you move those off `/dbsc`, this array has to move with them — and so
+does the client's `CONFIG`, which mirrors the same three paths.
+- `/login` is only the demo's choice. Replace it with your own login path, or drop it
+if refresh-on-login is harmless for you.
+
+Getting this wrong fails quietly in the direction that matters: a **missing** prefix
+means the worker intercepts a route it drives itself, and the recursion above is the
+result. An extra prefix only costs a missed proactive refresh.
+
+A failed refresh never fails the request either: the server is about to answer that
+request anyway, and it is the authority on whether the session is still good.
 
 #### It declines to run on browsers that should register natively
 
