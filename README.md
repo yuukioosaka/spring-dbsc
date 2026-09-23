@@ -531,14 +531,14 @@ sequenceDiagram
     U->>S: POST /login  (your own authentication)
     Note over S: authenticate() - DBSC does not do this
     S->>S: bind(sessionId, JSESSIONID, userId)<br/>tier none, expires_at = now + dbsc.session-ttl
-    S-->>B: Set-Cookie: JSESSIONID (yours)<br/>Set-Cookie: __Host-auth_cookie = ticket<br/>Secure-Session-Registration: (ES256);path=/dbsc/regist/&lt;token&gt;;challenge="jti"
+    S-->>B: Set-Cookie JSESSIONID, yours<br/>Set-Cookie the credential cookie, value is a ticket<br/>Secure-Session-Registration with path and challenge
     Note over B: generates the key pair in the TPM
-    B->>S: POST /dbsc/regist/&lt;token&gt;  (JWK + JWS over the jti)
-    S->>S: verify JWS, check jti, reject a second registration,<br/>consume the token, store the key
-    S-->>B: 200 JSON session_config<br/>session_identifier = your sessionId<br/>tier none -> dbsc
+    B->>S: POST the registration path<br/>JWK plus a JWS over the challenge jti
+    S->>S: verify the JWS, check the jti,<br/>reject a second registration,<br/>consume the path token, store the key
+    S-->>B: 200 JSON session_config<br/>session_identifier is your sessionId<br/>tier moves none to dbsc
 ```
 
-The three additions, all in the mermaid notes:
+Three things are additions on top of the spec:
 
 - **The session id is the caller's to mint.** `UUID.randomUUID()` is a fine choice. It is
 *not* `JSESSIONID` and never appears in a cookie.
@@ -616,10 +616,10 @@ sequenceDiagram
     participant B as Real browser
     participant S as Your app + DBSC
 
-    Note over A: stole __Host-auth_cookie
+    Note over A: stole the credential cookie
     A->>S: POST /dbsc/refresh with the stolen ticket
     S->>S: the ticket still resolves (inside the grace)<br/>but the proof cannot be signed
-    S->>S: demoteOnFailure(): tier -> none,<br/>consume the challenge
+    S->>S: demoteOnFailure - tier becomes none,<br/>and the challenge is consumed
     S-->>A: 403 SIGNATURE_INVALID
     Note over S: the device key is KEPT, so the next<br/>failure is reported as session_stolen
 
@@ -647,10 +647,10 @@ sequenceDiagram
     participant S as Your app + DBSC
 
     B->>S: POST /logout  (your own logout route)
-    S->>S: terminate(sessionId): revokeSession()<br/>-> UPDATE ... SET revoked = true (not DELETE)
-    S-->>B: Set-Cookie: __Host-auth_cookie deleted (Max-Age=0)<br/>JSON session_config with "continue": false
+    S->>S: terminate(sessionId) - revokeSession(),<br/>UPDATE SET revoked = true, not DELETE
+    S-->>B: Set-Cookie deletes the credential cookie<br/>JSON session_config with continue false
     Note over B: forgets the binding on the agent's side
-    Note over S: the revoked record stays, so a later request<br/>still carrying JSESSIONID is recognised as<br/>"was bound" rather than a first-time visitor
+    Note over S: the revoked record stays, so a later request<br/>still carrying JSESSIONID is recognised as<br/>having been bound, not as a first-time visitor
 ```
 
 `"continue": false` in the config is what tells the browser to forget the binding
