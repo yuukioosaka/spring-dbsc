@@ -8,7 +8,6 @@ import click.yukio.dbsc.core.StorageAdapter;
 import click.yukio.dbsc.protocol.ChallengeService;
 import click.yukio.dbsc.protocol.CookieScope;
 import click.yukio.dbsc.protocol.DbscProtocolEngine;
-import click.yukio.dbsc.ratelimit.RateLimiter;
 import click.yukio.dbsc.storage.InMemoryStorageAdapter;
 import click.yukio.dbsc.telemetry.DbscTelemetryEvent;
 import click.yukio.dbsc.telemetry.TelemetryPublisher;
@@ -79,7 +78,7 @@ class GuardDecisionTest {
         cookieScope = CookieScope.resolve(
                 false, CookieScope.Scope.HOST, null, "__Host-auth_cookie");
         dbsc = new DbscService(properties, storage, challenges, engine, cookieScope,
-                RateLimiter.UNLIMITED, clock, false);
+                clock, false);
 
         // The guard resolves the credential cookie through the ticket table, so the ticket
         // the tests present has to exist. A long TTL keeps it out of the way: these tests

@@ -19,23 +19,6 @@ this script about it:
 
 Without DBSC_CHALLENGE_TTL those checks are reported as skipped, not failed.
 
-RATE_LIMITED needs a third thing: the demo raises its rate-limit budgets to 1000 so
-this suite's own deliberate failures do not throttle it, which makes the 429 branch
-unreachable there. Start a second instance with a small failure budget, and drive it
-with repeated rejected *registrations*:
-
-    mvn -Pdemo -Dmaven.repo.local=.m2repo \
-        -Dspring-boot.run.arguments="--server.port=9443 \
-            --spring.datasource.url=jdbc:h2:file:./data/e2e-ratelimit" \
-        -Dspring-boot.run.jvmArguments="-Ddbsc.rate-limit.failure-capacity=5" \
-        spring-boot:run
-    DBSC_RATE_LIMIT_FAILURES=5 python3 scripts/e2e.py
-
-That instance's window is 90s, and because the limiter keeps its counters for a
-whole window against a key derived from the client IP, a previous run -- or an
-earlier section -- can leave it already throttled. The suite probes for that, waits
-the window out when needed, and only then measures; it never skips for it.
-
 Requires `cryptography` (EC keygen + ES256 signing).
 
 SESSION/TICKET ROTATION needs a fourth instance, only because the rotation grace has
@@ -63,25 +46,14 @@ SKIP = []
 # waiting out a 5-minute default is not a practical test.
 CHALLENGE_TTL_S = float(os.environ.get("DBSC_CHALLENGE_TTL") or 0) or None
 
-# The demo sets capacity/failure-capacity to 1000 so the suite's own negative cases
-# (bad signatures, replayed challenges) do not throttle it. That makes RATE_LIMITED
-# unreachable against it, so those checks need a second instance started with a
-# deliberately tiny budget; this is its registration failure budget. Absent means
-# the checks are reported as skipped, the same way the TTL checks are.
-RATE_LIMIT_FAILURES = int(os.environ.get("DBSC_RATE_LIMIT_FAILURES") or 0) or None
-
-# The low-budget instance. It shares nothing with the main one: separate port,
-# separate database file, so neither can exhaust the other's counters.
-RATE_BASE = os.environ.get("DBSC_RATE_BASE") or "https://localhost:9443"
-
-# A third instance, started with dbsc.unregistered=deny. The policy is a property of
+# A second instance, started with dbsc.unregistered=deny. The policy is a property of
 # the server, not of the client, so the only way to observe both outcomes is to ask two
 # servers. The main demo runs the default (allow); section L drives the deny instance
 # and compares the two answers on the same guarded route. Absent means those checks are
-# skipped, the same way the TTL and rate-limit ones are.
+# skipped, the same way the TTL ones are.
 DENY_BASE = os.environ.get("DBSC_DENY_BASE") or ""
 
-# A fourth instance, started with -Pdemo,rotation-e2e: the only difference from the main
+# A third instance, started with -Pdemo,rotation-e2e: the only difference from the main
 # demo is dbsc.rotation-grace, shortened so the suite can outwait it. Rotation itself is
 # unconditional, so this instance is not a control -- it is the only way to observe the
 # retirement expiring without sleeping through the 60s default. Section O drives it and
@@ -431,34 +403,6 @@ def tier_of(opener):
 
 def now_ms():
     return int(time.time() * 1000)
-
-
-# The low-budget instance's dbsc.rate-limit.window. A dry run against it is the only
-# way to read it from here, and the window only matters for measurement: the checks
-# below sleep it out so their attempt counts start from a fresh budget.
-_RATE_WINDOW_RAW = os.environ.get("DBSC_RATE_LIMIT_WINDOW") or "90s"
-
-
-def p_window_seconds():
-    """The low-budget instance's rate-limit window, in seconds."""
-    m = re.fullmatch(r"(\d+)(ms|s|m|h)?", _RATE_WINDOW_RAW.strip())
-    if not m:
-        return 90
-    value = int(m.group(1))
-    return {"ms": value / 1000, "m": value * 60, "h": value * 3600}.get(m.group(2), value)
-
-
-def p_tripped(opener, jar):
-    """Whether the low-budget instance already refuses this client.
-
-    A dry registration that cannot succeed: it presents a JTI that was never issued,
-    so it is rejected whether or not the client is throttled. A 429 here means the
-    failure budget is already spent -- by an earlier run, since the limiter holds
-    its counters for a whole window -- and that is exactly the state this section
-    has to clear before it can measure anything.
-    """
-    _, status, _ = native_register_manual(opener, "n" * 43, Key(), base=RATE_BASE)
-    return status == 429
 
 
 def main():
@@ -1146,83 +1090,11 @@ def main():
     status, _, _ = request(anon, "GET", "/app/whoami")
     check("anonymous GET /app/whoami is not 200", status != 200, f"got {status}")
 
-    # ------------------------------------------------- K. RATE_LIMITED
-    print("\n-- K. a client that keeps failing is throttled --")
-    if RATE_LIMIT_FAILURES is None:
-        skip("repeated failures -> 429 RATE_LIMITED",
-             "start a second demo on " + RATE_BASE + " with a small "
-             "dbsc.rate-limit.failure-capacity and set DBSC_RATE_LIMIT_FAILURES")
-    else:
-        # A separate instance: the demo's own budgets are 1000 so that this suite's
-        # deliberate failures do not throttle it, which leaves RATE_LIMITED
-        # unreachable there. The limiter counts failures, not just requests, so a
-        # loop of rejected registrations is what trips it.
-        p_opener, p_jar = new_client()
-        # A login is what proves the instance is up and speaking the same protocol; its
-        # registration path is deliberately *not* used below. The path's token is
-        # single-use, so spending it on the first rejected attempt would turn every
-        # later attempt into REGISTRATION_TOKEN_CONSUMED, which is refused by the token
-        # check before the challenge (and therefore before the failure being counted)
-        # is ever reached. The loop only ever proves a JTI, never a real path.
-        p_status, _, _, _ = login(p_opener, p_jar, base=RATE_BASE)
-        if p_status != 302:
-            check("the low-budget demo accepts the same login", False,
-                  f"login returned {p_status}; is a second instance on {RATE_BASE}?")
-        else:
-            # The probe below is deliberately outside the loop: this section's
-            # loop must start at attempt 0 of a *fresh* window, or "it trips at
-            # the configured budget" measures a window that was already partly
-            # spent. Window lengths here are a minute or so, so starting one only
-            # costs seconds -- and waiting is not a skipped check, it is the
-            # precondition for the real one.
-            if p_tripped(p_opener, p_jar):
-                window = p_window_seconds()
-                print(f"     the rate-limit window is already spent; waiting {window}s")
-                time.sleep(window)
-            p_key = Key()
-
-            def p_register():
-                # No proof that could succeed is ever presented on this leg, so every
-                # attempt is rejected and charged to the client's failure budget.
-                # An unknown, never-consumed JTI is used rather than a replayed one,
-                # because a consumed challenge short-circuits ahead of the failure
-                # accounting entirely. The path is deliberately a *wrong* one too: it
-                # carries an unknown token, so the route reports SESSION_NOT_FOUND
-                # without the challenge ever being consulted -- which keeps every
-                # attempt a clean, countable failure.
-                _, status, text = native_register_manual(
-                    p_opener, "n" * 43, p_key, base=RATE_BASE)
-                return status, text
-
-            throttled_at = None
-            text = ""
-            for i in range(RATE_LIMIT_FAILURES + 10):
-                status, text = p_register()
-                if status == 429:
-                    throttled_at = i
-                    break
-            check("repeating a rejected registration -> 429 RATE_LIMITED",
-                  throttled_at is not None,
-                  f"never throttled in {RATE_LIMIT_FAILURES + 10} attempts; last was {status} {text[:120]}")
-            if throttled_at is not None:
-                check("the 429 body carries RATE_LIMITED, not a generic error",
-                      "RATE_LIMITED" in text, text[:160])
-                check("it trips at the configured failure budget, not before",
-                      throttled_at >= RATE_LIMIT_FAILURES - 1,
-                      f"tripped after {throttled_at} attempts, budget {RATE_LIMIT_FAILURES}")
-                # A throttled request must not be charged again, or a client that
-                # keeps retrying would push its own lockout out forever. Waiting out
-                # a whole window is the only way to observe that here, so it is done
-                # once and the check is kept cheap.
-                status2, _ = p_register()
-                check("a refused request stays refused while retried", status2 == 429,
-                      f"got {status2}")
-
     # ------------------------------------------------- L. dbsc.unregistered policy
     print("\n-- L. dbsc.unregistered decides what an unbound client gets --")
     if not DENY_BASE:
         skip("unregistered client -> 403 on a deny instance",
-             "start a third demo with -Ddbsc.unregistered=deny and set DBSC_DENY_BASE")
+             "start a second demo with -Ddbsc.unregistered=deny and set DBSC_DENY_BASE")
     else:
         # A client that logs in and then never registers: this is what a browser
         # with no DBSC support looks like, and the two policies must disagree about

@@ -12,10 +12,10 @@ import java.io.InputStream;
  *
  * <p>{@link InputStream#readAllBytes()} on an unbounded stream is a memory
  * exhaustion primitive, and the DBSC protocol routes are unauthenticated: the
- * filter reads the body before any session or rate-limit decision, so a single
- * large POST is enough to hurt the process. The container's own limits are not a
- * substitute, because the filter reads the stream directly rather than going
- * through form or JSON parsing where those limits apply.
+ * filter reads the body before any session decision, so a single large POST is
+ * enough to hurt the process. The container's own limits are not a substitute,
+ * because the filter reads the stream directly rather than going through form or
+ * JSON parsing where those limits apply.
  *
  * <p>The cap is checked against {@code Content-Length} first, so an honest client
  * that declares an oversized body is rejected without reading it, and then

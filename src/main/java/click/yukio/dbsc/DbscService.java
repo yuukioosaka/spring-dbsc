@@ -17,7 +17,6 @@ import click.yukio.dbsc.protocol.DbscHeaderCodec;
 import click.yukio.dbsc.protocol.DbscHeaders;
 import click.yukio.dbsc.protocol.DbscProtocolEngine;
 import click.yukio.dbsc.protocol.SessionConfig;
-import click.yukio.dbsc.ratelimit.RateLimiter;
 import click.yukio.dbsc.web.OriginResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,7 +48,6 @@ public class DbscService {
     private final ChallengeService challenges;
     private final DbscProtocolEngine engine;
     private final CookieScope cookieScope;
-    private final RateLimiter rateLimiter;
     private final Clock clock;
     private final boolean trustForwardedHeaders;
 
@@ -59,7 +57,6 @@ public class DbscService {
             ChallengeService challenges,
             DbscProtocolEngine engine,
             CookieScope cookieScope,
-            RateLimiter rateLimiter,
             Clock clock,
             boolean trustForwardedHeaders) {
         this.properties = properties;
@@ -67,7 +64,6 @@ public class DbscService {
         this.challenges = challenges;
         this.engine = engine;
         this.cookieScope = cookieScope;
-        this.rateLimiter = rateLimiter;
         this.clock = clock;
         this.trustForwardedHeaders = trustForwardedHeaders;
     }
@@ -229,8 +225,6 @@ public class DbscService {
      */
     public Map<String, Object> handleRegistration(
             String registrationToken, HttpServletRequest request, HttpServletResponse response) {
-        checkRegistrationRateLimit(request);
-
         String sessionId = requireSessionForToken(registrationToken);
         String responseHeader = readResponseHeader(request);
 
@@ -317,8 +311,6 @@ public class DbscService {
      * the JSON config and a fresh binding cookie.
      */
     public Map<String, Object> handleRefresh(HttpServletRequest request, HttpServletResponse response) {
-        checkRefreshRateLimit(request);
-
         // The binding cookie is gone by the time a refresh runs, so the session
         // identifier arrives in a header. The challenge is held server-side against
         // that session; the browser carries only the signed value, in the proof.
@@ -388,8 +380,10 @@ public class DbscService {
      * <p>The header is client-supplied and unauthenticated, and the value goes on to
      * name a record: without this check, a request naming any string at all would
      * persist a challenge for it. The record is small and expires, but nothing bounds
-     * the number of distinct ids — the storage contract has no eviction — so the only
-     * thing standing between the route and unbounded row creation was the rate limiter.
+     * the number of distinct ids — the storage contract has no eviction — so a client
+     * willing to spend the round trips can create rows without limit. Deployments that
+     * need that bounded should do it at the edge, where the whole unauthenticated
+     * surface can be shaped at once.
      *
      * <p>The rule is existence plus a key, which is what spec 02 step 2 makes
      * normative for a refresh ({@code KEY_NOT_FOUND_NATIVE}): a session that was never
@@ -681,82 +675,6 @@ public class DbscService {
     private void rearmChallenge(HttpServletResponse response, String sessionId) {
         Challenge challenge = challenges.issue(sessionId);
         addChallengeHeader(response, challenge.jti(), sessionId);
-    }
-
-    private void checkRegistrationRateLimit(HttpServletRequest request) {
-        if (properties.getRateLimit().isEnabled()
-                && !rateLimiter.checkRegistration(clientIp(request))) {
-            throw new DbscException(DbscErrorCode.RATE_LIMITED, "registration rate limit tripped");
-        }
-    }
-
-    /**
-     * Charges a rejected request to the client's failure budget.
-     *
-     * <p>Called by {@code DbscFilter} on every DBSC failure. Without it the
-     * failure budgets are never consulted: an attacker could present unlimited
-     * invalid proofs while staying inside the ordinary request budget, which is
-     * sized for legitimate traffic.
-     *
-     * <p>A rate-limited request is deliberately <em>not</em> charged again — it
-     * was already counted when it was refused, and charging the refusal too would
-     * extend the lockout each time the client retries.
-     */
-    public void recordRateLimitFailure(HttpServletRequest request) {
-        if (!properties.getRateLimit().isEnabled()) {
-            return;
-        }
-        rateLimiter.recordFailure(clientIp(request), resolveBinderSession(request).orElse(null));
-    }
-
-    private void checkRefreshRateLimit(HttpServletRequest request) {
-        if (properties.getRateLimit().isEnabled()
-                && !rateLimiter.checkRefresh(clientIp(request), refreshSessionKey(request))) {
-            throw new DbscException(DbscErrorCode.RATE_LIMITED, "refresh rate limit tripped");
-        }
-    }
-
-    /**
-     * The session component of the refresh rate-limit key.
-     *
-     * <p>It must match what {@link #recordRateLimitFailure} charges, or the refresh
-     * budget is never consulted: the check and the record would use different keys,
-     * and repeated failed refreshes would go unthrottled. {@link RateLimiter} keys
-     * refreshes on the session so one noisy client cannot throttle every session
-     * behind the same address, so both sides resolve it identically here.
-     *
-     * <p>A request naming no session is keyed as {@code null} on both sides, which
-     * is correct: it is unauthenticated and rate-limited per client, and the shared
-     * registration budget covers it.
-     */
-    private String refreshSessionKey(HttpServletRequest request) {
-        return resolveBinderSession(request).orElse(null);
-    }
-
-    /**
-     * The client IP used as a rate-limit key.
-     *
-     * <p>Only consulted when {@code dbsc.trust-forwarded-headers} is on. Even then
-     * the <em>last</em> hop is taken, not the first: a proxy appends the address it
-     * saw, so the last entry is the one the nearest trusted hop observed, while the
-     * first is whatever the client claimed. Taking the first entry — the common
-     * mistake — hands every request an attacker-chosen identity.
-     */
-    private String clientIp(HttpServletRequest request) {
-        if (trustForwardedHeaders) {
-            String forwarded = request.getHeader("X-Forwarded-For");
-            if (forwarded != null && !forwarded.isBlank()) {
-                String[] hops = forwarded.split(",");
-                for (int i = hops.length - 1; i >= 0; i--) {
-                    String hop = hops[i].trim();
-                    if (!hop.isEmpty()) {
-                        return hop;
-                    }
-                }
-            }
-        }
-        String remote = request.getRemoteAddr();
-        return remote == null ? "unknown" : remote;
     }
 
     // ------------------------------------------------------------------

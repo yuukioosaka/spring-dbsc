@@ -19,7 +19,6 @@ public enum DbscErrorCode {
     KEY_NOT_FOUND,
     SESSION_NOT_FOUND,
     SESSION_ALREADY_REGISTERED,
-    RATE_LIMITED,
 
     /**
      * The registration path carried a token that has already been used. Separate

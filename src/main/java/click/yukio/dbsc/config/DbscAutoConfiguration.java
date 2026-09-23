@@ -5,8 +5,6 @@ import click.yukio.dbsc.core.StorageAdapter;
 import click.yukio.dbsc.protocol.ChallengeService;
 import click.yukio.dbsc.protocol.CookieScope;
 import click.yukio.dbsc.protocol.DbscProtocolEngine;
-import click.yukio.dbsc.ratelimit.InMemoryRateLimiter;
-import click.yukio.dbsc.ratelimit.RateLimiter;
 import click.yukio.dbsc.web.OriginResolver;
 import click.yukio.dbsc.storage.InMemoryStorageAdapter;
 import click.yukio.dbsc.storage.JdbcStorageAdapter;
@@ -33,8 +31,7 @@ import java.time.Clock;
  * Wires the DBSC building blocks.
  *
  * <p>Every collaborator is replaceable: an application that already has a
- * session store can supply its own {@link StorageAdapter}, and a deployment with
- * more than one process should supply a shared {@link RateLimiter}.
+ * session store can supply its own {@link StorageAdapter}.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(DbscProperties.class)
@@ -95,18 +92,6 @@ public class DbscAutoConfiguration {
     }
 
     @Bean
-    @ConditionalOnMissingBean(RateLimiter.class)
-    public RateLimiter dbscRateLimiter(DbscProperties properties) {
-        if (!properties.getRateLimit().isEnabled()) {
-            return RateLimiter.UNLIMITED;
-        }
-        return new InMemoryRateLimiter(
-                properties.getRateLimit().getCapacity(),
-                properties.getRateLimit().getFailureCapacity(),
-                properties.getRateLimit().getWindow());
-    }
-
-    @Bean
     @ConditionalOnMissingBean(CookieScope.class)
     public CookieScope dbscCookieScope(DbscProperties properties) {
         // The other place where a bad value would otherwise only show up as a browser
@@ -134,7 +119,6 @@ public class DbscAutoConfiguration {
             ChallengeService challenges,
             DbscProtocolEngine engine,
             CookieScope cookieScope,
-            RateLimiter rateLimiter,
             Clock clock) {
         return new DbscService(
                 properties,
@@ -142,7 +126,6 @@ public class DbscAutoConfiguration {
                 challenges,
                 engine,
                 cookieScope,
-                rateLimiter,
                 clock,
                 properties.isTrustForwardedHeaders());
     }

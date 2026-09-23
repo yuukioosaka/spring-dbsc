@@ -95,19 +95,9 @@ public class DbscFilter extends OncePerRequestFilter {
         try {
             handler.handle(request, response);
         } catch (DbscException e) {
-            // Every rejected proof is charged to the client's failure budget, so a
-            // client that keeps presenting invalid proofs is throttled even when
-            // its request volume alone would stay under the limit. A request that
-            // was *itself* refused for rate limiting is exempt: it was already
-            // counted on the way in, and billing the refusal too would push the
-            // window out every time the client retries.
-            if (e.code() != DbscErrorCode.RATE_LIMITED) {
-                dbsc.recordRateLimitFailure(request);
-            }
             writeError(response, e);
         } catch (IllegalArgumentException e) {
             // A non-JSON body on a protocol route is a client bug: 400.
-            dbsc.recordRateLimitFailure(request);
             writeJson(response, HttpStatus.BAD_REQUEST, Map.of("error", "MALFORMED_JWS",
                     "message", String.valueOf(e.getMessage())));
         }
@@ -205,10 +195,7 @@ public class DbscFilter extends OncePerRequestFilter {
      * now that the routes are filters: this is the single place it happens.
      */
     private void writeError(HttpServletResponse response, DbscException e) throws IOException {
-        HttpStatus status = switch (e.code()) {
-            case RATE_LIMITED -> HttpStatus.TOO_MANY_REQUESTS;
-            default -> HttpStatus.FORBIDDEN;
-        };
+        HttpStatus status = HttpStatus.FORBIDDEN;
         log.debug("DBSC {} -> {}: {}", e.code(), status.value(), e.getMessage());
 
         Map<String, Object> body = new LinkedHashMap<>();

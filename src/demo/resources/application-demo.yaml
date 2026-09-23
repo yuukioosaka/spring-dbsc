@@ -54,18 +54,6 @@ dbsc:
   # gets right — this is here to show the key, and because the demo's whole point is
   # to read the registration response and see what each setting produced.
   scope-origin: https://localhost:8443
-  # The library default is 30 requests / 15 failures per minute, which is right for
-  # production but too tight for scripts/e2e.py: the suite performs dozens of
-  # registrations in a few seconds, and its negative cases (malformed JWTs,
-  # replayed challenges, bad signatures) are *supposed* to fail. Against the
-  # defaults the suite throttles itself and the 429s surface as unrelated
-  # failures further down. The limiter stays enabled; its behaviour is asserted in
-  # RateLimitTest, which can use exact budgets.
-  rate-limit:
-    enabled: true
-    capacity: 1000
-    failure-capacity: 1000
-    window: 1m
 
 spring:
   application:

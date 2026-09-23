@@ -24,11 +24,12 @@ public class DbscProperties {
      * Default false, and it must stay false unless a reverse proxy is known to
      * overwrite those headers.
      *
-     * <p>These drive the client IP used for rate limiting. They are trivially
-     * forgeable by anyone who can reach the application directly, and a forged IP
-     * gets a fresh rate-limit budget, which defeats the limiter entirely. It is
-     * therefore separate from {@link #secure}: terminating TLS with {@code secure} on
-     * does not imply that a trusted proxy is stripping inbound forwarding headers.
+     * <p>These drive the {@code scope.origin} written into the JSON config, and the
+     * origin reported when a session is terminated. They are trivially forgeable by
+     * anyone who can reach the application directly, and a forged origin is handed
+     * to the browser as the scope a session is bound to. It is therefore separate
+     * from {@link #secure}: terminating TLS with {@code secure} on does not imply
+     * that a trusted proxy is stripping inbound forwarding headers.
      */
     private boolean trustForwardedHeaders = false;
 
@@ -96,9 +97,6 @@ public class DbscProperties {
 
     /** Default lifetime assigned by {@code bind()} when the caller does not set one. */
     private Duration sessionTtl = Duration.ofDays(7);
-
-    /** Rate limiting for the unauthenticated registration/refresh surface. */
-    private RateLimit rateLimit = new RateLimit();
 
     /** How the guard treats a request from a client with no DBSC binding at all. */
     private Unregistered unregistered = Unregistered.ALLOW;
@@ -241,60 +239,6 @@ public class DbscProperties {
         DENY
     }
 
-    /**
-     * Rate limiting is a SHOULD, not a MUST: the spec leaves the algorithm out of
-     * scope. Enabled by default so a public deployment is not trivially abusable.
-     */
-    public static class RateLimit {
-        private boolean enabled = true;
-
-        /** Requests allowed per window, per client IP, for the auth endpoints. */
-        private int capacity = 30;
-
-        /**
-         * <em>Failed</em> attempts allowed per window. A client that exceeds this
-         * is throttled even while well under {@code capacity}, so an attacker
-         * guessing proofs is stopped long before legitimate request volume would
-         * stop it. Defaults to half of {@code capacity}.
-         */
-        private int failureCapacity = 15;
-
-        /** Window the capacity applies to. */
-        private Duration window = Duration.ofMinutes(1);
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public int getCapacity() {
-            return capacity;
-        }
-
-        public void setCapacity(int capacity) {
-            this.capacity = capacity;
-        }
-
-        public int getFailureCapacity() {
-            return failureCapacity;
-        }
-
-        public void setFailureCapacity(int failureCapacity) {
-            this.failureCapacity = failureCapacity;
-        }
-
-        public Duration getWindow() {
-            return window;
-        }
-
-        public void setWindow(Duration window) {
-            this.window = window;
-        }
-    }
-
     public boolean isSecure() {
         return secure;
     }
@@ -389,14 +333,6 @@ public class DbscProperties {
 
     public void setSessionTtl(Duration sessionTtl) {
         this.sessionTtl = sessionTtl;
-    }
-
-    public RateLimit getRateLimit() {
-        return rateLimit;
-    }
-
-    public void setRateLimit(RateLimit rateLimit) {
-        this.rateLimit = rateLimit;
     }
 
     public Unregistered getUnregistered() {

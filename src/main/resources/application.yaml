@@ -55,14 +55,6 @@ dbsc:
   # "deny" makes DBSC a requirement and locks out every unsupported browser, so
   # only set it when the client population is known to be capable.
   unregistered: allow
-  # Two budgets per client: total requests, and failed attempts. The failure
-  # budget is what stops an attacker grinding challenges, since it trips long
-  # before ordinary request volume would.
-  rate-limit:
-    enabled: true
-    capacity: 30
-    failure-capacity: 15
-    window: 1m
 
   # Which URLs the session covers, written into the JSON config as
   # scope.scope_specification (spec 9.7, 9.8). These are instructions to the browser,

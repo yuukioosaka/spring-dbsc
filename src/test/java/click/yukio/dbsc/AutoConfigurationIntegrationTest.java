@@ -37,8 +37,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
  *
  * <p>The host app below declares no DBSC beans, no database, and no XML — the
  * only DBSC-specific line in it is {@code dbsc.bind(...)}. Everything else
- * (storage, challenge service, engine, cookie scope, rate limiter) has to arrive
- * from {@link DbscAutoConfiguration}. If a future change adds a required
+ * (storage, challenge service, engine, cookie scope) has to arrive from
+ * {@link DbscAutoConfiguration}. If a future change adds a required
  * collaborator without a default, this test fails, which is the point.
  */
 @SpringBootTest(

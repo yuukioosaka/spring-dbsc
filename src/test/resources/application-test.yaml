@@ -9,8 +9,6 @@ dbsc:
   # Deliberately different from the session cookie name, so the tests prove the
   # two names in the JSON config are independent.
   credential-cookie-name: __Host-auth_cookie
-  rate-limit:
-    enabled: false
 
 spring:
   datasource:

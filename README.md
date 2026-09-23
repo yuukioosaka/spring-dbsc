@@ -29,7 +29,6 @@ and the theft is reported as `session_stolen`.
 | Tier model + demotion-on-failure | ✅ `dbsc` / `none` |
 | Route guard | ✅ opt-in per route; refuses anything not currently `dbsc`, and a bound session that omits its DBSC cookies |
 | Telemetry events | ✅ 7 event types |
-| Rate limiting | ✅ per-IP, with a separate failure budget |
 | Credential rotation on refresh | ✅ always on; bounds how long a captured credential cookie is worth |
 | Session scope rules | ✅ `scope.scope_specification` — include/exclude by domain and path |
 | Refresh-initiator allow-list | ✅ `allowed_refresh_initiators`, closing the out-of-scope timing side channel |
@@ -484,7 +483,6 @@ bean, so defining your own replaces the default. The ones most worth replacing:
 | Bean | Default | Replace when |
 |---|---|---|
 | `StorageAdapter` | JDBC when a `DataSource` is present, else in-memory | You already have a key/session store — implement the interface. The hard requirements are an **atomic** `consumeChallenge`, and `getSessionByAppSessionId` honouring the one-binding-per-application-session rule (the guard relies on it to spot an omitted cookie) |
-| `RateLimiter` | In-memory, per-IP | You run more than one process (the in-memory limiter is per-JVM) — or you use a gateway/bucket you already have |
 | `CookieScope` | Resolved from `secure` / `cookie-scope` / `cookie-domain` | You build cookie names or attributes yourself |
 | `ChallengeService`, `DbscProtocolEngine`, `TelemetryPublisher` | Library defaults | You need different challenge or telemetry behaviour |
 | `Clock` | `Clock.systemUTC()` | You need to freeze time. Override the bean **named `dbscClock`** (`@ConditionalOnMissingBean(name = "dbscClock")`) |
@@ -697,12 +695,8 @@ All keys are prefixed `dbsc`. Defaults match the toolkit spec.
 | `scope-origin` | *derived from the request* | pins `scope.origin`. Set only when the derived value is wrong — a proxy rewriting the host to an internal name. Validated at startup; a wrong value makes Chromium discard the session while the server still answers 200 |
 | `scope-specifications` | `[]` | rules written into `scope.scope_specification`. See [Session scope](#session-scope) |
 | `allowed-refresh-initiators` | `[]` | hosts outside the scope that may still trigger a refresh. Empty means none — see [Session scope](#session-scope) |
-| `rate-limit.enabled` | `true` | |
-| `rate-limit.capacity` | `30` | per IP, per window |
-| `rate-limit.failure-capacity` | `15` | **failed** attempts per IP, per window — trips long before `capacity` does |
-| `rate-limit.window` | `1m` | |
 | `storage` | `jdbc` when a `DataSource` is present | `memory` for tests and local dev only; `redis` for a host already running Redis/Valkey with no `DataSource` |
-| `trust-forwarded-headers` | `false` | believe `X-Forwarded-For` / `X-Forwarded-Proto`. Leave off unless a reverse proxy is known to overwrite them — they drive the IP used for rate limiting |
+| `trust-forwarded-headers` | `false` | believe `X-Forwarded-For` / `X-Forwarded-Proto`. Leave off unless a reverse proxy is known to overwrite them — they drive the `scope.origin` written into the JSON config |
 
 ### Credential rotation
 
@@ -1065,7 +1059,7 @@ extend this:
 
 - **Never 401 on the refresh route.** Chromium ignores 401 there and the
   session silently dies. Every DBSC failure is 403, except a structurally incomplete
-  request (400) and a tripped rate limit (429).
+  request (400).
 - **A failed refresh signature must consume the challenge and demote to
   `none`.** That demotion is the actual theft response, not a side effect.
 - **`200` with no JSON body on a protocol route means opt-out**, and the browser
