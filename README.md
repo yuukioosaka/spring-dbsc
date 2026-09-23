@@ -528,17 +528,27 @@ sequenceDiagram
     participant U as User
     participant B as Browser (TPM-backed)
     participant S as Your app + DBSC
+    participant D as DataSource
 
     U->>B: presents credentials
-    B->>S: POST /login
+    B->>S: GET /login
+    Note over S: the container starts a session,<br/>DBSC is not involved yet
+    S-->>B: Set-Cookie JSESSIONID<br/>(the servlet container, not DBSC)
+    U->>B: submits the form
+    B->>S: POST /login (JSESSIONID attached)
     Note over S: authenticate() - DBSC does not authenticate
     S->>S: bind(sessionId, JSESSIONID, userId)<br/>tier none, expires_at = now + dbsc.session-ttl
-    S-->>B: response header Secure-Session-Registration<br/>(algorithm, path, challenge)
-    S-->>B: response header Secure-Session-Challenge<br/>(the jti the browser must sign)
-    S-->>B: cookie JSESSIONID, set by the container<br/>cookie credential, value is a ticket
+    S->>D: MERGE dbsc_sessions<br/>(tier none, expires_at)
+    S->>D: MERGE dbsc_challenges (the jti)<br/>MERGE dbsc_registration_tokens (the path token)
+    S-->>B: header Secure-Session-Registration<br/>(ES256, /dbsc/regist/token, challenge)
+    S-->>B: header Secure-Session-Challenge (the jti)
     Note over B: generates the key pair in the TPM
-    B->>S: POST the registration path<br/>JWK plus a JWS over the challenge jti
-    S->>S: verify the JWS, check the jti,<br/>reject a second registration,<br/>consume the path token, store the key
+    B->>S: POST /dbsc/regist/token<br/>JWK plus a JWS over the challenge jti
+    S->>D: consumeRegistrationToken(token)<br/>consumeChallenge(jti)
+    S->>S: verify the JWS, reject a second registration
+    S->>D: MERGE dbsc_device_keys (the public JWK)<br/>UPDATE dbsc_sessions tier = dbsc
+    S->>D: MERGE dbsc_credential_tickets (the ticket)
+    S-->>B: Set-Cookie auth_cookie=ticket<br/>the first time this cookie exists
     S-->>B: 200 JSON session_config<br/>session_identifier is your sessionId<br/>tier moves none to dbsc
 ```
 
@@ -554,9 +564,28 @@ session, which is the value we are trying to keep off the wire.
 (spec §9.6 is explicit). Chromium keys its session store on it, so it is the browser's
 handle — while the *credential* cookie is a separate, rotating ticket.
 
+(The `DataSource` lane shows the JDBC adapter's tables and H2 `MERGE` syntax — the
+`dbsc_*` names created in `JdbcStorageAdapter.initialize()`. Under `storage: redis` or
+`in-memory` the same records live elsewhere and no SQL appears.)
+
 Note that **`bind()` alone protects nothing**: the session is created at tier `none` and
 only reaches `dbsc` when the registration POST verifies. See
 [When the tier moves](#when-the-tier-moves).
+
+**`JSESSIONID` is there before DBSC is.** The container sets it on the first page load:
+`GET /login` creates a session before anything is authenticated, which is where Spring
+Security keeps the CSRF token. That is the only `Set-Cookie` on the login exchange — the
+container does not rotate the session id on login, and DBSC neither sets nor reads it.
+
+**The credential cookie is not set at login.** `bind()` advertises the registration
+header, the challenge, and the registration path, but the ticket cookie the binding
+protects — `__Host-auth_cookie` by default, named in `credentials[].name` — is first
+written on the **registration response**, once the JWKS signature has verified. Until then
+the browser holds only `JSESSIONID`, which the container sets and DBSC never touches.
+This is deliberate: a ticket minted before the device proved it holds the private key
+would name a session no key is bound to yet. (The diagram writes the cookie as
+`auth_cookie`; the configured name is `__Host-auth_cookie`, shown in full here because
+mermaid cannot lex a leading double underscore.)
 
 #### Phase 2: steady state — a rotating ticket, and a clock on it
 
@@ -569,15 +598,20 @@ sequenceDiagram
     autonumber
     participant B as Browser
     participant S as Your app + DBSC
+    participant D as DataSource
 
     B->>S: normal request, credential cookie attached
+    S->>D: SELECT dbsc_credential_tickets WHERE ticket = ?<br/>then SELECT dbsc_sessions WHERE id = ?
     S->>S: resolveBinderSession(): ticket -> session,<br/>then guardDecision()
     S-->>B: normal response
 
     Note over B: credential looks stale, or a request<br/>came back with an expired one
     B->>S: POST /dbsc/refresh  (proof over the challenge)
+    S->>D: SELECT dbsc_device_keys, GET dbsc_challenges
     S->>S: verify signature, then requireUnexpired(sessionId)
+    S->>D: UPDATE dbsc_challenges consumed = true
     S->>S: rotateAfterRefresh(): mint a NEW ticket,<br/>retire the old one until the grace window ends
+    S->>D: MERGE dbsc_credential_tickets (new ticket)<br/>UPDATE dbsc_sessions tier + last_refresh_at
     S-->>B: 200 JSON session_config + Set-Cookie: new ticket
 ```
 
@@ -595,11 +629,13 @@ sequenceDiagram
     autonumber
     participant B as Browser
     participant S as Your app + DBSC
+    participant D as DataSource
 
     B->>S: POST /dbsc/refresh  (valid proof, session past its deadline)
+    S->>D: SELECT dbsc_sessions WHERE id = ?
     S->>S: requireUnexpired(sessionId) - BEFORE the key lookup
     S-->>B: 403 SESSION_NOT_FOUND
-    Note over S: the record is NOT rewritten
+    Note over D: no write at all - the record is NOT rewritten
     Note over B,S: /app/whoami now reports tier none,<br/>the guard denies with Reason.LAPSED
 ```
 
@@ -619,13 +655,16 @@ sequenceDiagram
     actor A as Attacker (stole the cookie)
     participant B as Real browser
     participant S as Your app + DBSC
+    participant D as DataSource
 
     Note over A: stole the credential cookie
     A->>S: POST /dbsc/refresh with the stolen ticket
+    S->>D: SELECT dbsc_credential_tickets, dbsc_sessions,<br/>dbsc_device_keys
     S->>S: the ticket still resolves (inside the grace)<br/>but the proof cannot be signed
-    S->>S: demoteOnFailure - tier becomes none,<br/>and the challenge is consumed
+    S->>D: UPDATE dbsc_challenges consumed = true<br/>UPDATE dbsc_sessions tier = none
+    S->>S: demoteOnFailure
     S-->>A: 403 SIGNATURE_INVALID
-    Note over S: the device key is KEPT, so the next<br/>failure is reported as session_stolen
+    Note over D: dbsc_device_keys is KEPT, so the next<br/>failure is reported as session_stolen
 
     B->>S: its own next refresh
     S-->>B: 403 - the session is now tier none
@@ -649,12 +688,14 @@ sequenceDiagram
     autonumber
     participant B as Browser
     participant S as Your app + DBSC
+    participant D as DataSource
 
     B->>S: POST /logout  (your own logout route)
-    S->>S: terminate(sessionId) - revokeSession(),<br/>UPDATE SET revoked = true, not DELETE
+    S->>S: terminate(sessionId)
+    S->>D: UPDATE dbsc_sessions SET revoked = true<br/>not DELETE - the row stays as a tombstone
     S-->>B: Set-Cookie deletes the credential cookie<br/>JSON session_config with continue false
     Note over B: forgets the binding on the agent's side
-    Note over S: the revoked record stays, so a later request<br/>still carrying JSESSIONID is recognised as<br/>having been bound, not as a first-time visitor
+    Note over D: the revoked record stays, so a later request<br/>still carrying JSESSIONID is recognised as<br/>having been bound, not as a first-time visitor
 ```
 
 `"continue": false` in the config is what tells the browser to forget the binding
@@ -852,12 +893,22 @@ session id alongside it. The id is never handed to the browser, so `sessionFor(r
 is the way to read it back rather than any cookie value.
 
 **`bind()` is the only thing that starts a binding.** It persists the session record,
-mints a single-use registration token, stores a challenge and sets the credential cookie,
-and adds `Secure-Session-Registration` naming `/dbsc/regist/<token>` plus a
+mints a single-use registration token, stores a challenge and adds
+`Secure-Session-Registration` naming `/dbsc/regist/<token>` plus a
 `Secure-Session-Challenge` header carrying the JTI to sign; Chromium then calls that
 route on its own within about a second, with no client code to write. `DbscFilter` never
 adds that header to your application's own responses, so a login flow that never calls
 `bind()` produces no binding at all.
+
+There are three cookie lines and a repeated-header rule, and the two are easy to
+conflate:
+
+- **`Set-Cookie` repeats.** One response can carry `JSESSIONID` (the container) and the
+credential cookie (this library) as two separate `Set-Cookie` headers, so read
+*all* of them rather than the last. A dict that keeps one per name will show only one.
+- **The credential cookie is set on the registration response, not by `bind()`.** Up to
+and including the login response, the only cookie on the wire is `JSESSIONID`. The
+ticket is written once the JWKS signature verifies.
 
 **The lifetime is configuration, not an argument.** `bind()` stamps
 `expiresAt = now + dbsc.session-ttl`, and that deadline is **absolute**: a successful
@@ -1417,6 +1468,7 @@ sequenceDiagram
     participant P as Page
     participant W as Service Worker
     participant S as Server
+    participant D as DataSource
 
     Note over P: logged in, session bound via bind()
     P->>P: expectsNativeDbsc()?
@@ -1425,13 +1477,16 @@ sequenceDiagram
     P->>W: postMessage {type:'bind', csrfToken, csrfHeader}
     W->>W: setCsrfToken(token, header)
     W->>S: POST /dbsc/bind  (session from login cookie)
+    S->>D: MERGE dbsc_challenges<br/>MERGE dbsc_registration_tokens
     S-->>W: 200 + Secure-Session-Registration,
     S-->>W: Secure-Session-Challenge
     Note over W: parse path + jti from the headers
     W->>W: generateKey(ECDSA P-256, extractable=false)
     W->>S: POST to the registration path
     W->>S: Secure-Session-Response: JWS over jti
-    S->>S: spend token, verify proof, store public JWK
+    S->>D: consumeRegistrationToken + consumeChallenge
+    S->>S: verify proof
+    S->>D: MERGE dbsc_device_keys (public JWK)<br/>UPDATE dbsc_sessions tier = dbsc<br/>MERGE dbsc_credential_tickets
     S-->>W: 200 session_config + Set-Cookie auth_cookie
     W->>W: IndexedDB putRecord {sessionId, privateKey, refreshedAt}
     W-->>P: {phase: 'registered'}
@@ -1464,16 +1519,21 @@ sequenceDiagram
     participant B as Browser
     participant W as Service Worker
     participant S as Server
+    participant D as DataSource
 
     B->>W: fetch (any same-origin GET/POST)
     Note over W: isSessionRequest()?<br/>skip /dbsc/, /.well-known/, /login
     W->>W: refreshIfStale(intervalMs, marginMs)
     Note over W: now - refreshedAt < interval - margin?<br/>yes -> just fetch(request), no network
     W->>S: POST /dbsc/refresh  (X-Session-Id, no proof)
+    S->>S: requireBoundSession(sessionId)
+    S->>D: MERGE dbsc_challenges (the new jti)
     S-->>W: 403 + Secure-Session-Challenge
     W->>W: sign jti with the stored private key
     W->>S: POST /dbsc/refresh + Secure-Session-Response
-    S->>S: verify proof, rotate the credential ticket
+    S->>D: SELECT dbsc_device_keys, dbsc_challenges<br/>UPDATE dbsc_challenges consumed = true
+    S->>S: verify proof, then rotateAfterRefresh()
+    S->>D: MERGE dbsc_credential_tickets (new ticket)<br/>UPDATE dbsc_sessions tier + last_refresh_at
     S-->>W: 200 session_config + Set-Cookie (new ticket)
     W->>W: putRecord {refreshedAt: now}
     W->>S: fetch(request)  (original, now with fresh cookie)
@@ -1500,12 +1560,15 @@ sequenceDiagram
     participant B as Browser
     participant W as Service Worker
     participant S as Server
+    participant D as DataSource
 
     B->>W: fetch /app  (credential cookie already expired)
     Note over W: respondWith() -> the request is held
     W->>S: POST /dbsc/refresh  (X-Session-Id, no proof)
+    S->>D: MERGE dbsc_challenges (the new jti)
     S-->>W: 403 + Secure-Session-Challenge
     W->>S: POST /dbsc/refresh + Secure-Session-Response
+    S->>D: consumeChallenge, MERGE dbsc_credential_tickets<br/>UPDATE dbsc_sessions
     S->>S: verify proof, issue a fresh credential
     S-->>W: 200 session_config + Set-Cookie
     Note over W: only now is the original request released
@@ -1532,9 +1595,11 @@ sequenceDiagram
     autonumber
     participant P as Page
     participant S as Server
+    participant D as DataSource
 
     P->>S: POST /logout  (ordinary form submit)
-    S->>S: terminate(dbsc session id) -> revoke the record
+    S->>S: terminate(dbsc session id)
+    S->>D: UPDATE dbsc_sessions SET revoked = true
     S-->>P: Set-Cookie: auth_cookie deleted,
     S-->>P: Secure-Session-Terminate
     Note over P: browser forgets the binding,<br/>the login session ends
