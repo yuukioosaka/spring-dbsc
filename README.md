@@ -412,6 +412,119 @@ The guard is not a tier comparison, though the tier is most of it — the decisi
 covers the session that dropped its DBSC cookies, which no tier check can see. See
 [What the guard actually decides](#what-the-guard-actually-decides).
 
+### Two session ids, and which one does what
+
+This is the part of the design that surprises everyone, and the part the DBSC spec leaves
+to the deployment. **The DBSC session id is not `JSESSIONID`.** A DBSC session is your
+application's session, plus a record that says a device key is bound to it:
+
+| | Who mints it | Where it lives | Who sees it |
+|---|---|---|---|
+| **`JSESSIONID`** | the servlet container | a cookie | the container, your code, Spring Security |
+| **DBSC session id** | **you**, at `bind()` | `dbsc_sessions.id`, and the `Secure-Session-Id` / `X-Session-Id` header | DBSC only — never a cookie value |
+| **`appSessionId`** | the container | `dbsc_sessions.app_session_id` | DBSC, as the link between the two |
+
+The id is deliberately **not** a cookie value. DBSC's whole premise is that the session id
+is a value only the genuine device can present, and a cookie is precisely the thing an
+attacker who steals a session gets for free. So the id travels in a header the protocol
+reads, and `bind()` records the application's own session id *next to it* rather than
+replacing it — that column is the only reason `guardDecision` can answer "was this a
+client that never bound, or one that bound and is now hiding?" long after the cookies are
+gone.
+
+```mermaid
+flowchart TD
+    subgraph container["Your application"]
+        JS["JSESSIONID<br/>you already have this"]
+    end
+    subgraph dbsc["DBSC"]
+        ID["DBSC session id<br/>you mint it"]
+        REC["dbsc_sessions<br/>id + app_session_id + tier"]
+    end
+    LOGIN["POST /login"] --> JS
+    LOGIN --> |"bind(sessionId, JSESSIONID, userId)"| ID
+    ID --> REC
+    JS --> |"recorded alongside"| REC
+```
+
+The two are **not coupled by the library**. Nothing reconciles them when your session
+expires or your container restarts you into a new `JSESSIONID`; that is what `terminate`
+is for, and why the refresh deadline exists as the backstop.
+
+### When the tier moves
+
+The tier is not a per-request decision. It is **stored state** that moves at five specific
+moments, and the guard reads the stored value rather than recomputing it — which is what
+makes demotion-on-failure possible at all:
+
+```mermaid
+stateDiagram-v2
+    [*] --> none
+    none: none
+    dbsc: dbsc
+    none --> dbsc: browser's registration POST verifies
+    dbsc --> dbsc: every successful refresh
+    dbsc --> none: refresh signature fails (demotion)
+    none --> [*]: terminate() marks it revoked
+    dbsc --> [*]: terminate() marks it revoked
+```
+
+| # | Trigger | Transition | Where |
+|---|---|---|---|
+| 1 | `bind()` — your login route | *(no change)* starts at `none` | `DbscService.bind` |
+| 2 | The browser's `POST /dbsc/regist/<token>` verifies | `none` → `dbsc` | `DbscProtocolEngine.handleRegistration` |
+| 3 | A refresh verifies | stays `dbsc`, timestamp moves | `handleRefresh` |
+| 4 | A refresh signature fails | `dbsc` → **`none`** | `demoteOnFailure` |
+| 5 | `terminate()` on logout | `revoked`, not deleted | `DbscService.terminate` |
+
+`revoked` is a **flag beside the tier, not a tier of its own** — that is why the diagram ends
+in a terminal state rather than showing a third tier. The record is marked, never deleted:
+a later request still carrying the application's session id has to be recognisable as
+"was bound" rather than treated as a first-time visitor, or a logged-out session would
+silently fall back to cookie-only access.
+
+The move that matters is #4. Demotion-on-failure is the **security mechanism, not an error
+path**: a proof that fails to verify means the caller is not the device that registered, so
+the session drops to `none` immediately rather than after some grace period. A replayed
+cookie from another machine therefore loses the session on its first attempt. The device
+key is deliberately **kept** through the demotion — it has to survive so a later failed
+refresh can still be reported as `session_stolen`.
+
+Two consequences follow, and both are deliberate:
+
+- **`bind()` does not make a session protected.** It creates the record at tier `none`. So
+there is a window between login and registration in which the tier is `none` and the guard
+*allows* — the client is unregistered, not lapsed, and refusing it would lock out every
+browser that does not implement DBSC.
+- **The tier is a ceiling, not a guarantee.** `effectiveTier` reports `none` for a session
+that is expired or explicitly demoted even though its key is still stored. The key decides
+how high a session *can* reach; the stored tier decides whether it currently has.
+
+### The lifetime that bounds it
+
+Because the application's session and the DBSC session are separate records, DBSC could in
+principle outlive the login it came from. It does not, and `dbsc.session-ttl` is what stops
+it (`1d` by default):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant S as Server
+
+    Note over B,S: bind() stamps an absolute deadline: now + dbsc.session-ttl
+    B->>S: POST /dbsc/refresh  (valid proof, session past its deadline)
+    S->>S: requireUnexpired(sessionId) - checked BEFORE the key lookup
+    S-->>B: 403 SESSION_NOT_FOUND
+    Note over S: the record is NOT rewritten:<br/>rewriting it would extend the deadline and renew the binding
+    Note over B,S: /app/whoami now reports tier none<br/>the guard denies with Reason.LAPSED
+```
+
+The deadline is **absolute, not sliding**, so a binding cannot be renewed forever. It is
+checked before the device key is looked up, and an expired session answers with the *same
+code and the same message* as a session that never existed — otherwise the error would
+itself be an oracle for which session ids are real.
+
 ## Wiring it into your own app
 
 ### 1. Get the auto-configuration on the classpath
