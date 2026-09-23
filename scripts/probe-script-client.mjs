@@ -50,11 +50,6 @@ globalThis.indexedDB = {
             },
             close() {}
         };
-        // The probe ages a record to exercise the staleness check, which needs a
-        // handle on the same store the module under test writes to. IndexedDB has no
-        // such affordance, so the shim publishes one rather than the probe reaching
-        // into the module's internals.
-        globalThis.__dbscTestStore = db;
         req.result = db;
         queueMicrotask(() => { req.onupgradeneeded && req.onupgradeneeded(); req.onsuccess && req.onsuccess(); });
         return req;
@@ -249,18 +244,20 @@ check("refreshIfStale() is a no-op while the binding is fresh", fresh === false,
 
 // 4c. And it must fire once the record is older than the TTL, which is the whole
 // point of the fetch hook. A new binding is fresh by construction, so the probe
-// replaces the stored record with one whose `refreshedAt` is in the past -- the
-// same shape refresh() itself writes, only aged.
+// ages the stored record -- the same shape refresh() itself writes, only with a
+// `refreshedAt` in the past.
 const rec = await dbsc.getRecord();
 check("the client keeps a record of when the server last confirmed the binding",
     typeof rec.refreshedAt === "number", JSON.stringify(rec.refreshedAt));
 
-await new Promise((resolve, reject) => {
-    const tx = globalThis.__dbscTestStore.transaction();
-    tx.objectStore().put({ ...rec, refreshedAt: 0 }, "device-key");
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-});
+// AGED THROUGH THE CLIENT, NOT THROUGH THE SHIM. Writing to __dbscTestStore
+// directly was how this used to work, and it stopped being the same thing: the
+// client caches the record in memory, so a write it did not make leaves that cache
+// untouched and refreshIfStale() would still see a fresh record. The probe has to
+// drive the path the client actually reads from, which is putRecord().
+//
+// The exported set is deliberately small, so the write goes through -- see below.
+await dbsc.__probePutRecord({ ...rec, refreshedAt: 0 });
 check("refreshIfStale() refreshes a record past its TTL",
     await dbsc.refreshIfStale({ intervalMs: 180000, marginMs: 5000 }) === true,
     "a record past its TTL was not refreshed");

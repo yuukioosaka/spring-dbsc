@@ -748,5 +748,12 @@ self.DbscSoft = {
     // need them; nothing in this repository's own flows calls them from outside.
     register,
     getRecord,
-    expectsNativeDbsc
+    expectsNativeDbsc,
+
+    // Test seam, and the only one in this file. The record is cached in memory, so a
+    // probe cannot age it by writing to IndexedDB behind the client's back -- the
+    // cache would not see the change and refreshIfStale() would still read a fresh
+    // record. Reaching the store through putRecord() is the only way to age a record
+    // the client will believe, and it is also the path a real writer takes.
+    __probePutRecord: putRecord
 };
