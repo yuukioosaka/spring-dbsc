@@ -1419,8 +1419,10 @@ the repository root — so the only thing left is to load it.
 <script src="/dbsc-soft-client.js"></script>
 <script>
   // Do not start a worker on a browser that binds natively. Chromium on
-  // Windows/Android has the hardware-backed tier, and a worker there would be a
+  // Windows has the hardware-backed tier, and a worker there would be a
   // `fetch` hook on every request, for a binding that will never happen.
+  // Android is not on that list yet: native DBSC has not shipped there, so the
+  // fallback is what serves it.
   if (!DbscSoft.expectsNativeDbsc()) {
     const registration = await navigator.serviceWorker.register('/dbsc-soft-sw.js');
     await navigator.serviceWorker.ready;
@@ -1476,7 +1478,7 @@ sequenceDiagram
 
     Note over P: logged in, session bound via bind()
     P->>P: expectsNativeDbsc()?
-    Note over P: true -> stop here (Chromium on<br/>Windows/Android binds natively)
+    Note over P: true -> stop here (Chromium on Windows<br/>binds natively; Android does not yet)
     P->>W: register('/dbsc-soft-sw.js') + ready
     P->>W: postMessage {type:'bind', csrfToken, csrfHeader}
     W->>W: setCsrfToken(token, header)
@@ -1697,12 +1699,12 @@ anyway, and it is the authority on whether the session is still good.
 
 #### It declines to run on browsers that should register natively
 
-`expectsNativeDbsc()` returns true for the Chromium family on Windows and Android — the
-platforms with a hardware key facility. A false positive here would be worse than a
-false negative: it would skip the registration this client exists for, and the native
-path would not pick it up on a browser that does not really support it, leaving the
-session unbound with no error. Hence an explicit platform list rather than feature
-detection.
+`expectsNativeDbsc()` returns true for the Chromium family on Windows — the platform
+where native DBSC has shipped. **Android is deliberately excluded**: Chromium's native
+implementation is not available there yet, so treating it as native would skip the
+registration this client exists for and leave the session unbound with no error. A false
+positive here is worse than a false negative, which is why this is an explicit platform
+list rather than feature detection. Add `Android` only once the native path ships there.
 
 **The check belongs on the page, before the worker is registered.** It is not enough for
 `bindSession()` to decline later: registering the worker installs a `fetch` hook that

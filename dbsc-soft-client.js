@@ -195,7 +195,10 @@ async function signJws(privateKey, payload, jwk, typ) {
  * is the failure this guards against, so it errs toward "not native".
  *
  * There is no standard feature-detection for DBSC, so this is a UA-CH test:
- * the Chromium family on a platform with the required hardware key facility.
+ * the Chromium family on Windows, the platform where native DBSC is actually
+ * shipped. Android is deliberately excluded -- Chromium's Android
+ * implementation is not available yet, so standing down there would skip the
+ * registration this script exists for and leave the session unbound.
  * `navigator.userAgentData` is undefined in Firefox and Safari, which is the
  * first check and the one that matters most -- those are the browsers this whole
  * script exists for. User-agent strings are deliberately not used; UA-CH is the
@@ -215,7 +218,10 @@ function expectsNativeDbsc() {
     if (!isChromiumFamily) return false;
 
     const platform = navigator.userAgentData.platform; // low-entropy, sync
-    return platform === "Windows" || platform === "Android";
+    // Windows only: Chromium on Android does not implement DBSC yet, so a
+    // worker there is doing real work, not pure overhead. Add it here once the
+    // native path ships on that platform.
+    return platform === "Windows";
 }
 
 /**

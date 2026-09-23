@@ -138,9 +138,9 @@ check("no navigator.userAgentData (Firefox/Safari) -> not native",
 check("Chrome on Windows -> native",
     withUserAgentData({ brands: [{ brand: "Google Chrome", version: "145" }], platform: "Windows" },
         () => dbsc.expectsNativeDbsc() === true));
-check("Chromium on Android -> native",
+check("Chromium on Android -> NOT native (not shipped there yet)",
     withUserAgentData({ brands: [{ brand: "Chromium", version: "145" }], platform: "Android" },
-        () => dbsc.expectsNativeDbsc() === true));
+        () => dbsc.expectsNativeDbsc() === false));
 check("Edge on Windows -> native",
     withUserAgentData({ brands: [{ brand: "Microsoft Edge", version: "145" }], platform: "Windows" },
         () => dbsc.expectsNativeDbsc() === true));

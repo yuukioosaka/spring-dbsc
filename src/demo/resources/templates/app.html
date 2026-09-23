@@ -127,11 +127,13 @@
     browsers this fallback exists for. Adding type: "module" here breaks it.
 
     NOT REGISTERED AT ALL ON A BROWSER THAT SHOULD BIND NATIVELY. Chromium on
-    Windows/Android has the hardware-backed tier, so a worker here would be pure
+    Windows has the hardware-backed tier, so a worker here would be pure
     overhead: a `fetch` hook running on every request of every page, for a binding
-    that will never happen because bindSession() declines. The check below is the
-    primary one; the worker does not repeat it, and does not need to -- the decision
-    is made here, once, before anything is installed.
+    that will never happen because bindSession() declines. Android is NOT on that
+    list: Chromium's native DBSC is not available there yet, so the fallback is
+    what serves it. The check below is the primary one; the worker does not repeat
+    it, and does not need to -- the decision is made here, once, before anything
+    is installed.
 
     That is why dbsc-soft-client.js is loaded as a plain script on this page: it is
     where expectsNativeDbsc() lives, and the page has to be able to ask the question
