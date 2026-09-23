@@ -25,11 +25,23 @@ public final class Base64Url {
     }
 
     /**
-     * Decodes unpadded base64url. Java's URL decoder also accepts padded input.
+     * Decodes unpadded base64url. Padding is rejected.
      *
-     * @throws IllegalArgumentException if the input is not valid base64url
+     * <p>Java's URL decoder also accepts well-formed padded input, which would let
+     * one signature travel as several distinct wire strings. The spec is explicit
+     * that every binary value on the wire is base64url <strong>without</strong>
+     * padding, so {@code =} is refused here rather than normalised away.
+     *
+     * @throws IllegalArgumentException if the input is padded or not valid
+     *         base64url
      */
     public static byte[] decode(String value) {
+        if (value == null) {
+            throw new IllegalArgumentException("null base64url input");
+        }
+        if (value.indexOf('=') >= 0) {
+            throw new IllegalArgumentException("base64url must not be padded: " + value);
+        }
         return DECODER.decode(value);
     }
 
@@ -39,7 +51,7 @@ public final class Base64Url {
             return null;
         }
         try {
-            return DECODER.decode(value);
+            return decode(value);
         } catch (IllegalArgumentException e) {
             return null;
         }

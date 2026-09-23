@@ -94,11 +94,15 @@ public final class DbscJws {
             throw DbscException.malformedJws(
                     "expected typ=" + DBSC_TYPE + ", got " + Json.string(header, "typ"));
         }
-        DbscAlgorithm algorithm = parseAlgorithm(header);
-
+        // A refresh may not carry a key: the server already holds the registration
+        // key, and accepting a header key here would let the JWS nominate its own
+        // verification key. Checked before the algorithm is resolved so a proof that
+        // smuggles a `jwk` always fails as the protocol error it is, rather than
+        // being reclassified by whatever `alg` it declared.
         if (Json.object(header, "jwk") != null) {
             throw DbscException.malformedJws("refresh JWS must not carry a jwk header parameter");
         }
+        DbscAlgorithm algorithm = parseAlgorithm(header);
 
         String jti = requireJti(payload);
 

@@ -85,17 +85,19 @@ public final class Jwk {
     /**
      * Bit length of an RSA modulus. JWK {@code n} is unpadded base64url, so the
      * leading byte's high bits determine the true bit length.
+     *
+     * <p>An undecodable (including padded) modulus has no meaningful bit length and
+     * reports {@code 0}, which the size rule then rejects. Estimating a length from
+     * the encoded characters instead would let a malformed {@code n} pass the
+     * minimum-size check.
      */
     public static int modulusBits(String n) {
+        if (n == null) {
+            return 0;
+        }
         byte[] raw = Base64Url.tryDecode(n);
         if (raw == null) {
-            // Fall back to the encoded-length estimate so an undecodable modulus
-            // still gets a deterministic verdict rather than a crash.
-            int end = n.length();
-            while (end > 0 && n.charAt(end - 1) == '=') {
-                end--;
-            }
-            return Math.floorDiv(end * 3, 4) * 8;
+            return 0;
         }
         int firstNonZero = 0;
         while (firstNonZero < raw.length && raw[firstNonZero] == 0) {
