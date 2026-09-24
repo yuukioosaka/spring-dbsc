@@ -3,14 +3,15 @@ package click.yukio.dbsc.demo;
 import click.yukio.dbsc.DbscService;
 import click.yukio.dbsc.web.DbscBindFilter;
 import click.yukio.dbsc.web.DbscFilter;
-import click.yukio.dbsc.web.DbscGuardFilter;
-import click.yukio.dbsc.web.DbscGuardRoutes;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
+import org.springframework.security.authorization.AuthenticatedAuthorizationManager;
+import org.springframework.security.authorization.AuthorizationDecision;
+import org.springframework.security.authorization.AuthorizationManagers;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.core.userdetails.User;
@@ -23,7 +24,6 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.logout.LogoutHandler;
 import org.springframework.security.web.csrf.CsrfFilter;
-import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
@@ -102,7 +102,6 @@ public class DemoFormLoginTestConfig {
         @Bean
         @Order(1)
         SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
-                                     @Qualifier("dbscGuardFilter") DbscGuardFilter dbscGuardFilter,
                                      DbscBindFilter dbscBindFilter)
                 throws Exception {
 
@@ -125,12 +124,21 @@ public class DemoFormLoginTestConfig {
                             // are the ordinary ones, and there is nothing DBSC-specific
                             // about either.
                             .requestMatchers("/dbsc/bind").authenticated()
-                            .requestMatchers("/app/payment").authenticated()
+                            // /app/payment needs a session DBSC currently protects;
+                            // /app/whoami does not. Both are authenticated -- that is the
+                            // difference the tier makes.
+                            //
+                            // Authentication is repeated inside allOf rather than left to
+                            // `anyRequest().authenticated()` below, because this rule is
+                            // the one that matches and returns first: one rule per matcher,
+                            // both conditions, or the second condition is dead code.
+                            // RuleCompositionTest demonstrates exactly that failure.
+                            .requestMatchers("/app/payment").access(AuthorizationManagers.allOf(
+                                    AuthenticatedAuthorizationManager.authenticated(),
+                                    (authentication, context) ->
+                                            new AuthorizationDecision(
+                                                    dbsc.isProtected(context.getRequest()))))
                             .anyRequest().authenticated())
-                    // The guard, on the application chain: /app/payment needs a
-                    // session DBSC currently protects, /app/whoami does not. Both
-                    // are authenticated; that is the difference the tier makes.
-                    .addFilterBefore(dbscGuardFilter, CsrfFilter.class)
                     // The one DBSC call the application has to make, and it belongs
                     // here rather than in a separate handler class: it needs the
                     // request, the response and the authenticated principal together,
@@ -210,20 +218,6 @@ public class DemoFormLoginTestConfig {
     }
 
     /**
-     * The routes whose session must currently be DBSC-protected. Declaring none
-     * leaves the guard filter a no-op, which is the library's default: DBSC
-     * protects nothing until the application says which requests matter.
-     *
-     * <p>The pattern is what the application decides, not the library: a wider
-     * matcher does not mean a stricter application, because a client that never
-     * registered is allowed through either way ({@code dbsc.unregistered}).
-     */
-    @Bean
-    DbscGuardRoutes dbscGuardRoutes() {
-        return DbscGuardRoutes.of(new AntPathRequestMatcher("/app/payment"));
-    }
-
-    /**
      * Boot auto-registers every {@code Filter} bean as a plain servlet filter,
      * outside the security chain — which would run the filter a second time,
      * before authentication and on every path. Disabling the registration keeps
@@ -232,13 +226,6 @@ public class DemoFormLoginTestConfig {
     @Bean
     FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
         FilterRegistrationBean<DbscFilter> registration = new FilterRegistrationBean<>(filter);
-        registration.setEnabled(false);
-        return registration;
-    }
-
-    @Bean
-    FilterRegistrationBean<DbscGuardFilter> dbscGuardFilterRegistration(DbscGuardFilter filter) {
-        FilterRegistrationBean<DbscGuardFilter> registration = new FilterRegistrationBean<>(filter);
         registration.setEnabled(false);
         return registration;
     }

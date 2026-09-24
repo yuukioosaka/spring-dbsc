@@ -7,8 +7,6 @@ import click.yukio.dbsc.core.ProtectionTier;
 import click.yukio.dbsc.core.Session;
 import click.yukio.dbsc.web.DbscBindFilter;
 import click.yukio.dbsc.web.DbscFilter;
-import click.yukio.dbsc.web.DbscGuardFilter;
-import click.yukio.dbsc.web.DbscGuardRoutes;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -18,6 +16,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.authorization.AuthorizationDecision;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -96,11 +95,26 @@ public class DbscTestHostApplication {
         @Bean
         @Order(1)
         SecurityFilterChain hostApplicationChain(
-                HttpSecurity http, DbscGuardFilter dbscGuardFilter,
+                HttpSecurity http, DbscService dbsc,
                 DbscBindFilter dbscBindFilter) throws Exception {
             http
                     .securityMatcher(new AntPathRequestMatcher("/**"))
-                    .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
+                    // The tier check, as every other authorization rule is written.
+                    // /host/payment is declared here; the other host routes stay
+                    // unguarded, which is what lets a test compare a request DBSC
+                    // enforces against one it only observes.
+                    //
+                    // Deliberately no `authenticated()` alongside it: authentication is
+                    // the host's business, and HttpFlowTest asserts that an anonymous
+                    // request is admitted rather than refused, because a DBSC refusal is
+                    // a 403 and would tell a signed-out user nothing. A host that wants
+                    // both conditions must combine them in this one rule -- see
+                    // RuleCompositionTest for what happens when they are stacked instead.
+                    .authorizeHttpRequests(auth -> auth
+                            .requestMatchers(new AntPathRequestMatcher("/host/payment"))
+                            .access((authentication, context) -> new AuthorizationDecision(
+                                    dbsc.isProtected(context.getRequest())))
+                            .anyRequest().permitAll())
                     // Standard Spring Security CSRF, deliberately on, because
                     // /dbsc/bind is a state-changing application route. Nothing
                     // library-specific is involved: the route is protected by the
@@ -120,9 +134,6 @@ public class DbscTestHostApplication {
                     // an application chain that has real sessions.
                     .sessionManagement(session -> session
                             .sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
-                    // The guard sits in the application chain, not the protocol one:
-                    // it is about the host's routes. /host/payment is declared below.
-                    .addFilterBefore(dbscGuardFilter, CsrfFilter.class)
                     // The re-offer route itself, after CSRF: it terminates the
                     // request, so everything that is going to refuse it — auth and
                     // the token check — must have run already.
@@ -148,16 +159,6 @@ public class DbscTestHostApplication {
         @Bean
         CsrfTokenRepository csrfTokenRepository() {
             return new HttpSessionCsrfTokenRepository();
-        }
-
-        /**
-         * One guarded route, so the tier check has a real path to refuse. The
-         * other host routes stay unguarded, which is what lets a test compare a
-         * request that DBSC enforces against one it only observes.
-         */
-        @Bean
-        DbscGuardRoutes hostGuardRoutes() {
-            return DbscGuardRoutes.of(new AntPathRequestMatcher("/host/payment"));
         }
     }
 

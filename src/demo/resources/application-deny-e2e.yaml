@@ -24,7 +24,7 @@ spring:
 dbsc:
   # The whole point of this instance. DENY turns DBSC from an extra layer into a
   # requirement: a client that has not registered is refused on every guarded route,
-  # which locks out browsers with no DBSC support. Refusals are 403 DBSC_REQUIRED.
+  # which locks out browsers with no DBSC support. Refusals are a bare 403.
   unregistered: deny
 
 logging:

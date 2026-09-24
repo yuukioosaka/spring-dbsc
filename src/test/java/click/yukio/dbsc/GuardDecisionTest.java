@@ -15,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpSession;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -318,6 +319,50 @@ class GuardDecisionTest {
     }
 
     // ------------------------------------------------------------------
+    // isProtected: the same decision, as a boolean for an access() rule
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("isProtected agrees with guardDecision, and reads the servlet session for the app id")
+    void isProtectedAgreesWithGuardDecision() {
+        storage.setSession(session().withTierAndLastRefreshAt(ProtectionTier.DBSC, NOW_MS));
+
+        // Through the servlet session, which is where the filter reads it too. A
+        // caller that passed APP_SESSION_ID explicitly gets the same answer; a rule
+        // in authorizeHttpRequests has no way to pass it, which is why this overload
+        // exists.
+        assertTrue(dbsc.isProtected(request(credentialCookie(), APP_SESSION_ID)));
+        assertTrue(dbsc.isProtected(request(credentialCookie(), APP_SESSION_ID), APP_SESSION_ID));
+    }
+
+    @Test
+    @DisplayName("isProtected refuses a lapsed session, so an access() rule covers what the filter would")
+    void isProtectedRefusesALapsedSession() {
+        storage.setSession(session().withTierAndLastRefreshAt(ProtectionTier.NONE, NOW_MS));
+
+        assertFalse(dbsc.isProtected(request(credentialCookie(), APP_SESSION_ID), APP_SESSION_ID));
+    }
+
+    @Test
+    @DisplayName("isProtected is the bypass check too: no DBSC cookie over an existing binding is refused")
+    void isProtectedSeesTheOmittedCookieBypass() {
+        storage.setSession(session().withTierAndLastRefreshAt(ProtectionTier.DBSC, NOW_MS));
+
+        // The client controls whether the DBSC cookies are sent, so a check that
+        // only looked at the tier would let it drop them and pass.
+        assertFalse(dbsc.isProtected(request(null, APP_SESSION_ID), APP_SESSION_ID));
+    }
+
+    @Test
+    @DisplayName("isProtected allows a client that never bound anything, absent dbsc.unregistered: deny")
+    void isProtectedAllowsAFreshClient() {
+        assertTrue(dbsc.isProtected(request(null, APP_SESSION_ID), APP_SESSION_ID));
+
+        properties.setUnregistered(DbscProperties.Unregistered.DENY);
+        assertFalse(dbsc.isProtected(request(null, APP_SESSION_ID), APP_SESSION_ID));
+    }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
 
@@ -332,13 +377,25 @@ class GuardDecisionTest {
     }
 
     private GuardDecision decide(jakarta.servlet.http.Cookie credentialCookie, String appSessionId) {
+        return dbsc.guardDecision(request(credentialCookie, appSessionId), appSessionId);
+    }
+
+    /**
+     * @param appSessionId the id the servlet session carries, or {@code null} for a
+     *                     request with no session at all
+     */
+    private static MockHttpServletRequest request(
+            jakarta.servlet.http.Cookie credentialCookie, String appSessionId) {
         MockHttpServletRequest request = new MockHttpServletRequest();
         // The cookie is read off the raw Cookie header, not the servlet's parsed
         // array, so set the header the way a browser would send it.
         if (credentialCookie != null) {
             request.addHeader("Cookie", credentialCookie.getName() + "=" + credentialCookie.getValue());
         }
-        return dbsc.guardDecision(request, appSessionId);
+        if (appSessionId != null) {
+            request.setSession(new MockHttpSession(null, appSessionId));
+        }
+        return request;
     }
 
     /**

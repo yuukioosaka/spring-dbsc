@@ -69,10 +69,10 @@ const REFRESH_MARGIN_MS = 5_000;
  * deployer has not thought about is "no", not "yes". A denylist gets that backwards:
  * anything not named is swept in, and the sweep is invisible.
  *
- * KEEP THIS IN STEP WITH YOUR GUARDED ROUTES (DbscGuardRoutes). The cost of a route
- * listed here that is not guarded is a wasted refresh round trip on it; the cost of a
- * guarded route missing here is that its credential is never refreshed proactively and
- * the route starts refusing at the TTL. List what the guard protects.
+ * KEEP THIS IN STEP WITH THE ROUTES YOU GUARD. The cost of a route listed here that is
+ * not guarded is a wasted refresh round trip on it; the cost of a guarded route missing
+ * here is that its credential is never refreshed proactively and the route starts
+ * refusing at the TTL. List what your isProtected rules cover.
  */
 const PROTECTED_PREFIXES = ["/app/"];
 

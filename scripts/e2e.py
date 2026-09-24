@@ -76,8 +76,9 @@ ROTATION_GRACE_S = float(os.environ.get("DBSC_ROTATION_GRACE") or 0) or None
 TTL_BASE = os.environ.get("DBSC_TTL_BASE") or ""
 SESSION_TTL_S = float(os.environ.get("DBSC_SESSION_TTL") or 0) or None
 
-# The guarded route both instances agree on. Declared in DemoFormLoginTestConfig's
-# DbscGuardRoutes; keep this in step with src/demo/java/.../DemoFormLoginTestConfig.java.
+# The guarded route both instances agree on. Declared by the access() rule in
+# DemoFormLoginTestConfig's app chain; keep this in step with
+# src/demo/java/.../DemoFormLoginTestConfig.java.
 GUARDED_PATH = "/app/payment"
 
 
@@ -302,7 +303,7 @@ def post_bind(opener, base=None, csrf=None):
 def post_guarded(opener, base, csrf):
     """POSTs the guarded route and returns (status, body).
 
-    The route is guarded by its own DbscGuardRoutes matcher, independent of
+    The route is guarded by its own access() rule, independent of
 authentication, so this is the request whose outcome dbsc.unregistered decides.
     """
     status, _, text = request(
@@ -311,6 +312,28 @@ authentication, so this is the request whose outcome dbsc.unregistered decides.
         headers={"X-CSRF-TOKEN": csrf or "x"},
         base=base)
     return status, text
+
+
+def is_access_denial(text):
+    """Whether a 403 body is Security's entry point refusing, not a handler error.
+
+    The guard is an authorization rule now, so a refusal is an
+    AuthorizationDecision and Security renders it -- Boot's /error JSON, naming the
+    path. A handler that wrote its own refusal would emit DBSC's wire shape instead
+    (an "error" code and a "message"), which is what the protocol routes do and what
+    this route must not do: a body a client parses as protocol error would blur a
+    policy refusal with a protocol one.
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return False
+    return (isinstance(parsed, dict)
+            and "message" not in parsed
+            and parsed.get("status") == 403)
 
 
 def all_headers(headers, name):
@@ -1156,8 +1179,8 @@ def main():
             d_code, d_text = post_guarded(d_opener, DENY_BASE, d_token)
             check("unregistered client on a deny instance -> 403", d_code == 403,
                   f"got {d_code}: {d_text[:160]}")
-            check("that 403 is DBSC_REQUIRED, not a generic refusal",
-                  "DBSC_REQUIRED" in d_text, d_text[:160])
+            check("that 403 is the access() rule's refusal, not a handler error",
+                  is_access_denial(d_text), d_text[:160])
 
             # The control: the same request against the default instance is allowed.
             # Without this the check above would also pass against a guard that

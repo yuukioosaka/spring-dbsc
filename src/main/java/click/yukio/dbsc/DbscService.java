@@ -775,6 +775,58 @@ public class DbscService {
     }
 
     /**
+     * Whether this request's session is currently DBSC-protected, as a single boolean.
+     *
+     * <p>This is {@link #guardDecision} with the reason dropped, for a caller that only
+     * needs the verdict — an {@code AuthorizationManager} in an
+     * {@code authorizeHttpRequests().access(...)} rule, most often:
+     *
+     * <pre>{@code
+     * .requestMatchers("/api/**").access((auth, ctx) ->
+     *         new AuthorizationDecision(dbsc.isProtected(ctx.getRequest())))
+     * }</pre>
+     *
+     * <p>This is the only form of the guard the library ships. There is deliberately no
+     * guard <em>filter</em>: an {@code access()} rule already says where authorization
+     * applies, and a second list of matchers saying the same thing is one that can
+     * drift out of step with the first. Keeping the DBSC requirement in the same
+     * declaration as the rest of a route's rules makes that impossible.
+     *
+     * <p>The refusal carries no body: an {@code access()} rule can only say yes or no.
+     * Use {@link #guardDecision} where the reason matters — for a body, or for a
+     * response that differs by why the request was refused.
+     *
+     * <p>The application session id is read from the servlet session ({@code
+     * getSession(false)}, so none is created), and it is used for one thing: when the
+     * request carries no DBSC cookie but a binding exists for that application session,
+     * the request is refused rather than treated as a fresh client. Dropping the DBSC
+     * cookies is something the client controls, so it must not be an escape from a
+     * binding that exists.
+     *
+     * <p>A request that does carry a DBSC cookie is decided by that cookie alone: a
+     * session whose binding has lapsed is refused whether or not an application session
+     * can be resolved.
+     */
+    public boolean isProtected(HttpServletRequest request) {
+        HttpSession session = request.getSession(false);
+        return guardDecision(request, session == null ? null : session.getId()).allowed();
+    }
+
+    /**
+     * {@link #isProtected(HttpServletRequest)} for a caller that resolves the
+     * application's session id itself — a store keyed by something other than the
+     * servlet session, or an application that mints its own session identifier.
+     *
+     * <p>The id must be the same one {@code bind()} was given, because it is what ties a
+     * request that presents no DBSC cookie back to an existing binding. Passing an id
+     * from a different space silently turns every such request into a fresh client, so
+     * the {@code COOKIE_MISSING} refusal is never reached.
+     */
+    public boolean isProtected(HttpServletRequest request, String appSessionId) {
+        return guardDecision(request, appSessionId).allowed();
+    }
+
+    /**
      * Applies the {@code dbsc.unregistered} policy to a client with no binding.
      *
      * <p>Every "nothing was ever bound" branch funnels through here, so the policy

@@ -102,7 +102,7 @@ Two things are easy to assume from the name, and both are false here:
   step-up prompt rather than proof of who the caller is.
 
 DBSC is **additive**: adopting the library never silently changes the behaviour of
-an existing endpoint, because nothing is guarded until you declare `DbscGuardRoutes`,
+an existing endpoint, because nothing is guarded until you add the rule —
 and even then a client that never registered is allowed through unless you opt into
 `dbsc.unregistered: deny`.
 
@@ -147,7 +147,9 @@ Three beans arrive from `DbscFilterConfiguration`:
 |---|---|---|
 | `dbscFilter` | the protocol routes (`/dbsc/regist/**`, `/dbsc/refresh`, the well-known document) | its own protocol chain, unauthenticated |
 | `dbscBindFilter` | `POST /dbsc/bind`, only when `dbsc.soft.enabled` is on | your **application** chain, after authentication and CSRF |
-| `dbscGuardFilter` | nothing by default — the routes you declare | your application chain, next to your authorization |
+
+Guarding a route is not a bean at all — it is a line in `authorizeHttpRequests`, and
+`dbsc.isProtected` is the whole API for it. See [Act on the tier](#act-on-the-tier).
 
 Put them where their subjects live. Note the split inside the DBSC routes themselves:
 the protocol routes are the ones the *browser* drives on its own, and they must be
@@ -184,7 +186,7 @@ public class MySecurityConfig {
     /** Your application, under your own authentication and authorization. */
     @Bean
     @Order(1)
-    public SecurityFilterChain appChain(HttpSecurity http, DbscGuardFilter dbscGuardFilter,
+    public SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
                                         DbscBindFilter dbscBindFilter) throws Exception {
         http
                 .authorizeHttpRequests(auth -> auth
@@ -193,7 +195,12 @@ public class MySecurityConfig {
                         // Optional: only if you run the Soft DBSC client, which is what
                         // needs this route. See dbsc.soft.enabled.
                         .requestMatchers("/dbsc/bind").authenticated()
-                        .requestMatchers("/api/transfer").authenticated())
+                        // The DBSC requirement, declared exactly where every other
+                        // authorization rule is. isProtected() is guardDecision() as a
+                        // boolean, so the refusal is a bare 403 -- read the reason
+                        // from guardDecision() if you want a body of your own.
+                        .requestMatchers("/api/**").access((authentication, context) ->
+                                new AuthorizationDecision(dbsc.isProtected(context.getRequest()))))
                 // Ordinary Spring Security CSRF, left on. The bind route is a
                 // state-changing application route, so it gets no exemption — the same
                 // CsrfFilter that protects your other POSTs protects it.
@@ -205,24 +212,10 @@ public class MySecurityConfig {
                 .csrf(csrf -> csrf
                         .csrfTokenRepository(new HttpSessionCsrfTokenRepository())
                         .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
-                // The guard, after authentication: it answers "is this session
-                // currently DBSC-protected?", which is a question about a session
-                // that must already exist.
-                .addFilterBefore(dbscGuardFilter, CsrfFilter.class)
                 // Last: it writes its own response, so everything that could refuse the
                 // request — authentication and the token check — must have run already.
                 .addFilterAfter(dbscBindFilter, CsrfFilter.class);
         return http.build();
-    }
-
-    /**
-     * The requests whose session must currently be DBSC-protected. Patterns are
-     * ordinary Spring Security matchers, so /api/** means what it means anywhere
-     * else. Declaring no bean leaves the guard a no-op.
-     */
-    @Bean
-    public DbscGuardRoutes dbscGuardRoutes() {
-        return DbscGuardRoutes.of(new AntPathRequestMatcher("/api/**"));
     }
 }
 ```
@@ -237,14 +230,11 @@ The three details that actually matter, and how each one fails:
 | Each bean is registered in **one** chain only | `OncePerRequestFilter` records itself in a request attribute, so the same instance in a second chain silently skips it |
 | `IF_REQUIRED` sessions on the chain that holds `/dbsc/bind` — the default | `HttpSessionCsrfTokenRepository` stores the token on the session; a `STATELESS` chain has nowhere to put it, so every bind POST is refused with a bare 403 that looks like a DBSC refusal |
 
-**Declaring no `DbscGuardRoutes` guards nothing**, which is the default and the reason
+**Nothing is guarded until you write the rule**, which is the default and the reason
 adoption is safe. Note that a wide matcher is not the same as strict enforcement: a
 client that never registered is allowed through either way unless you set
 `dbsc.unregistered: deny`. That is what makes `/**`-sized coverage reasonable to
 write — see [What the guard actually decides](#what-the-guard-actually-decides).
-
-Skipping the guard entirely is also fine — see [Act on the tier](#act-on-the-tier) for
-the inline form, which is the same check without a filter.
 
 **Disable Boot's automatic servlet registration.** A `Filter` bean is picked up by the
 servlet container as well as by the security chain, which would run each filter a
@@ -253,13 +243,6 @@ second time on every request:
 ```java
 @Bean
 FilterRegistrationBean<DbscFilter> dbscFilterRegistration(DbscFilter filter) {
-    var registration = new FilterRegistrationBean<>(filter);
-    registration.setEnabled(false);
-    return registration;
-}
-
-@Bean
-FilterRegistrationBean<DbscGuardFilter> dbscGuardFilterRegistration(DbscGuardFilter filter) {
     var registration = new FilterRegistrationBean<>(filter);
     registration.setEnabled(false);
     return registration;
@@ -396,7 +379,12 @@ controllers:
 |---|---|
 | `DbscFilter` | Owns every **protocol** route (`/dbsc/regist/**`, `/dbsc/refresh`, `/.well-known/device-bound-sessions`). Terminates the chain for those paths; passes everything else through untouched. |
 | `DbscBindFilter` | Owns `POST /dbsc/bind` when Soft DBSC is enabled. Terminates the chain for that one path. |
-| `DbscGuardFilter` | Decides whether a request to a route the application declared may proceed, via `DbscService.guardDecision`. Refuses with `403` + `DBSC_REQUIRED`; passes everything else through untouched. |
+
+The route guard is deliberately **not** a component. It is one call —
+`dbsc.isProtected(request)` — placed in an `access()` rule, so the DBSC requirement
+lives on the same line as the rest of that route's authorization instead of in a
+second list of matchers that can drift out of step with it. See
+[Act on the tier](#act-on-the-tier).
 
 `DbscService` sits below all three as the HTTP facade, and `DbscProtocolEngine` below
 that as the protocol itself — neither depends on Spring Security. See
@@ -404,9 +392,8 @@ that as the protocol itself — neither depends on Spring Security. See
 
 The filters answer different questions and belong in different chains. `DbscFilter` is
 about the browser's protocol flow, which runs before any session exists and must never
-meet Security's entry point; `DbscBindFilter` and `DbscGuardFilter` are about your
-routes, which have a session and your authentication behind them. None of them inspects
-another's paths.
+meet Security's entry point; `DbscBindFilter` is about one of your routes, which has a
+session and your authentication behind it. Neither inspects the other's paths.
 
 The guard is not a tier comparison, though the tier is most of it — the decision also
 covers the session that dropped its DBSC cookies, which no tier check can see. See
@@ -769,9 +756,8 @@ public void logout(HttpServletRequest request, HttpServletResponse response) {
 ### 3. Act on the tier
 
 Your authorization does not change. DBSC is additional state your own code consults, and
-nothing is guarded until you say so: declare `DbscGuardRoutes` and `dbscGuardFilter`
-enforces the tier where it matches, or read the tier inline. Both forms are in
-[Act on the tier](#act-on-the-tier).
+nothing is guarded until you add the rule: `dbsc.isProtected` in an `access()` clause.
+See [Act on the tier](#act-on-the-tier).
 
 ## How it is wired (and why)
 
@@ -786,16 +772,18 @@ flowchart TD
     C --> C2[terminates -<br/>writes status + headers + body]
     B -- no --> E{auth + CSRF}
     E -- refused --> X[Security's refusal]
-    E -- passed --> G{/dbsc/bind or a guarded route?}
-    G -- bind --> HB[DbscBindFilter<br/>re-offers registration]
-    G -- guard --> H[DbscGuardFilter<br/>guardDecision]
-    H -- allow --> F[your controller]
-    E -- neither --> F
+    E -- passed --> G{/dbsc/bind?}
+    G -- yes --> HB[DbscBindFilter<br/>re-offers registration]
+    G -- no --> H{access rule calls<br/>isProtected}
+    H -- false --> X
+    H -- true or none --> F[your controller]
+    HB --> F
 ```
 
-Each branch is independent. The protocol paths are served and stop there; a re-offer or a
-guarded route has to pass the application's own checks first; everything else is your
-application's chain, unchanged. Gating a single endpoint inline is equally valid — see
+Each branch is independent. The protocol paths are served and stop there; a re-offer has
+to pass the application's own checks first; everything else is your application's chain,
+unchanged. The DBSC requirement is an ordinary `access()` rule, so it is evaluated with
+the rest of your authorization rather than beside it — see
 [Act on the tier](#act-on-the-tier).
 
 The reasons for filters rather than controllers:
@@ -814,10 +802,11 @@ The reasons for filters rather than controllers:
   own cookie and changes state, so it belongs on your chain behind your authentication
   and CSRF, where a terminating filter cannot pre-empt those checks. That is
   `DbscBindFilter`.
-- **It owns no state the application needs to configure.** The filters are handed the
-  protocol surface, the bind path and the list of guarded paths, so they add no ordering
+- **It owns no state the application needs to configure.** The protocol filter is handed
+  the protocol surface and the bind filter the bind path, so they add no ordering
   constraints to your chain beyond the two above and no policy of its own over your
-  routes.
+  routes. Which requests DBSC protects is not configuration at all: it is your own
+  `access()` rule.
 
 ### Using your own `SecurityFilterChain`
 
@@ -835,9 +824,10 @@ restating here, because each one fails silently:
   registration POST would be rejected first.
 - **`dbscBindFilter` goes in the application chain, after CSRF.** It terminates the
   request, so anything that could refuse the request has to have run already.
-- **`dbscGuardFilter` goes in the application chain, after authentication.** It asks
-  whether an existing session is protected; running it before authentication would
-  make it answer questions about a session that has not been established yet.
+- **The guard is an `access()` rule, so it runs where your authorization runs.** It
+  asks whether an existing session is protected, which is a question that only makes
+  sense after authentication — and `authorizeHttpRequests` already runs there, in
+  order, per route.
 - **Each filter goes in exactly one chain.** `OncePerRequestFilter` records itself in a
   request attribute, so the same instance in a second chain is skipped without a word.
 
@@ -873,8 +863,9 @@ this is what they do.
 | `dbsc.bind(sessionId, appSessionId, userId, request, response)` | From an authenticated request, usually at the end of your login flow. `sessionId` is the **DBSC** session id, which you mint; `appSessionId` is your application's own session id |
 | `dbsc.terminate(sessionId, request, response)` | On logout, so the browser forgets the binding instead of retrying against a dead session |
 | `dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)` | Whenever your own code wants to know whether this browser is bound |
-| `dbsc.guardDecision(request, appSessionId)` | When you want the guard's decision without the filter, e.g. to branch on *why* a request was refused |
-| `DbscGuardRoutes.of(matchers…)` | To have the filter enforce the tier where the matchers apply |
+| `dbsc.isProtected(request)` | In an `access()` rule, or anywhere you want the guard's verdict as a boolean. Reads your application session id from the servlet session, and creates none |
+| `dbsc.isProtected(request, appSessionId)` | The same, when the application session id is not the servlet session's — a store keyed by your own identifier. It must be the id you passed to `bind()`, or a request with no DBSC cookie can no longer be tied back to its binding |
+| `dbsc.guardDecision(request, appSessionId)` | When you want the verdict *and* the reason, e.g. to answer with your own body instead of a bare 403 |
 
 **The two ids are different concepts and the library never conflates them.** `sessionId`
 identifies the DBSC session and the stored device key; `appSessionId` identifies *your*
@@ -940,26 +931,58 @@ it also restarts the clock, since the new record carries a new deadline.
 
 ### Act on the tier
 
-Two ways to enforce it, and they check the same thing. **Declaring a matcher** hands the
-decision to `DbscGuardFilter`, which refuses with `403` and `DBSC_REQUIRED` before your
-handler runs. Patterns are ordinary Spring Security matchers, so the same
-`/api/**` you would write in `authorizeHttpRequests` works here:
+**An inline `access()` rule** keeps the requirement on the same line as the rest of that
+route's authorization. `isProtected` is exactly `guardDecision(...).allowed()`:
 
 ```java
-@Bean
-DbscGuardRoutes dbscGuardRoutes() {
-    return DbscGuardRoutes.of(
-            new AntPathRequestMatcher("/api/**"),
-            new AntPathRequestMatcher("/account/**"));
-}
+.authorizeHttpRequests(auth -> auth
+        .requestMatchers("/api/**").access((authentication, context) ->
+                new AuthorizationDecision(dbsc.isProtected(context.getRequest())))
+        .anyRequest().authenticated())
 ```
 
-Several matchers are OR-ed, and `DbscGuardRoutes` is itself a `RequestMatcher`, so it
-composes with `AndRequestMatcher` and friends. A matcher is only the **range** — what
-happens inside it is the policy below.
+#### One rule per pattern: `access()` replaces, it does not stack
 
-**Reading the tier inline** is for a route where a blanket refusal is the wrong answer —
-where the response should differ, or where only part of the handler needs protection:
+This is the mistake worth knowing about, because it fails silently. `authorizeHttpRequests`
+is **first match wins**, and each `requestMatchers(...).access(...)` appends a new mapping
+rather than merging with one already there. So this does *not* mean "authenticated **and**
+DBSC-protected":
+
+```java
+// WRONG: the DBSC condition never runs.
+.requestMatchers("/admin/**").hasRole("ADMIN")
+.requestMatchers("/admin/**").access((authentication, context) ->
+        new AuthorizationDecision(dbsc.isProtected(context.getRequest())))
+```
+
+The first rule matches and returns, so the second is unreachable. The route still *reads* as
+guarded and refuses nothing DBSC-related at runtime. Combine the conditions instead, with
+`AuthorizationManagers.allOf`:
+
+```java
+// RIGHT: both conditions on the one rule that matches.
+.requestMatchers("/admin/**").access(AuthorizationManagers.<RequestAuthorizationContext>allOf(
+        AuthenticatedAuthorizationManager.authenticated(),
+        AuthorityAuthorizationManager.hasRole("ADMIN"),
+        (authentication, context) ->
+                new AuthorizationDecision(dbsc.isProtected(context.getRequest()))))
+```
+
+The `.<RequestAuthorizationContext>` type witness is not decoration. `allOf` is varargs
+over `AuthorizationManager<T>`, and a bare lambda gives the compiler no way to infer `T`, so
+without the witness it picks the other overload and the DBSC lambda does not fit it. Add the
+witness whenever the list contains a lambda. `ReadmeExamplesTest` compiles these snippets, so
+they cannot rot.
+
+`RuleCompositionTest` in this repository pins both shapes down side by side: the same demoted
+session is refused by the `allOf` rule and admitted by the stacked one.
+
+This form refuses with a bare `403` — an `access()` rule can only say yes or no. If you
+want a body of your own, read the reason from `dbsc.guardDecision` inside the rule and
+answer from a handler instead of returning a refusal.
+
+**Reading the tier inline** is for a route where a refusal is the wrong answer — where the
+response should differ, or where only part of the handler needs protection:
 
 ```java
 @PostMapping("/api/transfer")
@@ -976,7 +999,8 @@ public ResponseEntity<?> transfer(@RequestBody Transfer body, HttpServletRequest
 #### What the guard actually decides
 
 The tier check above is necessary but not sufficient, because "tier is `none`" covers two
-situations that must be answered differently:
+situations that must be answered differently. Both `dbsc.isProtected` and
+`dbsc.guardDecision` apply the full table; only the return type differs:
 
 | Situation | Decision |
 |---|---|
@@ -994,16 +1018,17 @@ they are what `DbscService.Unregistered` in `DbscProperties` controls:
 | `dbsc.unregistered` | Meaning |
 |---|---|
 | `allow` (default) | DBSC is an **additional layer**. A browser without support for the protocol, and a client that has logged in but not yet registered, both reach the application. A session that bound and then lapsed is still refused. |
-| `deny` | DBSC is a **requirement**. Any client that has not registered is refused with `403 DBSC_REQUIRED`, so browsers without support are locked out. Only appropriate when the client population is known to be capable. |
+| `deny` | DBSC is a **requirement**. Any client that has not registered is refused with `403`, so browsers without support are locked out. Only appropriate when the client population is known to be capable. |
 
-The distinction matters when choosing a matcher: under `allow` a matcher covering `/**`
+The distinction matters when choosing a matcher: under `allow` a rule covering `/**`
 does not lock anyone out, and still catches every lapsed session. Under `deny` the same
-matcher is a hard requirement on every route.
+rule is a hard requirement on every route.
 
-`DbscGuardFilter` therefore delegates to `dbsc.guardDecision(request, appSessionId)`
-rather than comparing tiers itself. Use the same call if you want to branch on the reason
-(`GuardDecision.Reason` tells you which row above applied) instead of getting a flat
-`403`.
+`dbsc.isProtected` is exactly `dbsc.guardDecision(request, appSessionId).allowed()` —
+neither compares tiers itself, because a tier check alone cannot tell a demoted session
+from one that never registered. Use the `guardDecision` form if you want to branch on the
+reason (`GuardDecision.Reason` tells you which row above applied) instead of getting a
+flat `403`.
 
 The last two rows are the point. **Dropping the DBSC cookies is something the client
 controls**, so "no cookie" must not be read as "no binding" — otherwise a stolen
@@ -1016,8 +1041,8 @@ Both forms make the same decision, so these hold for either:
 
 - **It is a step-up decision, not an authentication one.** A `dbsc` tier never
   substitutes for being authenticated; read it *in addition to* your own checks, as
-  above. That is also why the guard lives in the application chain rather than the
-  protocol one, and why its refusal is a `403` with `DBSC_REQUIRED` rather than a
+  above. That is also why it belongs in your authorization rather than in a filter of
+  its own, and why its refusal is a `403` rather than a
   `401` — a `401` reads as signed out, and Chromium treats one on the refresh route
   as fatal.
 - **The tier is the live answer, not the value on the record.** It accounts for the
@@ -1458,7 +1483,7 @@ mechanism rather than a workaround. Three constants need your attention:
 | Where | What to change |
 |---|---|
 | `dbsc-soft-sw.js` | `BINDING_COOKIE_TTL_MS` must equal `dbsc.binding-cookie-ttl` — see [Telling it how long the cookie lives](#telling-it-how-long-the-cookie-lives) |
-| `dbsc-soft-sw.js` | `PROTECTED_PREFIXES` should mirror your `DbscGuardRoutes` — see [What the worker refreshes for](#what-the-worker-refreshes-for) |
+| `dbsc-soft-sw.js` | `PROTECTED_PREFIXES` should mirror your guarded routes — see [What the worker refreshes for](#what-the-worker-refreshes-for) |
 | `dbsc-soft-client.js` | `CONFIG.bindPath` / `refreshPath`, the same paths again |
 
 Each of those is marked with an `EDIT THIS BY HAND` comment at the point of edit, so
@@ -1727,8 +1752,9 @@ everything not named, and the sweep is invisible from the config.
 
 Two filters do the work:
 
-- **The path prefix** is the coarse one, and it should mirror your
-`DbscGuardRoutes`. The costs of drift are asymmetric, so it is worth knowing which way
+- **The path prefix** is the coarse one, and it should mirror the routes you guard —
+whatever your `isProtected` rules cover. The costs of drift are
+asymmetric, so it is worth knowing which way
 is dangerous: a route listed here that the guard does not protect costs a wasted refresh
 round trip; a guarded route *missing* here is never refreshed proactively, so it starts
 refusing at the TTL. **List what the guard protects.**

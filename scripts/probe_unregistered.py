@@ -1,8 +1,8 @@
 """Probe: does dbsc.unregistered=deny refuse a client with no binding?
 
 With the default (allow) a client that never registered reaches the application,
-which is what keeps DBSC additive. With deny it must be refused with 403
-DBSC_REQUIRED instead, on the same guarded route. This script asserts both, so
+which is what keeps DBSC additive. With deny it must be refused with a bare 403
+instead, on the same guarded route. This script asserts both, so
 the policy knob is pinned rather than assumed.
 
 Usage: python3 scripts/probe_unregistered.py [base-url]
@@ -75,11 +75,16 @@ status, text = request(opener, "POST", "/app/payment", raw="{\"amount\":1000,\"c
 print(f"POST /app/payment as an unregistered client -> {status}")
 print(text[:200])
 
-if "DBSC_REQUIRED" in text:
+if status == 403 and "status" in text:
+    # Spring Security's AccessDeniedHandler, since an access() rule refuses without a
+    # body of its own. What matters is the status, not the shape.
+    print("\nRESULT: dbsc.unregistered=deny (refused)")
+    sys.exit(0)
+if status == 403:
     print("\nRESULT: dbsc.unregistered=deny (refused)")
     sys.exit(0)
 if status == 200:
     print("\nRESULT: dbsc.unregistered=allow (allowed through)")
     sys.exit(0)
-print("\nFAIL: unexpected outcome; is /app/payment in the DbscGuardRoutes matcher?")
+print("\nFAIL: unexpected outcome; does /app/payment have the isProtected access() rule?")
 sys.exit(1)

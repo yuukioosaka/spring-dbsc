@@ -558,10 +558,13 @@ class HttpFlowTest {
                         .header(CSRF_HEADER, csrfToken(login.appSession())))
                 .andReturn();
 
+        // A bare 403 with no body: the check is an access() rule, which can only
+        // allow or refuse. Asserting on the status is the whole contract -- an
+        // application that wants a body of its own reads the reason from
+        // dbsc.guardDecision instead.
         assertEquals(403, result.getResponse().getStatus(),
                 "a bound session must not escape its binding by omitting the DBSC cookies");
-        assertEquals("DBSC_REQUIRED",
-                Json.parseObject(result.getResponse().getContentAsString()).get("error"));
+        assertEquals("", result.getResponse().getContentAsString());
     }
 
     @Test

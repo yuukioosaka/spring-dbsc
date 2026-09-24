@@ -357,7 +357,7 @@ public class DbscProperties {
          */
         ALLOW,
         /**
-         * Refuse it with {@code 403 DBSC_REQUIRED}. DBSC becomes a requirement:
+         * Refuse it with a bare {@code 403}. DBSC becomes a requirement:
          * every browser that does not support the protocol is locked out, so this
          * is only appropriate when the client population is known to be capable.
          * A session that registered and then <em>lapsed</em> is refused either way.

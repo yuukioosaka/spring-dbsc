@@ -368,7 +368,7 @@ DBSC_DENY_BASE=https://localhost:9444 python3 scripts/e2e.py
 ```
 
 Section L logs in to both instances without ever registering, POSTs the same guarded
-route to each, and asserts that the deny instance answers 403 `DBSC_REQUIRED` while the
+route to each, and asserts that the deny instance answers 403 while the
 default one answers 200. The allow check is the control — without it, a guard that
 refused *everything* would pass the deny check. It listens on 9444 with its own
 database file, and needs no JVM property: the policy comes from
@@ -411,9 +411,9 @@ of or work around here:
 - `@Order(0)` — `securityMatcher` on the DBSC paths, with `DbscFilter`, stateless,
   CSRF disabled. Chromium drives these routes before any user session exists and
   posts no CSRF token with them.
-- `@Order(1)` — the application chain: form login, logout, the `/app` routes. The
-  `dbscGuardFilter` is added here and `/app/payment` is declared with a `DbscGuardRoutes`
-  so it answers 403 `DBSC_REQUIRED` unless the session's tier is currently `dbsc`.
+- `@Order(1)` — the application chain: form login, logout, the `/app` routes.
+  `/app/payment` carries an `access(...)` rule calling `dbsc.isProtected(request)`, so it
+  answers 403 unless the session's tier is currently `dbsc`.
   `/app/whoami` is deliberately left unguarded, so it reports the tier on a bare
   login cookie.
 
