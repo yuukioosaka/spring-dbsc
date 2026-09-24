@@ -49,4 +49,17 @@ class ReadmeExamplesTest {
                 (authentication, context) ->
                         new AuthorizationDecision(dbsc.isProtected(context.getRequest())));
     }
+
+    @Test
+    void gettingStartedRuleCompiles() {
+        // The Getting Started chain's /api/** rule, verbatim: authenticated alongside
+        // the tier check, which is the pair adopters actually write. The witness is
+        // load-bearing here too -- one lambda and one method reference still leave T
+        // ambiguous, because AuthenticatedAuthorizationManager.authenticated() returns
+        // an AuthorizationManager<Object>.
+        AuthorizationManagers.<RequestAuthorizationContext>allOf(
+                AuthenticatedAuthorizationManager.authenticated(),
+                (authentication, context) -> new AuthorizationDecision(
+                        dbsc.isProtected(context.getRequest())));
+    }
 }

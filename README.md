@@ -199,8 +199,16 @@ public class MySecurityConfig {
                         // authorization rule is. isProtected() is guardDecision() as a
                         // boolean, so the refusal is a bare 403 -- read the reason
                         // from guardDecision() if you want a body of your own.
-                        .requestMatchers("/api/**").access((authentication, context) ->
-                                new AuthorizationDecision(dbsc.isProtected(context.getRequest()))))
+                        //
+                        // Authenticated inside allOf rather than on its own line: these
+                        // routes need both conditions, and a second rule for the same
+                        // pattern would be unreachable (see "One rule per pattern").
+                        .requestMatchers("/api/**").access(AuthorizationManagers
+                                .<RequestAuthorizationContext>allOf(
+                                        AuthenticatedAuthorizationManager.authenticated(),
+                                        (authentication, context) -> new AuthorizationDecision(
+                                                dbsc.isProtected(context.getRequest()))))
+                        .anyRequest().authenticated())
                 // Ordinary Spring Security CSRF, left on. The bind route is a
                 // state-changing application route, so it gets no exemption — the same
                 // CsrfFilter that protects your other POSTs protects it.
@@ -940,6 +948,11 @@ route's authorization. `isProtected` is exactly `guardDecision(...).allowed()`:
                 new AuthorizationDecision(dbsc.isProtected(context.getRequest())))
         .anyRequest().authenticated())
 ```
+
+That is the DBSC requirement on its own, for an app whose routes are authenticated
+elsewhere. If the routes need authentication *as well*, put both in the one rule — see
+[One rule per pattern](#one-rule-per-pattern-access-replaces-it-does-not-stack) below,
+and the Getting Started chain above for the worked form.
 
 #### One rule per pattern: `access()` replaces, it does not stack
 
