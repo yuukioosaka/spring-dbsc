@@ -378,6 +378,70 @@ If your app has no `HttpSession`, pass whatever opaque id you already mint per c
 for that session — `bind()` takes the application-session id as an argument and does
 not care where it came from — rather than inventing one for this.
 
+#### OIDC with Soft DBSC turned off
+
+Soft DBSC is the fallback for browsers with no native support. If your population is
+known to run one that has it, or you would rather not ship the fallback at all, the
+integration shrinks: no `/dbsc/bind`, no worker, no client script. Only the protocol
+routes and the `access()` rule remain.
+
+```yaml
+dbsc:
+  # The fallback route and its two scripts are not served, and DbscBindFilter is inert,
+  # so it does not matter whether you wire it. See "Turning it off".
+  soft:
+    enabled: false
+```
+
+```java
+@Configuration
+@EnableWebSecurity
+public class OidcSecurityConfig {
+
+    @Bean
+    SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
+                                 DbscFilter dbscFilter) throws Exception {
+        http
+                .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/login/**", "/oauth2/**", "/error").permitAll()
+                        // No /dbsc/bind matcher: with soft disabled the route is not
+                        // served, and admitting it would only advertise a path that is
+                        // not there.
+                        .requestMatchers("/api/**").access(AuthorizationManagers
+                                .<RequestAuthorizationContext>allOf(
+                                        AuthenticatedAuthorizationManager.authenticated(),
+                                        (authentication, context) -> new AuthorizationDecision(
+                                                dbsc.isProtected(context.getRequest()))))
+                        .anyRequest().authenticated())
+                .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) -> {
+                    String appSessionId = request.getSession().getId();
+                    dbsc.bind(UUID.randomUUID().toString(), appSessionId,
+                              auth.getName(), request, response);
+                    response.sendRedirect("/");
+                }))
+                .addFilterBefore(dbscFilter, CsrfFilter.class);
+        return http.build();
+    }
+}
+```
+
+Set `spring.security.oauth2.client.provider.<id>.user-name-attribute: sub` so
+`auth.getName()` returns the subject, or map the claim yourself; see the note above.
+
+**What you give up.** With no `/dbsc/bind`, the only offer a client ever gets is the one
+written by `bind()` in the `successHandler` above — and on OIDC that offer is unreadable,
+because the callback is cross-site. A browser without native DBSC therefore never binds,
+which is the intended outcome: the re-offer route exists so a script client can try
+again, and with the fallback off there is no such client. Native clients are unaffected,
+because their registration POST is driven by the browser itself rather than by a page.
+
+**If your population is mixed, do not disable it.** A soft binding is weaker than a
+native one — a WebCrypto key in IndexedDB is readable by any script on the origin —
+but it is stronger than nothing, and `dbsc.unregistered: deny` on a route will lock out
+every browser that cannot do DBSC natively once the fallback is off. Check what
+`tierFor()` reports in production before turning it off; see
+[What the guard actually decides](#what-the-guard-actually-decides).
+
 ## Architecture
 
 The protocol is served by **filters that your own Spring Security chain invokes**, not by

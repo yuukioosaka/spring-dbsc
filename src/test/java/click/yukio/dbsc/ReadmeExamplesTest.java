@@ -15,6 +15,12 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * Compiles the README's documented rule shapes. A snippet in a README is not compiled by
  * anything, and generic inference is exactly the kind of thing that silently rots there —
  * this file exists so the examples are checked by the build.
+ *
+ * <p>Deliberately a handful of explicit cases rather than a scan of every fenced block.
+ * The README also shows, on purpose, shapes that must <em>not</em> compile as written (the
+ * stacked-rules counter-example) and fragments that are not compilable units (a lone
+ * {@code @Bean}, a property list). A scan would need an exclusion list for both, and the
+ * list would be the fragile part.
  */
 @SpringBootTest(
         classes = RuleCompositionTest.TestApp.class,
@@ -57,6 +63,12 @@ class ReadmeExamplesTest {
         // load-bearing here too -- one lambda and one method reference still leave T
         // ambiguous, because AuthenticatedAuthorizationManager.authenticated() returns
         // an AuthorizationManager<Object>.
+        //
+        // The two OIDC examples share this exact rule, so they are covered by this case.
+        // Their own snippets are not compilable units -- one is a whole chain method, and
+        // the only thing setting them apart is what they leave out (no DbscBindFilter, no
+        // /dbsc/bind matcher), which is a property of the chain rather than of a
+        // statement.
         AuthorizationManagers.<RequestAuthorizationContext>allOf(
                 AuthenticatedAuthorizationManager.authenticated(),
                 (authentication, context) -> new AuthorizationDecision(
