@@ -20,6 +20,10 @@ import click.yukio.dbsc.protocol.SessionConfig;
 import click.yukio.dbsc.web.OriginResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.security.authorization.AuthenticatedAuthorizationManager;
+import org.springframework.security.authorization.AuthorizationDecision;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -29,6 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * The HTTP-facing DBSC facade.
@@ -825,6 +830,56 @@ public class DbscService {
     public boolean isProtected(HttpServletRequest request, String appSessionId) {
         return guardDecision(request, appSessionId).allowed();
     }
+
+    /**
+     * The whole DBSC authorization rule, as one {@code AuthorizationManager} method
+     * reference:
+     *
+     * <pre>{@code
+     * .requestMatchers("/api/**").access(dbsc::authorizationDecision)
+     * }</pre>
+     *
+     * <p>This exists because the rule is two conditions, and they have to be written as
+     * one. {@code authorizeHttpRequests} is first match wins and each rule for a pattern
+     * appends a new mapping, so this is <em>not</em> "authenticated and DBSC-protected":
+     *
+     * <pre>{@code
+     * // WRONG: the DBSC condition never runs.
+     * .requestMatchers("/api/**").authenticated()
+     * .requestMatchers("/api/**").access(dbsc::authorizationDecision)
+     * }</pre>
+     *
+     * <p>Combining them by hand works but is easy to get wrong in the other direction --
+     * {@code AuthorizationManagers.allOf} needs an explicit type witness as soon as the
+     * list holds a lambda, and the witness is exactly the part a reader drops when
+     * adapting the snippet. A method reference cannot be spelled incorrectly that way, so
+     * this is the form the README documents.
+     *
+     * <p>The verdict is an {@link AuthorizationDecision}, which carries no body: the
+     * refusal is Security's bare 403, like {@link #isProtected}. Use
+     * {@link #guardDecision} where the reason matters.
+     *
+     * <p>Authentication is evaluated first and short-circuits, so a signed-out request
+     * is refused without a storage lookup. The DBSC check on its own would admit an
+     * anonymous request whose session is unregistered, which is the right answer to
+     * "is DBSC satisfied?" and the wrong answer to "may this request proceed?" --
+     * authentication is not DBSC's question to answer, so the caller states it here.
+     */
+    public AuthorizationDecision authorizationDecision(
+            Supplier<Authentication> authentication, RequestAuthorizationContext context) {
+        boolean authenticated = AUTHENTICATED
+                .authorize(authentication, context)
+                .isGranted();
+        return new AuthorizationDecision(
+                authenticated && isProtected(context.getRequest()));
+    }
+
+    /**
+     * Stateless and cheap to share; building one per request would allocate on a path
+     * that runs for every guarded request.
+     */
+    private static final AuthenticatedAuthorizationManager<RequestAuthorizationContext> AUTHENTICATED =
+            AuthenticatedAuthorizationManager.authenticated();
 
     /**
      * Applies the {@code dbsc.unregistered} policy to a client with no binding.

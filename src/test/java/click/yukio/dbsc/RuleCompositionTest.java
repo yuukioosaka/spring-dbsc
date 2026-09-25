@@ -59,7 +59,9 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>{@code /two-rules} is that broken shape, {@code /one-rule} the correct one, and the
  * pair shows a demoted session refused at {@code /one-rule} and admitted at
  * {@code /two-rules}. That contrast is the argument for combining the conditions with
- * {@code AuthorizationManagers.allOf} instead of stacking rules.
+ * {@code AuthorizationManagers.allOf} instead of stacking rules. {@code /decision} covers
+ * the same ground through {@link DbscService#authorizationDecision}, the library's
+ * one-method-reference form of the pair — the shape the README tells adopters to write.
  *
  * <p>The session is real rather than hand-seeded: {@link DbscService#bind} is called the
  * way an application's login route calls it, which is what puts a credential cookie in the
@@ -146,6 +148,35 @@ class RuleCompositionTest {
         assertThat(callAfterDemotion("/two-rules")).isEqualTo(200);
     }
 
+    /**
+     * The value of {@code authorizationDecision}: the same pair as {@code /one-rule}, written
+     * as one method reference, so the type witness and the manual {@code allOf} are both gone.
+     *
+     * <p>Compiling is half the point — a method reference is only accepted here if its
+     * signature really is {@code AuthorizationManager}'s, which is what makes
+     * {@code .access(dbsc::authorizationDecision)} a substitute for the three-argument
+     * {@code allOf} rather than a near miss. The other half is that it still refuses the
+     * demoted session, i.e. the tier half did not get dropped along with the boilerplate.
+     */
+    @Test
+    @DisplayName("authorizationDecision refuses the demoted session as one access() reference")
+    void authorizationDecisionRefuses() throws Exception {
+        assertThat(callAfterDemotion("/decision")).isEqualTo(403);
+    }
+
+    /**
+     * And the authentication half still runs: an anonymous request is refused without a
+     * storage lookup, because authentication short-circuits before the tier check.
+     */
+    @Test
+    @DisplayName("authorizationDecision refuses an unauthenticated request")
+    void authorizationDecisionRefusesAnonymous() throws Exception {
+        assertThat(mvc.perform(post("/decision")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andReturn().getResponse().getStatus()).isEqualTo(403);
+    }
+
     @Configuration(proxyBeanMethods = false)
     @EnableWebSecurity
     static class TestSecurity {
@@ -164,7 +195,8 @@ class RuleCompositionTest {
                     // auto-configured chain.
                     .securityMatcher(new OrRequestMatcher(
                             new AntPathRequestMatcher("/one-rule/**"),
-                            new AntPathRequestMatcher("/two-rules/**")))
+                            new AntPathRequestMatcher("/two-rules/**"),
+                            new AntPathRequestMatcher("/decision/**")))
                     .authorizeHttpRequests(auth -> auth
                             // The broken shape: two rules, one pattern. Only the first ever
                             // runs.
@@ -179,6 +211,12 @@ class RuleCompositionTest {
                                     AuthenticatedAuthorizationManager.authenticated(),
                                     (authentication, context) -> new AuthorizationDecision(
                                             dbsc.isProtected(context.getRequest()))))
+                            // The same pair again, as the library's one-method-reference
+                            // form. A method reference only type-checks against
+                            // AuthorizationManager if the signature matches exactly, so
+                            // this also pins the parameter order.
+                            .requestMatchers(new AntPathRequestMatcher("/decision/**"))
+                            .access(dbsc::authorizationDecision)
                             .anyRequest().permitAll())
                     .csrf(csrf -> csrf.disable())
                     .addFilterAfter(dbscBindFilter,
@@ -197,6 +235,11 @@ class RuleCompositionTest {
 
         @PostMapping("/two-rules")
         String twoRules() {
+            return "{}";
+        }
+
+        @PostMapping("/decision")
+        String decision() {
             return "{}";
         }
     }

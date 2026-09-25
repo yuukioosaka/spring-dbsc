@@ -149,7 +149,7 @@ Three beans arrive from `DbscFilterConfiguration`:
 | `dbscBindFilter` | `POST /dbsc/bind`, only when `dbsc.soft.enabled` is on | your **application** chain, after authentication and CSRF |
 
 Guarding a route is not a bean at all — it is a line in `authorizeHttpRequests`, and
-`dbsc.isProtected` is the whole API for it. See [Act on the tier](#act-on-the-tier).
+`dbsc.authorizationDecision` is the whole API for it. See [Act on the tier](#act-on-the-tier).
 
 Put them where their subjects live. Note the split inside the DBSC routes themselves:
 the protocol routes are the ones the *browser* drives on its own, and they must be
@@ -197,18 +197,10 @@ public class MySecurityConfig {
                         // the bottom of the chain if dbsc.soft.enabled is false.
                         .requestMatchers("/dbsc/bind").authenticated()
                         // The DBSC requirement, declared exactly where every other
-                        // authorization rule is. isProtected() is guardDecision() as a
-                        // boolean, so the refusal is a bare 403 -- read the reason
-                        // from guardDecision() if you want a body of your own.
-                        //
-                        // Authenticated inside allOf rather than on its own line: these
-                        // routes need both conditions, and a second rule for the same
-                        // pattern would be unreachable (see "One rule per pattern").
-                        .requestMatchers("/api/**").access(AuthorizationManagers
-                                .<RequestAuthorizationContext>allOf(
-                                        AuthenticatedAuthorizationManager.authenticated(),
-                                        (authentication, context) -> new AuthorizationDecision(
-                                                dbsc.isProtected(context.getRequest()))))
+                        // authorization rule is. authorizationDecision() is the whole
+                        // rule -- authentication and the tier check -- because two
+                        // conditions have to be one rule to both apply.
+                        .requestMatchers("/api/**").access(dbsc::authorizationDecision)
                         .anyRequest().authenticated())
                 // Last: it writes its own response, so everything that could refuse the
                 // request — authentication and the token check — must have run already.
@@ -282,14 +274,9 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
     http
             .authorizeHttpRequests(auth -> auth
                     .requestMatchers("/login", "/css/**").permitAll()
-                    // The DBSC requirement, alongside authentication. Both conditions on
-                    // the one rule that matches -- a second rule for the same pattern
-                    // would be unreachable. See "One rule per pattern".
-                    .requestMatchers("/api/**").access(AuthorizationManagers
-                            .<RequestAuthorizationContext>allOf(
-                                    AuthenticatedAuthorizationManager.authenticated(),
-                                    (authentication, context) -> new AuthorizationDecision(
-                                            dbsc.isProtected(context.getRequest()))))
+                    // The DBSC requirement, alongside authentication -- both in the one
+                    // rule, since a second rule for the same pattern is unreachable.
+                    .requestMatchers("/api/**").access(dbsc::authorizationDecision)
                     .anyRequest().authenticated())
             .formLogin(form -> form
                     .loginPage("/login")
@@ -342,13 +329,8 @@ public class OidcSecurityConfig {
                         .requestMatchers("/login/**", "/oauth2/**", "/error").permitAll()
                         // Soft DBSC only, and it goes with the addFilterAfter below.
                         .requestMatchers("/dbsc/bind").authenticated()
-                        // The DBSC requirement, both conditions on the one rule that
-                        // matches. See "One rule per pattern".
-                        .requestMatchers("/api/**").access(AuthorizationManagers
-                                .<RequestAuthorizationContext>allOf(
-                                        AuthenticatedAuthorizationManager.authenticated(),
-                                        (authentication, context) -> new AuthorizationDecision(
-                                                dbsc.isProtected(context.getRequest()))))
+                        // The DBSC requirement, both conditions in the one rule.
+                        .requestMatchers("/api/**").access(dbsc::authorizationDecision)
                         .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) -> {
                     // Force the session to exist: a login always has one, and the id is
@@ -421,11 +403,8 @@ public class OidcSecurityConfig {
                         // No /dbsc/bind matcher: with soft disabled the route is not
                         // served, and admitting it would only advertise a path that is
                         // not there.
-                        .requestMatchers("/api/**").access(AuthorizationManagers
-                                .<RequestAuthorizationContext>allOf(
-                                        AuthenticatedAuthorizationManager.authenticated(),
-                                        (authentication, context) -> new AuthorizationDecision(
-                                                dbsc.isProtected(context.getRequest()))))
+                        .requestMatchers("/dbsc/bind").authenticated()
+                        .requestMatchers("/api/**").access(dbsc::authorizationDecision)
                         .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) -> {
                     String appSessionId = request.getSession().getId();
@@ -467,7 +446,7 @@ controllers:
 | `DbscBindFilter` | Owns `POST /dbsc/bind` when Soft DBSC is enabled. Terminates the chain for that one path. |
 
 The route guard is deliberately **not** a component. It is one call —
-`dbsc.isProtected(request)` — placed in an `access()` rule, so the DBSC requirement
+`dbsc::authorizationDecision` — placed in an `access()` rule, so the DBSC requirement
 lives on the same line as the rest of that route's authorization instead of in a
 second list of matchers that can drift out of step with it. See
 [Act on the tier](#act-on-the-tier).
@@ -842,8 +821,8 @@ public void logout(HttpServletRequest request, HttpServletResponse response) {
 ### 3. Act on the tier
 
 Your authorization does not change. DBSC is additional state your own code consults, and
-nothing is guarded until you add the rule: `dbsc.isProtected` in an `access()` clause.
-See [Act on the tier](#act-on-the-tier).
+nothing is guarded until you add the rule: `dbsc::authorizationDecision` in an `access()`
+clause. See [Act on the tier](#act-on-the-tier).
 
 ## How it is wired (and why)
 
@@ -860,7 +839,7 @@ flowchart TD
     E -- refused --> X[Security's refusal]
     E -- passed --> G{/dbsc/bind?}
     G -- yes --> HB[DbscBindFilter<br/>re-offers registration]
-    G -- no --> H{access rule calls<br/>isProtected}
+    G -- no --> H{access rule calls<br/>authorizationDecision}
     H -- false --> X
     H -- true or none --> F[your controller]
     HB --> F
@@ -949,7 +928,8 @@ this is what they do.
 | `dbsc.bind(sessionId, appSessionId, userId, request, response)` | From an authenticated request, usually at the end of your login flow. `sessionId` is the **DBSC** session id, which you mint; `appSessionId` is your application's own session id |
 | `dbsc.terminate(sessionId, request, response)` | On logout, so the browser forgets the binding instead of retrying against a dead session |
 | `dbsc.sessionFor(request)` / `dbsc.tierFor(sessionId)` | Whenever your own code wants to know whether this browser is bound |
-| `dbsc.isProtected(request)` | In an `access()` rule, or anywhere you want the guard's verdict as a boolean. Reads your application session id from the servlet session, and creates none |
+| `dbsc.authorizationDecision` | As a method reference in an `access()` rule — the whole rule, authentication and tier check together. This is the form the examples use |
+| `dbsc.isProtected(request)` | When you want the guard's verdict as a boolean and nothing else. Reads your application session id from the servlet session, and creates none |
 | `dbsc.isProtected(request, appSessionId)` | The same, when the application session id is not the servlet session's — a store keyed by your own identifier. It must be the id you passed to `bind()`, or a request with no DBSC cookie can no longer be tied back to its binding |
 | `dbsc.guardDecision(request, appSessionId)` | When you want the verdict *and* the reason, e.g. to answer with your own body instead of a bare 403 |
 
@@ -1028,9 +1008,14 @@ route's authorization. `isProtected` is exactly `guardDecision(...).allowed()`:
 ```
 
 That is the DBSC requirement on its own, for an app whose routes are authenticated
-elsewhere. If the routes need authentication *as well*, put both in the one rule — see
-[One rule per pattern](#one-rule-per-pattern-access-replaces-it-does-not-stack) below,
-and the Getting Started chain above for the worked form.
+elsewhere. When the routes need authentication too, use `authorizationDecision`, which is
+that same pair in one method reference:
+
+```java
+.authorizeHttpRequests(auth -> auth
+        .requestMatchers("/api/**").access(dbsc::authorizationDecision)
+        .anyRequest().authenticated())
+```
 
 #### One rule per pattern: `access()` replaces, it does not stack
 
@@ -1042,13 +1027,16 @@ DBSC-protected":
 ```java
 // WRONG: the DBSC condition never runs.
 .requestMatchers("/admin/**").hasRole("ADMIN")
-.requestMatchers("/admin/**").access((authentication, context) ->
-        new AuthorizationDecision(dbsc.isProtected(context.getRequest())))
+.requestMatchers("/admin/**").access(dbsc::authorizationDecision)
 ```
 
 The first rule matches and returns, so the second is unreachable. The route still *reads* as
-guarded and refuses nothing DBSC-related at runtime. Combine the conditions instead, with
-`AuthorizationManagers.allOf`:
+guarded and refuses nothing DBSC-related at runtime — which is why `authorizationDecision`
+exists: it is the authentication and tier conditions in one call, so the pair cannot be
+split across two rules in the first place.
+
+When the route needs a condition `authorizationDecision` does not cover — a role, an
+authority, an IP range — combine them with `AuthorizationManagers.allOf` instead:
 
 ```java
 // RIGHT: both conditions on the one rule that matches.
