@@ -282,7 +282,15 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
     http
             .authorizeHttpRequests(auth -> auth
                     .requestMatchers("/login", "/css/**").permitAll()
-                    .requestMatchers("/api/transfer").authenticated())
+                    // The DBSC requirement, alongside authentication. Both conditions on
+                    // the one rule that matches -- a second rule for the same pattern
+                    // would be unreachable. See "One rule per pattern".
+                    .requestMatchers("/api/**").access(AuthorizationManagers
+                            .<RequestAuthorizationContext>allOf(
+                                    AuthenticatedAuthorizationManager.authenticated(),
+                                    (authentication, context) -> new AuthorizationDecision(
+                                            dbsc.isProtected(context.getRequest()))))
+                    .anyRequest().authenticated())
             .formLogin(form -> form
                     .loginPage("/login")
                     .successHandler((request, response, auth) -> {
@@ -334,7 +342,13 @@ public class OidcSecurityConfig {
                         .requestMatchers("/login/**", "/oauth2/**", "/error").permitAll()
                         // Soft DBSC only, and it goes with the addFilterAfter below.
                         .requestMatchers("/dbsc/bind").authenticated()
-                        .requestMatchers("/api/transfer").authenticated()
+                        // The DBSC requirement, both conditions on the one rule that
+                        // matches. See "One rule per pattern".
+                        .requestMatchers("/api/**").access(AuthorizationManagers
+                                .<RequestAuthorizationContext>allOf(
+                                        AuthenticatedAuthorizationManager.authenticated(),
+                                        (authentication, context) -> new AuthorizationDecision(
+                                                dbsc.isProtected(context.getRequest()))))
                         .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) -> {
                     // Force the session to exist: a login always has one, and the id is
