@@ -209,26 +209,19 @@ public class MySecurityConfig {
                                         (authentication, context) -> new AuthorizationDecision(
                                                 dbsc.isProtected(context.getRequest()))))
                         .anyRequest().authenticated())
-                // Ordinary Spring Security CSRF, left on. The bind route is a
-                // state-changing application route, so it gets no exemption — the same
-                // CsrfFilter that protects your other POSTs protects it.
-                //
-                // The plain token handler rather than the default: the default masks
-                // the token per request with a BREACH nonce, which is right for a form
-                // the server renders and wrong for a script client that holds the raw
-                // value from a meta tag.
-                .csrf(csrf -> csrf
-                        .csrfTokenRepository(new HttpSessionCsrfTokenRepository())
-                        .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
                 // Last: it writes its own response, so everything that could refuse the
                 // request — authentication and the token check — must have run already.
+                //
+                // CSRF is the ordinary one, left at its defaults. There is nothing to
+                // configure here: the route is a state-changing application route, so
+                // the same CsrfFilter that protects your other POSTs protects it.
                 .addFilterAfter(dbscBindFilter, CsrfFilter.class);
         return http.build();
     }
 }
 ```
 
-The three details that actually matter, and how each one fails:
+The details that actually matter, and how each one fails:
 
 | Detail | If you get it wrong |
 |---|---|
@@ -236,7 +229,7 @@ The three details that actually matter, and how each one fails:
 | `addFilterBefore(..., CsrfFilter.class)` **and** CSRF off on the protocol chain | The browser's registration POST carries no CSRF token, so a chain that applies CSRF to `/dbsc/**` rejects it before `DbscFilter` runs |
 | The protocol matcher must **not** be `/dbsc/**` | That would swallow `/dbsc/bind` too, and `DbscFilter` terminates every request it serves — so authentication and CSRF would never run on that route |
 | Each bean is registered in **one** chain only | `OncePerRequestFilter` records itself in a request attribute, so the same instance in a second chain silently skips it |
-| `IF_REQUIRED` sessions on the chain that holds `/dbsc/bind` — the default | `HttpSessionCsrfTokenRepository` stores the token on the session; a `STATELESS` chain has nowhere to put it, so every bind POST is refused with a bare 403 that looks like a DBSC refusal |
+| Leave CSRF at its defaults, and keep sessions (`IF_REQUIRED`, the default) on the chain that holds `/dbsc/bind` | `HttpSessionCsrfTokenRepository` stores the token on the session, so a `STATELESS` chain has nowhere to put it and every bind POST is refused with a bare 403 that looks like a DBSC refusal. The protocol chain can stay stateless — CSRF is off there. **Soft DBSC needs one further change**, since its client reads the raw token from a meta tag — see [`POST /dbsc/bind`](#post-dbscbind--ask-for-an-offer) |
 
 **Nothing is guarded until you write the rule**, which is the default and the reason
 adoption is safe. Note that a wide matcher is not the same as strict enforcement: a
@@ -346,9 +339,6 @@ public class OidcSecurityConfig {
                               auth.getName(), request, response);
                     response.sendRedirect("/");
                 }))
-                .csrf(csrf -> csrf
-                        .csrfTokenRepository(new HttpSessionCsrfTokenRepository())
-                        .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
                 .addFilterBefore(dbscFilter, CsrfFilter.class)
                 .addFilterAfter(dbscBindFilter, CsrfFilter.class);
         return http.build();
