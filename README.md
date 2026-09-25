@@ -192,8 +192,9 @@ public class MySecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/login", "/css/**",
                                 "/dbsc-soft-client.js", "/dbsc-soft-sw.js").permitAll()
-                        // Optional: only if you run the Soft DBSC client, which is what
-                        // needs this route. See dbsc.soft.enabled.
+                        // Optional, and both lines go together: only if you run the
+                        // Soft DBSC client. Drop this matcher AND the addFilterAfter at
+                        // the bottom of the chain if dbsc.soft.enabled is false.
                         .requestMatchers("/dbsc/bind").authenticated()
                         // The DBSC requirement, declared exactly where every other
                         // authorization rule is. isProtected() is guardDecision() as a
@@ -211,6 +212,10 @@ public class MySecurityConfig {
                         .anyRequest().authenticated())
                 // Last: it writes its own response, so everything that could refuse the
                 // request — authentication and the token check — must have run already.
+                //
+                // Optional, like the /dbsc/bind matcher above: the two go together, and
+                // both are the Soft DBSC fallback's. With dbsc.soft.enabled off the route
+                // is not served and this filter is inert, so the chain needs neither.
                 //
                 // CSRF is the ordinary one, left at its defaults. There is nothing to
                 // configure here: the route is a state-changing application route, so
@@ -327,6 +332,7 @@ public class OidcSecurityConfig {
         http
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/login/**", "/oauth2/**", "/error").permitAll()
+                        // Soft DBSC only, and it goes with the addFilterAfter below.
                         .requestMatchers("/dbsc/bind").authenticated()
                         .requestMatchers("/api/transfer").authenticated()
                         .anyRequest().authenticated())
@@ -340,6 +346,9 @@ public class OidcSecurityConfig {
                     response.sendRedirect("/");
                 }))
                 .addFilterBefore(dbscFilter, CsrfFilter.class)
+                // Soft DBSC only: with dbsc.soft.enabled off, drop this and the
+                // /dbsc/bind matcher above. See the note under "OIDC with Soft DBSC
+                // turned off" for the chain without either.
                 .addFilterAfter(dbscBindFilter, CsrfFilter.class);
         return http.build();
     }
@@ -372,13 +381,14 @@ not care where it came from — rather than inventing one for this.
 
 Soft DBSC is the fallback for browsers with no native support. If your population is
 known to run one that has it, or you would rather not ship the fallback at all, the
-integration shrinks: no `/dbsc/bind`, no worker, no client script. Only the protocol
-routes and the `access()` rule remain.
+integration shrinks: no `/dbsc/bind`, no worker, no client script — and the
+`DbscBindFilter` goes with them. Only the protocol routes and the `access()` rule remain.
 
 ```yaml
 dbsc:
   # The fallback route and its two scripts are not served, and DbscBindFilter is inert,
-  # so it does not matter whether you wire it. See "Turning it off".
+  # so a chain that still wires it behaves the same. Dropping it and the /dbsc/bind
+  # matcher is the honest shape. See "Turning it off".
   soft:
     enabled: false
 ```
