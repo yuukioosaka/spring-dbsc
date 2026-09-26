@@ -132,7 +132,7 @@ from the JAR's `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfi
 
 ### 2. Wire the DBSC filters into your chain
 
-The library ships **three `OncePerRequestFilter` beans and no `SecurityFilterChain`** —
+The library ships **two `OncePerRequestFilter` beans and no `SecurityFilterChain`** —
 they are *not* wired into Security for you, and are not auto-registered as servlet
 filters either, so a JAR that is merely on the classpath does nothing until you add
 them. Nothing is registered into Spring Security for you, because *where* the filters
@@ -202,6 +202,26 @@ public class MySecurityConfig {
                         // conditions have to be one rule to both apply.
                         .requestMatchers("/api/**").access(dbsc::authorizationDecision)
                         .anyRequest().authenticated())
+                // Authentication has to end somewhere, and that is where the binding is
+                // made: bind() mints the DBSC session id and writes the
+                // Secure-Session-Registration offer on the response. Form login is
+                // shown here; any mechanism is the same one call in its success
+                // handler -- see the examples below.
+                .formLogin(form -> form
+                        .loginPage("/login")
+                        .successHandler((request, response, auth) -> {
+                            // The DBSC session id is independent of the application's
+                            // session id, which is passed as the second argument so the
+                            // guard can tell a client that never registered apart from
+                            // one that dropped its DBSC cookies.
+                            dbsc.bind(UUID.randomUUID().toString(),
+                                      request.getSession().getId(), auth.getName(),
+                                      request, response);
+                            response.sendRedirect("/");
+                        }))
+                .logout(logout -> logout.logoutSuccessHandler((request, response, auth) ->
+                        dbsc.sessionFor(request)
+                                .ifPresent(s -> dbsc.terminate(s.id(), request, response))))
                 // Last: it writes its own response, so everything that could refuse the
                 // request — authentication and the token check — must have run already.
                 //
@@ -265,15 +285,27 @@ the earliest anchor that is still a Spring Security filter, which is what keeps 
 #### Form login (password)
 
 Form login owns the POST that ends authentication, so the binding has to be made from
-the success handler there too:
+the success handler there too. **Without the `dbsc.bind(...)` call below, the login
+succeeds but no DBSC session is ever created**, so a later request that has to prove
+possession — and any `/api/**` rule — fails as if the client had never registered.
+`bind()` is what mints the DBSC session id and returns the `Secure-Session-Registration`
+offer; the `302` that follows is what delivers that offer to the browser. This is the
+fully wired shape, Soft DBSC included; for the chain with the fallback turned off, drop
+the two soft-only pieces marked below.
 
 ```java
 @Bean
 SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
-                             DbscFilter dbscFilter) throws Exception {
+                             DbscFilter dbscFilter, DbscBindFilter dbscBindFilter)
+        throws Exception {
     http
             .authorizeHttpRequests(auth -> auth
-                    .requestMatchers("/login", "/css/**").permitAll()
+                    .requestMatchers("/login", "/css/**",
+                            "/dbsc-soft-client.js", "/dbsc-soft-sw.js").permitAll()
+                    // Optional, and both lines go together: only if you run the
+                    // Soft DBSC client. Drop this matcher AND the addFilterAfter at
+                    // the bottom of the chain if dbsc.soft.enabled is false.
+                    .requestMatchers("/dbsc/bind").authenticated()
                     // The DBSC requirement, alongside authentication -- both in the one
                     // rule, since a second rule for the same pattern is unreachable.
                     .requestMatchers("/api/**").access(dbsc::authorizationDecision)
@@ -281,7 +313,8 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
             .formLogin(form -> form
                     .loginPage("/login")
                     .successHandler((request, response, auth) -> {
-                        // The DBSC session id is minted here, independent of the
+                        // Required: mint the binding here, in the handler that ends
+                        // authentication. The DBSC session id is independent of the
                         // application's session id, which is passed as the second
                         // argument. Keep the value if you want to call terminate()
                         // by value; otherwise read it back with sessionFor(request).
@@ -293,7 +326,10 @@ SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
             .logout(logout -> logout.logoutSuccessHandler((request, response, auth) ->
                     dbsc.sessionFor(request)
                             .ifPresent(s -> dbsc.terminate(s.id(), request, response))))
-            .addFilterBefore(dbscFilter, CsrfFilter.class);
+            .addFilterBefore(dbscFilter, CsrfFilter.class)
+            // Optional, like the /dbsc/bind matcher above: the two go together, and
+            // both are the Soft DBSC fallback's.
+            .addFilterAfter(dbscBindFilter, CsrfFilter.class);
     return http.build();
 }
 ```
@@ -313,7 +349,8 @@ DBSC binds a session that already exists, so it composes with any authentication
 mechanism — including OIDC, whose callback is cross-site. `bind()` names the session
 with a single-use token in the registration URL rather than a cookie, so the
 registration POST Chromium issues needs no session cookie and the cross-site initiator
-does not matter:
+does not matter. Like the form-login example above, this is the fully wired shape with
+Soft DBSC included.
 
 ```java
 @Configuration
@@ -326,7 +363,8 @@ public class OidcSecurityConfig {
             throws Exception {
         http
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/login/**", "/oauth2/**", "/error").permitAll()
+                        .requestMatchers("/login/**", "/oauth2/**", "/error",
+                                "/dbsc-soft-client.js", "/dbsc-soft-sw.js").permitAll()
                         // Soft DBSC only, and it goes with the addFilterAfter below.
                         .requestMatchers("/dbsc/bind").authenticated()
                         // The DBSC requirement, both conditions in the one rule.
@@ -341,6 +379,9 @@ public class OidcSecurityConfig {
                               auth.getName(), request, response);
                     response.sendRedirect("/");
                 }))
+                .logout(logout -> logout.logoutSuccessHandler((request, response, auth) ->
+                        dbsc.sessionFor(request)
+                                .ifPresent(s -> dbsc.terminate(s.id(), request, response))))
                 .addFilterBefore(dbscFilter, CsrfFilter.class)
                 // Soft DBSC only: with dbsc.soft.enabled off, drop this and the
                 // /dbsc/bind matcher above. See the note under "OIDC with Soft DBSC
@@ -396,17 +437,22 @@ public class OidcSecurityConfig {
 
     @Bean
     SecurityFilterChain appChain(HttpSecurity http, DbscService dbsc,
-                                 DbscFilter dbscFilter) throws Exception {
+                                 DbscFilter dbscFilter, DbscBindFilter dbscBindFilter)
+            throws Exception {
         http
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/login/**", "/oauth2/**", "/error").permitAll()
-                        // No /dbsc/bind matcher: with soft disabled the route is not
-                        // served, and admitting it would only advertise a path that is
-                        // not there.
-                        .requestMatchers("/dbsc/bind").authenticated()
+                        // No /dbsc/bind matcher: the route is not served with soft
+                        // disabled, and admitting it would only advertise a path that is
+                        // not there. DbscBindFilter goes with it. See "What you give up".
                         .requestMatchers("/api/**").access(dbsc::authorizationDecision)
                         .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2.successHandler((request, response, auth) -> {
+                    // Required: form login's success handler is not the only one that
+                    // ends authentication, so every mechanism makes the same one call.
+                    // Here the offer it writes is unread -- the callback is cross-site --
+                    // but the binding is what the guard looks up; without it there is
+                    // nothing to find.
                     String appSessionId = request.getSession().getId();
                     dbsc.bind(UUID.randomUUID().toString(), appSessionId,
                               auth.getName(), request, response);
